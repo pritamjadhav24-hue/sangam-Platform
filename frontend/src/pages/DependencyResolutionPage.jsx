@@ -1,0 +1,5 @@
+import { useState } from 'react';
+export default function DependencyResolutionPage({ onDomicile, navigate }) {
+  const [result, setResult] = useState(null); async function initiate() { setResult(await onDomicile()); }
+  return <main className="container narrow"><div className="card dependency"><p className="eyebrow">Dependency orchestration · अनिवार्य पूर्वअट</p><h1>Domicile proof is missing</h1><p>The scholarship needs a Maharashtra domicile record. An integrated Revenue Department service can issue it now, then return a verified proof reference directly to this application.</p><div className="dag"><span>SCH-MH-2026</span><b>requires</b><span className="missing">DOMICILE PROOF</span><b>→</b><span>REV-MAHA-101</span></div>{!result ? <button className="primary" onClick={initiate}>Initiate Prerequisite Domicile Service</button> : <><div className="alert success"><b>DOMICILE_ISSUED</b> — {result.message} Reference: {result.recordId}</div><button className="primary" onClick={() => navigate('review')}>Refresh verified summary</button></>}</div></main>
+}
