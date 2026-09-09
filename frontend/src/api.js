@@ -22,4 +22,6 @@ export const api = {
   audit: () => request('/admin/audit-trail'),
   integrationHealth: () => request('/admin/integration-health'),
   dependencyRegistry: () => request('/admin/dependency-registry'),
+  notifications: (role) => request(`/${role.toLowerCase()}/notifications`),
+  markNotificationRead: (notificationId) => request(`/notifications/${notificationId}/read`, { method: 'POST' }),
 };

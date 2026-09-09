@@ -24,7 +24,7 @@ def action(body: Action, user: dict = Depends(require_roles("OFFICER"))):
                 app, review = entity_review_action(body.reviewId, body.action, body.officerId, body.remarks)
         except ValueError as error: raise HTTPException(400, str(error))
         if not app: raise HTTPException(404, "Entity review not found")
-        event_bus.publish("OFFICER_ENTITY_REVIEW_ACTION" if body.reviewId not in CONFLICT_REVIEWS else "OFFICER_CONFLICT_REVIEW_ACTION", {"appId": app["appId"], "reviewId": body.reviewId, "consentId": app.get("consentId"), "officerId": body.officerId, "decision": body.action, "selectedSource": body.selectedSource})
+        event_bus.publish("OFFICER_ENTITY_REVIEW_ACTION" if body.reviewId not in CONFLICT_REVIEWS else "OFFICER_CONFLICT_REVIEW_ACTION", {"citizenId": app["citizenId"], "appId": app["appId"], "reviewId": body.reviewId, "consentId": app.get("consentId"), "officerId": body.officerId, "decision": body.action, "selectedSource": body.selectedSource})
         if body.reviewId in CONFLICT_REVIEWS:
             audit_bus.append(body.officerId, "CONFLICT_RESOLUTION", "Officer resolved conflicting canonical values", "Cross-system sources", body.action, app.get("consentId"), payload={"appId": app["appId"], "conflictId": body.reviewId, "canonicalField": review["canonicalField"], "selectedSource": body.selectedSource, "selectedValue": review.get("selectedValue"), "actorRole": user["role"]}, correlation_id=app["appId"])
         else:
@@ -33,6 +33,6 @@ def action(body: Action, user: dict = Depends(require_roles("OFFICER"))):
     try: app = officer_action(body.appId, body.action, body.remarks)
     except ValueError as error: raise HTTPException(400, str(error))
     if not app: raise HTTPException(404, "Application not found")
-    event_bus.publish("OFFICER_ACTION", {"appId": body.appId, "consentId": app.get("consentId"), "officerId": body.officerId, "action": body.action})
+    event_bus.publish("OFFICER_ACTION", {"citizenId": app["citizenId"], "appId": body.appId, "consentId": app.get("consentId"), "officerId": body.officerId, "action": body.action})
     audit_bus.append(body.officerId, "APPLICATION", "Officer workflow decision", "Higher Education Department", body.action, app.get("consentId"), payload={"appId": body.appId, "remarks": body.remarks, "actorRole": user["role"]}, correlation_id=body.appId)
     return app

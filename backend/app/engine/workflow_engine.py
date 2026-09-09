@@ -68,7 +68,7 @@ def create_entity_reviews(app: dict) -> list[dict]:
         }
         ENTITY_REVIEWS[review_id] = review
         reviews.append(review)
-        event_bus.publish("ENTITY_MATCH_REVIEW_REQUIRED", {"appId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "source": requirement["source"], "confidenceLevel": "MEDIUM"})
+        event_bus.publish("ENTITY_MATCH_REVIEW_REQUIRED", {"citizenId": app["citizenId"], "appId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "source": requirement["source"], "confidenceLevel": "MEDIUM"})
     return reviews
 
 
@@ -110,7 +110,7 @@ def create_conflict_reviews(app: dict) -> list[dict]:
         requirement = next((item for item in app["requirements"] if item["code"] == conflict["requirementCode"]), None)
         if requirement:
             requirement["status"] = "CONFLICT_DETECTED"
-        event_bus.publish("CONFLICT_DETECTED", {"appId": app["appId"], "conflictId": review_id, "canonicalField": conflict["canonicalField"], "sources": [item["sourceSystem"] for item in conflict["sources"]]})
+        event_bus.publish("CONFLICT_DETECTED", {"citizenId": app["citizenId"], "appId": app["appId"], "conflictId": review_id, "canonicalField": conflict["canonicalField"], "sources": [item["sourceSystem"] for item in conflict["sources"]]})
         audit_bus.append("SYSTEM", "CONFLICT", "Conflicting trusted source values detected", "Cross-system sources", "DETECT", app.get("consentId"), payload={"appId": app["appId"], "conflictId": review_id, "canonicalField": conflict["canonicalField"], "sources": [item["sourceSystem"] for item in conflict["sources"]]}, correlation_id=app["appId"])
     return reviews
 
@@ -145,7 +145,7 @@ def conflict_review_action(review_id: str, decision: str, officer_id: str, remar
         transition_application(app, "VERIFICATION_FAILED")
     if decision == "SELECT" and not any(item["status"] == "WAITING_FOR_OFFICER" for item in app.get("conflictReviews", []) + app.get("entityReviews", [])) and not any(item["status"] in {"REVIEW_REQUIRED", "UNRESOLVED", "CONFLICT_DETECTED"} for item in app["requirements"]):
         transition_application(app, "IN_PROGRESS")
-    event_bus.publish("CONFLICT_RESOLVED", {"appId": app["appId"], "conflictId": review_id, "canonicalField": review["canonicalField"], "decision": decision, "selectedSource": selected_source, "officerId": officer_id})
+    event_bus.publish("CONFLICT_RESOLVED", {"citizenId": app["citizenId"], "appId": app["appId"], "conflictId": review_id, "canonicalField": review["canonicalField"], "decision": decision, "selectedSource": selected_source, "officerId": officer_id})
     return app, review
 
 
@@ -195,8 +195,10 @@ def officer_action(app_id: str, action: str, remarks: str):
             raise ValueError("Application contains unresolved verification conflicts.")
         transition_application(app, "APPROVED")
         transition_application(app, "COMPLETED")
+        event_bus.publish("APPLICATION_COMPLETED", {"citizenId": app["citizenId"], "appId": app["appId"], "status": app["status"]})
     elif action == "REJECT":
         transition_application(app, "REJECTED")
+        event_bus.publish("APPLICATION_REJECTED", {"citizenId": app["citizenId"], "appId": app["appId"], "status": app["status"]})
     else:
         transition_application(app, "WAITING_FOR_USER")
     for item in app["timeline"]:

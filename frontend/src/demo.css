@@ -13,4 +13,13 @@
 .review-box { padding: 8px; margin-bottom: 8px; border-left: 3px solid #d19a35; background: #fffaf0; }
 .review-box b, .review-box small { display: block; }
 .conflict-box { border-left-color: #b8791d; }
+.notification-wrap { position: relative; }
+.notification-button { border: 1px solid #cbd9df; background: #fff; color: #24516e; border-radius: 3px; padding: 8px 10px; cursor: pointer; font: inherit; }
+.notification-badge { display: inline-grid; place-items: center; min-width: 19px; height: 19px; margin-left: 4px; border-radius: 10px; background: #b64636; color: #fff; font-size: 11px; }
+.notification-panel { position: absolute; z-index: 10; right: 0; top: 42px; width: 330px; max-height: 420px; overflow-y: auto; background: #fff; border: 1px solid #d4e0e5; box-shadow: 0 5px 18px #14213d22; padding: 8px; }
+.notification-item { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid #edf1f2; background: #fff; padding: 10px; cursor: pointer; color: #29496b; }
+.notification-item.unread { background: #f1f7f8; }
+.notification-item b, .notification-item span, .notification-item small { display: block; }
+.notification-item span { margin-top: 3px; color: #506275; }
+.notification-item small { margin-top: 5px; color: #708090; }
 @media (max-width: 760px) { .dependency-grid { grid-template-columns: 1fr; gap: 4px; } }

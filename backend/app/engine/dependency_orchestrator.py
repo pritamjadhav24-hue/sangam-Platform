@@ -75,7 +75,7 @@ def initiate_domicile(citizen_id: str, app: dict) -> dict:
         dependency["providerStatus"] = "UNAVAILABLE" if not is_integration_available("Revenue Department") else "DEGRADED"
         dependency["lastError"] = "Revenue Department domicile service unavailable."
         dependency["failureHistory"].append({"attempt": dependency["attempts"], "at": dependency["updatedAt"], "error": dependency["lastError"]})
-        failure_payload = {"appId": app["appId"], "dependencyId": dependency["dependencyId"], "provider": dependency["provider"], "attempt": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "status": dependency["status"], "error": dependency["lastError"]}
+        failure_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "provider": dependency["provider"], "attempt": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "status": dependency["status"], "error": dependency["lastError"]}
         event_bus.publish("DEPENDENCY_SERVICE_FAILED", failure_payload)
         audit_bus.append("SYSTEM", "DEPENDENCY", "Revenue domicile service failure", dependency["provider"], "FAIL", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "attempt": dependency["attempts"], "error": dependency["lastError"]}, correlation_id=app["appId"])
         if dependency["attempts"] < dependency["maxAttempts"]:
