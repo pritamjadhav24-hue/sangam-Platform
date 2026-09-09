@@ -39,7 +39,7 @@ def mapping_evidence(requirement: str, record: dict, source_system: str, adapter
     requirement_specs = {
         "INCOME_PROOF": [("annual_income", "incomeAmount", "parse numeric INR amount")],
         "CASTE_PROOF": [("category", "category", "OBC enum normalization")],
-        "ACADEMIC_RECORD": [("qualifying_marks", "qualifyingMarks", "numeric conversion"), ("qualifying_marks", "percentage", "numeric conversion")],
+        "ACADEMIC_RECORD": [("qualifying_marks", "qualifyingMarks", "numeric conversion"), ("qualifying_marks", "percentage", "numeric conversion"), ("familyAnnualIncome", "incomeAmount", "parse numeric INR amount")],
         "DOMICILE_PROOF": [("state", "state", "direct"), ("state", "domicileStatus", "verified-record rule")],
         "BANK_DETAILS": [("accountStatus", "bankStatus", "field rename")],
         "IDENTITY": [],

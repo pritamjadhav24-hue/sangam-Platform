@@ -14,7 +14,7 @@ export const api = {
   submit: (appId, timeout = false) => request('/citizen/submit', { method: 'POST', body: JSON.stringify({ citizenId: 'CITIZEN_001', appId, simulateTimeout: timeout }) }),
   track: (appId) => request(`/citizen/track/${appId}`),
   queue: () => request('/officer/queue'),
-  action: (appId, action, remarks, reviewId) => request('/officer/action', { method: 'POST', body: JSON.stringify({ appId, action, remarks, reviewId }) }),
+  action: (appId, action, remarks, reviewId, selectedSource) => request('/officer/action', { method: 'POST', body: JSON.stringify({ appId, action, remarks, reviewId, selectedSource }) }),
   audit: () => request('/admin/audit-trail'),
   integrationHealth: () => request('/admin/integration-health'),
 };

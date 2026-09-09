@@ -12,4 +12,5 @@
 .metric-row b { color: #16736b; font-size: 22px; margin-right: 5px; }
 .review-box { padding: 8px; margin-bottom: 8px; border-left: 3px solid #d19a35; background: #fffaf0; }
 .review-box b, .review-box small { display: block; }
+.conflict-box { border-left-color: #b8791d; }
 @media (max-width: 760px) { .dependency-grid { grid-template-columns: 1fr; gap: 4px; } }

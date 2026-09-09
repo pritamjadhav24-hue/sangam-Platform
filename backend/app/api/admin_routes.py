@@ -6,6 +6,7 @@ from typing import Optional
 from app.core.audit_bus import audit_bus
 from app.core.event_bus import event_bus
 from app.engine.adapters import integration_health, set_integration_availability
+from app.mocks.education_dept import set_income_conflict
 
 router = APIRouter(prefix="/api/admin", tags=["Administration"])
 @router.get("/audit-trail")
@@ -16,6 +17,10 @@ class IntegrationAvailability(BaseModel):
     system: str
     available: bool
     error: Optional[str] = None
+
+
+class ConflictSimulation(BaseModel):
+    enabled: bool
 
 
 @router.get("/integration-health")
@@ -29,3 +34,8 @@ def simulate_integration_availability(body: IntegrationAvailability):
         return set_integration_availability(body.system, body.available, body.error)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error))
+
+
+@router.post("/conflict-simulation")
+def simulate_conflict(body: ConflictSimulation):
+    return {"enabled": body.enabled, "educationFamilyAnnualIncome": set_income_conflict(body.enabled)}

@@ -46,7 +46,8 @@ def ensure_domicile_dependency(app: dict) -> dict:
     DEPENDENCIES[dependency_id] = dependency
     app["dependencyIds"].append(dependency_id)
     app["dependencies"].append(dependency)
-    transition_application(app, "WAITING_FOR_DEPENDENCY")
+    if app.get("status") != "CONFLICT_DETECTED":
+        transition_application(app, "WAITING_FOR_DEPENDENCY")
     event_bus.publish("MISSING_PREREQUISITE_DETECTED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "requiredData": "DOMICILE_PROOF"})
     event_bus.publish("DEPENDENCY_CREATED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "provider": dependency["provider"]})
     return dependency
@@ -81,7 +82,8 @@ def initiate_domicile(citizen_id: str, app: dict) -> dict:
     domicile = next((item for item in app["requirements"] if item["code"] == "DOMICILE_PROOF"), None)
     if domicile:
         domicile.update({"status": "FOUND", "recordId": record["recordId"], "canonical": map_record("DOMICILE_PROOF", record), "verifiedOn": record["validUntil"], "adapter": "REST API"})
-    transition_application(app, "IN_PROGRESS")
+    if not any(item.get("status") == "WAITING_FOR_OFFICER" for item in app.get("conflictReviews", []) + app.get("entityReviews", [])):
+        transition_application(app, "IN_PROGRESS")
     event_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "recordId": record["recordId"], "service": "REV-MAHA-101"}
     event_bus.publish("DOMICILE_ISSUED", event_payload)
     event_bus.publish("DEPENDENCY_RESOLVED", event_payload)

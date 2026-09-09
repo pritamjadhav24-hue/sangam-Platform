@@ -4,12 +4,15 @@ import itertools
 from datetime import datetime, timezone
 
 from app.core.event_bus import event_bus
+from app.core.audit_bus import audit_bus
 
 APPLICATIONS: dict[str, dict] = {}
 DEPENDENCIES: dict[str, dict] = {}
 ENTITY_REVIEWS: dict[str, dict] = {}
+CONFLICT_REVIEWS: dict[str, dict] = {}
 _counter = itertools.count(142)
 _review_counter = itertools.count(1)
+_conflict_counter = itertools.count(1)
 STAGES = ["Submitted", "Identity", "Income", "Academic", "Domicile", "Officer Review", "Completed"]
 CANONICAL_STATUSES = {
     "DRAFT", "SUBMITTED", "IN_PROGRESS", "WAITING_FOR_DEPENDENCY", "WAITING_FOR_USER",
@@ -92,6 +95,60 @@ def entity_review_action(review_id: str, decision: str, officer_id: str, remarks
     return app, review
 
 
+def create_conflict_reviews(app: dict) -> list[dict]:
+    reviews = []
+    for conflict in app.get("conflicts", []):
+        review_id = f"CR-{app['appId']}-{next(_conflict_counter):03d}"
+        review = {
+            "reviewId": review_id, "conflictId": review_id, "appId": app["appId"], "journeyId": app["appId"],
+            "requirementCode": conflict["requirementCode"], "canonicalField": conflict["canonicalField"],
+            "sources": conflict["sources"], "status": "WAITING_FOR_OFFICER", "decision": None,
+            "createdAt": conflict.get("detectedAt", _now()), "updatedAt": _now(), "officerId": None,
+        }
+        CONFLICT_REVIEWS[review_id] = review
+        reviews.append(review)
+        requirement = next((item for item in app["requirements"] if item["code"] == conflict["requirementCode"]), None)
+        if requirement:
+            requirement["status"] = "CONFLICT_DETECTED"
+        event_bus.publish("CONFLICT_DETECTED", {"appId": app["appId"], "conflictId": review_id, "canonicalField": conflict["canonicalField"], "sources": [item["sourceSystem"] for item in conflict["sources"]]})
+        audit_bus.append("SYSTEM", "CONFLICT", "Conflicting trusted source values detected", "Cross-system sources", "DETECT", app.get("consentId"), payload={"appId": app["appId"], "conflictId": review_id, "canonicalField": conflict["canonicalField"], "sources": [item["sourceSystem"] for item in conflict["sources"]]}, correlation_id=app["appId"])
+    return reviews
+
+
+def conflict_review_action(review_id: str, decision: str, officer_id: str, remarks: str, selected_source: str | None = None):
+    review = CONFLICT_REVIEWS.get(review_id)
+    if not review:
+        return None, None
+    if decision not in {"SELECT", "REJECT"} or not remarks.strip():
+        raise ValueError("Conflict review requires SELECT or REJECT and mandatory remarks.")
+    if decision == "SELECT" and not selected_source:
+        raise ValueError("Select one trusted source before resolving the conflict.")
+    selected = next((item for item in review["sources"] if item["sourceSystem"] == selected_source), None) if selected_source else None
+    if decision == "SELECT" and not selected:
+        raise ValueError("Selected source is not part of this conflict.")
+    app = APPLICATIONS.get(review["appId"])
+    if not app:
+        return None, None
+    requirement = next((item for item in app["requirements"] if item["code"] == review["requirementCode"]), None)
+    if not requirement:
+        return None, None
+    review.update({"status": "RESOLVED" if decision == "SELECT" else "REJECTED", "decision": decision, "selectedSource": selected_source, "selectedValue": selected.get("value") if selected else None, "officerId": officer_id, "remarks": remarks, "updatedAt": _now()})
+    conflict = next((item for item in app.get("conflicts", []) if item.get("canonicalField") == review["canonicalField"]), None)
+    if conflict:
+        conflict.update({"status": review["status"], "resolvedAt": review["updatedAt"], "selectedSource": selected_source, "selectedValue": selected.get("value") if selected else None})
+    if decision == "SELECT":
+        requirement["status"] = "FOUND"
+        requirement.setdefault("canonical", {})[review["canonicalField"]] = selected["value"]
+        requirement["provenance"] = {"sourceSystem": selected["sourceSystem"], "sourceRecordId": selected.get("sourceRecordId"), "sourceField": selected.get("sourceField")}
+    else:
+        requirement["status"] = "UNRESOLVED"
+        transition_application(app, "VERIFICATION_FAILED")
+    if decision == "SELECT" and not any(item["status"] == "WAITING_FOR_OFFICER" for item in app.get("conflictReviews", []) + app.get("entityReviews", [])) and not any(item["status"] in {"REVIEW_REQUIRED", "UNRESOLVED", "CONFLICT_DETECTED"} for item in app["requirements"]):
+        transition_application(app, "IN_PROGRESS")
+    event_bus.publish("CONFLICT_RESOLVED", {"appId": app["appId"], "conflictId": review_id, "canonicalField": review["canonicalField"], "decision": decision, "selectedSource": selected_source, "officerId": officer_id})
+    return app, review
+
+
 def create_application(citizen_id: str, discovery: dict, eligibility: dict) -> dict:
     app_id = f"SCH-MH-2026-{next(_counter):05d}"
     created_at = _now()
@@ -107,11 +164,15 @@ def create_application(citizen_id: str, discovery: dict, eligibility: dict) -> d
         "updatedAt": created_at, "requirements": discovery["requirements"], "eligibility": eligibility,
         "timeline": timeline, "statusHistory": [{"status": "DRAFT", "at": created_at}],
         "dependencyIds": [], "dependencies": [], "consentId": None, "officerRemarks": None,
+        "conflicts": discovery.get("conflicts", []), "conflictReviews": [],
     }
     APPLICATIONS[app_id] = app
     app["entityReviews"] = create_entity_reviews(app)
+    app["conflictReviews"] = create_conflict_reviews(app)
     transition_application(app, "IN_PROGRESS")
-    if app["entityReviews"]:
+    if app["conflictReviews"]:
+        transition_application(app, "CONFLICT_DETECTED")
+    elif app["entityReviews"]:
         transition_application(app, "WAITING_FOR_OFFICER")
     elif any(item.get("resolution", {}).get("confidenceLevel") == "LOW" for item in app["requirements"]):
         transition_application(app, "VERIFICATION_FAILED")
@@ -128,10 +189,10 @@ def officer_action(app_id: str, action: str, remarks: str):
     if action not in {"APPROVE", "REJECT", "REQUEST_INFO"} or not remarks.strip(): raise ValueError("A decision and mandatory remarks are required.")
     app["officerRemarks"] = remarks
     if action == "APPROVE":
-        if any(review["status"] == "WAITING_FOR_OFFICER" for review in app.get("entityReviews", [])):
-            raise ValueError("Entity-resolution review must be decided before application approval.")
-        if any(requirement["status"] in {"REVIEW_REQUIRED", "UNRESOLVED"} for requirement in app["requirements"]):
-            raise ValueError("Application contains unresolved entity matches.")
+        if any(review["status"] == "WAITING_FOR_OFFICER" for review in app.get("entityReviews", []) + app.get("conflictReviews", [])):
+            raise ValueError("All entity and conflict reviews must be decided before application approval.")
+        if any(requirement["status"] in {"REVIEW_REQUIRED", "UNRESOLVED", "CONFLICT_DETECTED"} for requirement in app["requirements"]):
+            raise ValueError("Application contains unresolved verification conflicts.")
         transition_application(app, "APPROVED")
         transition_application(app, "COMPLETED")
     elif action == "REJECT":
