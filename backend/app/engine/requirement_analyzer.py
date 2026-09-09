@@ -25,8 +25,8 @@ def discover(citizen: dict, simulate_timeout: bool = False) -> dict:
             requirements.append({"code": code, "source": SOURCES[code], "status": "MISSING", "action": "Initiate Revenue Domicile Service" if code == "DOMICILE_PROOF" else "Queued connector retry", "adapter": fetched["adapter"]})
             continue
         raw_records.append(record)
-        payload = validate_payload(record); resolution = resolve(citizen, record) if record.get("name") else {"status": "MATCH", "score": 1}
+        payload = validate_payload(record); resolution = resolve(citizen, record) if record.get("name") else {"status": "MATCH", "decision": "AUTO_ACCEPT", "confidenceLevel": "HIGH", "score": 1, "matchedFields": ["source-record-verified"]}
         canonical = map_record(code, record); validation = validate(code, canonical, record)
-        status = "FOUND" if payload["valid"] and resolution["status"] == "MATCH" and validation["valid"] else "EXCEPTION"
+        status = "FOUND" if payload["valid"] and resolution["decision"] == "AUTO_ACCEPT" and validation["valid"] else "REVIEW_REQUIRED" if resolution["decision"] == "REVIEW" else "UNRESOLVED"
         requirements.append({"code": code, "source": SOURCES[code], "status": status, "recordId": record.get("recordId", record.get("studentId")), "canonical": canonical, "resolution": resolution, "validation": validation, "verifiedOn": record.get("validUntil"), "adapter": fetched["adapter"], "delayed": fetched.get("delayed", False)})
     return {"requirements": requirements, "conflicts": detect_conflicts(raw_records), "resilienceBanner": "Verification temporarily delayed; retrying automatically in background." if any(r.get("delayed") for r in requirements) else None}

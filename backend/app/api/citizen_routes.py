@@ -47,6 +47,14 @@ def _record_discovery(citizen_id: str, result: dict, app_id: Optional[str] = Non
             event_bus.publish(f"{item['code']}_VERIFIED", {"citizenId": citizen_id, "appId": app_id, "requirement": item["code"]})
 
 
+def _record_entity_reviews(app: dict) -> None:
+    for review in app.get("entityReviews", []):
+        if review.get("auditRecorded"):
+            continue
+        audit_bus.append(app["citizenId"], "ENTITY_RESOLUTION", "Medium-confidence cross-system match requires human review", review["source"], "REVIEW_REQUIRED", app.get("consentId"), payload={"reviewId": review["reviewId"], "appId": app["appId"], "requirementCode": review["requirementCode"], "sourceRecordId": review["sourceRecordId"], "confidenceScore": review["confidenceScore"], "confidenceLevel": review["confidenceLevel"]}, correlation_id=app["appId"])
+        review["auditRecorded"] = True
+
+
 def _require_consent(citizen_id: str, purpose: str = PURPOSE, attributes: Optional[List[str]] = None) -> dict:
     try:
         return authorize_access(citizen_id, CONSUMER, purpose, attributes)
@@ -101,6 +109,7 @@ def consent(body: Consent):
         app = find_active_application(body.citizenId) or create_application(body.citizenId, result, evaluate(result["requirements"]))
         app["consentId"] = receipt["consentId"]
         _record_discovery(body.citizenId, result, app["appId"])
+        _record_entity_reviews(app)
         dependency_record = ensure_domicile_dependency(app) if any(item["code"] == "DOMICILE_PROOF" and item["status"] != "FOUND" for item in result["requirements"]) else None
         receipt = {**receipt, "appId": app["appId"], "applicationStatus": app["status"], "dependencyId": dependency_record["dependencyId"] if dependency_record else None}
         event_bus.publish("CONSENT_GRANTED", {"citizenId": body.citizenId, "appId": app["appId"], "consentId": receipt["consentId"], "purpose": receipt["purpose"]})
@@ -134,6 +143,7 @@ def submit(body: Submit):
     app["requirements"] = result["requirements"]
     app["eligibility"] = eligibility
     _record_discovery(body.citizenId, result, app["appId"])
+    _record_entity_reviews(app)
     missing_domicile = any(item["code"] == "DOMICILE_PROOF" and item["status"] != "FOUND" for item in result["requirements"])
     if missing_domicile:
         transition_application(app, "WAITING_FOR_DEPENDENCY")
