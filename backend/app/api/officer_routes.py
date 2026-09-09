@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.core.audit_bus import audit_bus
+from app.core.event_bus import event_bus
 from app.engine.workflow_engine import APPLICATIONS, officer_action
 
 router = APIRouter(prefix="/api/officer", tags=["Officer"])
@@ -15,5 +16,6 @@ def action(body: Action):
     try: app = officer_action(body.appId, body.action, body.remarks)
     except ValueError as error: raise HTTPException(400, str(error))
     if not app: raise HTTPException(404, "Application not found")
-    audit_bus.append(body.officerId, "APPLICATION", "Officer workflow decision", "Higher Education Department", body.action, payload={"appId": body.appId, "remarks": body.remarks})
+    event_bus.publish("OFFICER_ACTION", {"appId": body.appId, "consentId": app.get("consentId"), "officerId": body.officerId, "action": body.action})
+    audit_bus.append(body.officerId, "APPLICATION", "Officer workflow decision", "Higher Education Department", body.action, app.get("consentId"), payload={"appId": body.appId, "remarks": body.remarks}, correlation_id=body.appId)
     return app

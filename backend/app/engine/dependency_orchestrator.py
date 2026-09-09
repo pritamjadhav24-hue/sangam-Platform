@@ -40,11 +40,13 @@ def ensure_domicile_dependency(app: dict) -> dict:
     app["dependencyIds"].append(dependency_id)
     app["dependencies"].append(dependency)
     transition_application(app, "WAITING_FOR_DEPENDENCY")
+    event_bus.publish("DEPENDENCY_CREATED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "provider": dependency["provider"]})
     return dependency
 
 
 def initiate_domicile(citizen_id: str, app: dict) -> dict:
     dependency = ensure_domicile_dependency(app)
+    event_bus.publish("REVENUE_SERVICE_REQUESTED", {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "service": "REV-MAHA-101"})
     record = issue_domicile(citizen_id)
     if not record:
         dependency["status"] = "VERIFICATION_FAILED"
@@ -59,9 +61,10 @@ def initiate_domicile(citizen_id: str, app: dict) -> dict:
     if domicile:
         domicile.update({"status": "FOUND", "recordId": record["recordId"], "canonical": map_record("DOMICILE_PROOF", record), "verifiedOn": record["validUntil"], "adapter": "REST API"})
     transition_application(app, "IN_PROGRESS")
-    event_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "recordId": record["recordId"], "service": "REV-MAHA-101"}
+    event_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "recordId": record["recordId"], "service": "REV-MAHA-101"}
     event_bus.publish("DOMICILE_ISSUED", event_payload)
     event_bus.publish("DEPENDENCY_RESOLVED", event_payload)
+    event_bus.publish("WORKFLOW_RESUMED", {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "status": app["status"]})
     return {
         "success": True, "appId": app["appId"], "dependencyId": dependency["dependencyId"],
         "dependencyStatus": dependency["status"], "applicationStatus": app["status"],
