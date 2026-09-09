@@ -8,6 +8,7 @@ from app.core.auth import require_roles
 from app.core.event_bus import event_bus
 from app.engine.adapters import integration_health, set_integration_availability
 from app.engine.registry import dependency_registry
+from app.core.demo_state import reset_demo_state
 from app.mocks.education_dept import set_income_conflict
 
 router = APIRouter(prefix="/api/admin", tags=["Administration"])
@@ -50,3 +51,9 @@ def simulate_conflict(body: ConflictSimulation, user: dict = Depends(require_rol
     value = set_income_conflict(body.enabled)
     audit_bus.append(user["userId"], "CONFLICT_SIMULATION", "Administrator changed deterministic conflict scenario", "Education Department", "SIMULATE", payload={"enabled": body.enabled, "actorRole": user["role"]})
     return {"enabled": body.enabled, "educationFamilyAnnualIncome": value}
+
+
+@router.post("/demo/reset")
+def reset_demo(user: dict = Depends(require_roles("ADMIN"))):
+    reset_demo_state()
+    return {"success": True, "message": "In-memory demo state reset to deterministic defaults.", "sessionReset": True}
