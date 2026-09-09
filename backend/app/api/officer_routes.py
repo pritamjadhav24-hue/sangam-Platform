@@ -8,7 +8,7 @@ class Action(BaseModel): appId: str; action: str; remarks: str; officerId: str =
 @router.get("/queue")
 def queue():
     # Least privilege: personal identity/contact information is deliberately absent.
-    apps = [a for a in APPLICATIONS.values() if a["status"] in {"UNDER_OFFICER_REVIEW", "RESUBMISSION_REQUIRED"}]
+    apps = [a for a in APPLICATIONS.values() if a["status"] in {"WAITING_FOR_OFFICER", "WAITING_FOR_USER"}]
     return {"applications": [{"appId": a["appId"], "status": a["status"], "eligibility": a["eligibility"], "requirements": [{"code": r["code"], "status": r["status"], "canonical": r.get("canonical", {})} for r in a["requirements"]]} for a in apps]}
 @router.post("/action")
 def action(body: Action):
