@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.core.audit_bus import audit_bus
+from app.core.auth import require_roles
 from app.core.event_bus import event_bus
 from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuthorizationError, authorize_access, create_consent, current, revoke_consent
 from app.engine.dependency_orchestrator import ensure_domicile_dependency, initiate_domicile
@@ -62,13 +63,19 @@ def _require_consent(citizen_id: str, purpose: str = PURPOSE, attributes: Option
         raise HTTPException(status_code=403, detail=f"Protected access denied: {error}")
 
 
+def _assert_own_citizen(user: dict, citizen_id: str) -> None:
+    if user.get("role") != "CITIZEN" or user.get("citizenId") != citizen_id:
+        raise HTTPException(status_code=403, detail="Citizens may access only their own services.")
+
+
 @router.get("/schemes")
-def schemes():
+def schemes(user: dict = Depends(require_roles("CITIZEN"))):
     return {"schemes": SCHEMES}
 
 
 @router.get("/discover")
-def discovery(citizen_id: str = "CITIZEN_001", simulate_timeout: bool = False, purpose: Optional[str] = None, attributes: Optional[List[str]] = None):
+def discovery(citizen_id: str = "CITIZEN_001", simulate_timeout: bool = False, purpose: Optional[str] = None, attributes: Optional[List[str]] = None, user: dict = Depends(require_roles("CITIZEN"))):
+    _assert_own_citizen(user, citizen_id)
     citizen = CITIZENS.get(citizen_id)
     if not citizen:
         raise HTTPException(404, "Citizen not found")
@@ -83,21 +90,23 @@ def discovery(citizen_id: str = "CITIZEN_001", simulate_timeout: bool = False, p
 
 
 @router.post("/orchestrate-dependency")
-def dependency(body: Dependency):
+def dependency(body: Dependency, user: dict = Depends(require_roles("CITIZEN"))):
+    _assert_own_citizen(user, body.citizenId)
     app = APPLICATIONS.get(body.appId) if body.appId else find_active_application(body.citizenId)
     if not app or app["citizenId"] != body.citizenId:
         raise HTTPException(404, "Application journey not found")
     consent_receipt = _require_consent(body.citizenId)
     result = initiate_domicile(body.citizenId, app)
     if result.get("success"):
-        audit_bus.append(body.citizenId, "DOMICILE_PROOF", "Mandatory scholarship prerequisite", "Revenue Department", "ISSUE", consent_receipt["consentId"], payload=result, correlation_id=app["appId"])
+        audit_bus.append(body.citizenId, "DOMICILE_PROOF", "Mandatory scholarship prerequisite", "Revenue Department", "ISSUE", consent_receipt["consentId"], payload={**result, "actorRole": user["role"]}, correlation_id=app["appId"])
     else:
-        audit_bus.append(body.citizenId, "DOMICILE_PROOF", "Mandatory scholarship prerequisite failed; retry remains available", "Revenue Department", "FAIL", consent_receipt["consentId"], payload={"dependencyId": result.get("dependencyId"), "attempts": result.get("attempts"), "status": result.get("dependencyStatus")}, correlation_id=app["appId"])
+        audit_bus.append(body.citizenId, "DOMICILE_PROOF", "Mandatory scholarship prerequisite failed; retry remains available", "Revenue Department", "FAIL", consent_receipt["consentId"], payload={"dependencyId": result.get("dependencyId"), "attempts": result.get("attempts"), "status": result.get("dependencyStatus"), "actorRole": user["role"]}, correlation_id=app["appId"])
     return result
 
 
 @router.post("/consent")
-def consent(body: Consent):
+def consent(body: Consent, user: dict = Depends(require_roles("CITIZEN"))):
+    _assert_own_citizen(user, body.citizenId)
     citizen = CITIZENS.get(body.citizenId)
     if not citizen:
         raise HTTPException(404, "Citizen not found")
@@ -115,12 +124,13 @@ def consent(body: Consent):
         dependency_record = ensure_domicile_dependency(app) if any(item["code"] == "DOMICILE_PROOF" and item["status"] != "FOUND" for item in result["requirements"]) else None
         receipt = {**receipt, "appId": app["appId"], "applicationStatus": app["status"], "dependencyId": dependency_record["dependencyId"] if dependency_record else None}
         event_bus.publish("CONSENT_GRANTED", {"citizenId": body.citizenId, "appId": app["appId"], "consentId": receipt["consentId"], "purpose": receipt["purpose"]})
-    audit_bus.append(body.citizenId, "CONSENT", receipt["purpose"], receipt["consumer"], receipt["decision"], receipt["consentId"], receipt, correlation_id=app["appId"] if app else None)
+    audit_bus.append(body.citizenId, "CONSENT", receipt["purpose"], receipt["consumer"], receipt["decision"], receipt["consentId"], {**receipt, "actorRole": user["role"]}, correlation_id=app["appId"] if app else None)
     return receipt
 
 
 @router.post("/consent/revoke")
-def revoke(body: RevokeConsent):
+def revoke(body: RevokeConsent, user: dict = Depends(require_roles("CITIZEN"))):
+    _assert_own_citizen(user, body.citizenId)
     try:
         receipt = revoke_consent(body.citizenId, body.consentId)
     except ConsentAuthorizationError as error:
@@ -128,12 +138,13 @@ def revoke(body: RevokeConsent):
     app = find_active_application(body.citizenId)
     correlation_id = app["appId"] if app else None
     event_bus.publish("CONSENT_REVOKED", {"citizenId": body.citizenId, "appId": correlation_id, "consentId": body.consentId})
-    audit_bus.append(body.citizenId, "CONSENT", "Citizen revoked scholarship data consent", CONSUMER, "REVOKE", body.consentId, payload={"consentId": body.consentId}, correlation_id=correlation_id)
+    audit_bus.append(body.citizenId, "CONSENT", "Citizen revoked scholarship data consent", CONSUMER, "REVOKE", body.consentId, payload={"consentId": body.consentId, "actorRole": user["role"]}, correlation_id=correlation_id)
     return receipt
 
 
 @router.post("/submit")
-def submit(body: Submit):
+def submit(body: Submit, user: dict = Depends(require_roles("CITIZEN"))):
+    _assert_own_citizen(user, body.citizenId)
     citizen = CITIZENS.get(body.citizenId)
     if not citizen:
         raise HTTPException(404, "Citizen not found")
@@ -156,15 +167,17 @@ def submit(body: Submit):
         transition_application(app, "SUBMITTED")
         transition_application(app, "WAITING_FOR_OFFICER")
     event_bus.publish("APPLICATION_SUBMITTED", {"citizenId": body.citizenId, "appId": app["appId"], "consentId": consent_receipt["consentId"]})
-    audit_bus.append(body.citizenId, "APPLICATION", "Scholarship application assembly", "GovOrchestrator", "SUBMIT", consent_receipt["consentId"], payload={"appId": app["appId"], "eligible": eligibility["eligible"]}, correlation_id=app["appId"])
+    audit_bus.append(body.citizenId, "APPLICATION", "Scholarship application assembly", "GovOrchestrator", "SUBMIT", consent_receipt["consentId"], payload={"appId": app["appId"], "eligible": eligibility["eligible"], "actorRole": user["role"]}, correlation_id=app["appId"])
     return app
 
 
 @router.get("/track/{app_id}")
-def track(app_id: str):
+def track(app_id: str, user: dict = Depends(require_roles("CITIZEN", "OFFICER"))):
     if app_id not in APPLICATIONS:
         raise HTTPException(404, "Application not found")
     app = APPLICATIONS[app_id]
+    if user.get("role") == "CITIZEN" and app["citizenId"] != user.get("citizenId"):
+        raise HTTPException(status_code=403, detail="Citizens may track only their own applications.")
     receipt = current(app["citizenId"])
     consent_view = None
     if receipt:
