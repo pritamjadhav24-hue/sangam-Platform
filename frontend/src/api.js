@@ -16,4 +16,5 @@ export const api = {
   queue: () => request('/officer/queue'),
   action: (appId, action, remarks, reviewId) => request('/officer/action', { method: 'POST', body: JSON.stringify({ appId, action, remarks, reviewId }) }),
   audit: () => request('/admin/audit-trail'),
+  integrationHealth: () => request('/admin/integration-health'),
 };

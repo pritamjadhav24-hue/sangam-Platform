@@ -4,6 +4,8 @@ import itertools
 from datetime import datetime, timezone
 
 from app.core.event_bus import event_bus
+from app.core.audit_bus import audit_bus
+from app.engine.adapters import is_integration_available
 from app.engine.semantic_mapper import map_record
 from app.engine.workflow_engine import DEPENDENCIES, transition_application
 from app.mocks.revenue_dept import issue_domicile
@@ -35,6 +37,11 @@ def ensure_domicile_dependency(app: dict) -> dict:
         "createdAt": timestamp,
         "updatedAt": timestamp,
         "resultReference": None,
+        "attempts": 0,
+        "maxAttempts": 3,
+        "providerStatus": "AVAILABLE",
+        "lastError": None,
+        "failureHistory": [],
     }
     DEPENDENCIES[dependency_id] = dependency
     app["dependencyIds"].append(dependency_id)
@@ -47,17 +54,30 @@ def ensure_domicile_dependency(app: dict) -> dict:
 
 def initiate_domicile(citizen_id: str, app: dict) -> dict:
     dependency = ensure_domicile_dependency(app)
+    if dependency["status"] == "COMPLETED":
+        return {"success": True, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "service": "REV-MAHA-101", "message": "Domicile is already linked to the scholarship application.", "recordId": dependency["resultReference"], "attempts": dependency["attempts"]}
+    dependency["attempts"] += 1
+    dependency["updatedAt"] = _now()
     event_bus.publish("REVENUE_SERVICE_REQUESTED", {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "service": "REV-MAHA-101"})
     record = issue_domicile(citizen_id)
     if not record:
-        dependency["status"] = "VERIFICATION_FAILED"
-        dependency["updatedAt"] = _now()
-        transition_application(app, "VERIFICATION_FAILED")
-        return {"success": False, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "message": "Domicile service could not issue a record."}
+        dependency["status"] = "WAITING_FOR_DEPENDENCY"
+        dependency["providerStatus"] = "UNAVAILABLE" if not is_integration_available("Revenue Department") else "DEGRADED"
+        dependency["lastError"] = "Revenue Department domicile service unavailable."
+        dependency["failureHistory"].append({"attempt": dependency["attempts"], "at": dependency["updatedAt"], "error": dependency["lastError"]})
+        failure_payload = {"appId": app["appId"], "dependencyId": dependency["dependencyId"], "provider": dependency["provider"], "attempt": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "status": dependency["status"], "error": dependency["lastError"]}
+        event_bus.publish("DEPENDENCY_SERVICE_FAILED", failure_payload)
+        audit_bus.append("SYSTEM", "DEPENDENCY", "Revenue domicile service failure", dependency["provider"], "FAIL", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "attempt": dependency["attempts"], "error": dependency["lastError"]}, correlation_id=app["appId"])
+        if dependency["attempts"] < dependency["maxAttempts"]:
+            event_bus.publish("DEPENDENCY_RETRY_SCHEDULED", failure_payload)
+            audit_bus.append("SYSTEM", "DEPENDENCY", "Bounded retry scheduled", dependency["provider"], "RETRY", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "attempt": dependency["attempts"], "maxAttempts": dependency["maxAttempts"]}, correlation_id=app["appId"])
+        return {"success": False, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "attempts": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "providerStatus": dependency["providerStatus"], "message": "Revenue Department is unavailable; the same dependency remains waiting for retry."}
 
     dependency["status"] = "COMPLETED"
     dependency["updatedAt"] = _now()
     dependency["resultReference"] = record["recordId"]
+    dependency["providerStatus"] = "AVAILABLE"
+    dependency["lastError"] = None
     domicile = next((item for item in app["requirements"] if item["code"] == "DOMICILE_PROOF"), None)
     if domicile:
         domicile.update({"status": "FOUND", "recordId": record["recordId"], "canonical": map_record("DOMICILE_PROOF", record), "verifiedOn": record["validUntil"], "adapter": "REST API"})
@@ -65,6 +85,10 @@ def initiate_domicile(citizen_id: str, app: dict) -> dict:
     event_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "recordId": record["recordId"], "service": "REV-MAHA-101"}
     event_bus.publish("DOMICILE_ISSUED", event_payload)
     event_bus.publish("DEPENDENCY_RESOLVED", event_payload)
+    if dependency["attempts"] > 1:
+        event_bus.publish("DEPENDENCY_RECOVERED", {**event_payload, "attempts": dependency["attempts"]})
+        audit_bus.append("SYSTEM", "DEPENDENCY", "Revenue domicile service recovered", dependency["provider"], "RECOVER", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "attempts": dependency["attempts"]}, correlation_id=app["appId"])
+    audit_bus.append("SYSTEM", "DEPENDENCY", "Revenue domicile service completed", dependency["provider"], "COMPLETE", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "resultReference": record["recordId"], "attempts": dependency["attempts"]}, correlation_id=app["appId"])
     event_bus.publish("WORKFLOW_RESUMED", {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "status": app["status"]})
     return {
         "success": True, "appId": app["appId"], "dependencyId": dependency["dependencyId"],

@@ -89,8 +89,10 @@ def dependency(body: Dependency):
         raise HTTPException(404, "Application journey not found")
     consent_receipt = _require_consent(body.citizenId)
     result = initiate_domicile(body.citizenId, app)
-    audit_bus.append(body.citizenId, "DEPENDENCY", "Mandatory scholarship prerequisite", "GovOrchestrator", "CREATED", consent_receipt["consentId"], payload={"dependencyId": result.get("dependencyId"), "appId": app["appId"]}, correlation_id=app["appId"])
-    audit_bus.append(body.citizenId, "DOMICILE_PROOF", "Mandatory scholarship prerequisite", "Revenue Department", "ISSUE", consent_receipt["consentId"], payload=result, correlation_id=app["appId"])
+    if result.get("success"):
+        audit_bus.append(body.citizenId, "DOMICILE_PROOF", "Mandatory scholarship prerequisite", "Revenue Department", "ISSUE", consent_receipt["consentId"], payload=result, correlation_id=app["appId"])
+    else:
+        audit_bus.append(body.citizenId, "DOMICILE_PROOF", "Mandatory scholarship prerequisite failed; retry remains available", "Revenue Department", "FAIL", consent_receipt["consentId"], payload={"dependencyId": result.get("dependencyId"), "attempts": result.get("attempts"), "status": result.get("dependencyStatus")}, correlation_id=app["appId"])
     return result
 
 
