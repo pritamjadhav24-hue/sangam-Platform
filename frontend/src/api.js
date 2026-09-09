@@ -17,4 +17,5 @@ export const api = {
   action: (appId, action, remarks, reviewId, selectedSource) => request('/officer/action', { method: 'POST', body: JSON.stringify({ appId, action, remarks, reviewId, selectedSource }) }),
   audit: () => request('/admin/audit-trail'),
   integrationHealth: () => request('/admin/integration-health'),
+  dependencyRegistry: () => request('/admin/dependency-registry'),
 };

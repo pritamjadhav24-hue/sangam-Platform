@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 
 from app.core.event_bus import event_bus
 from app.core.audit_bus import audit_bus
-from app.engine.adapters import is_integration_available
+from app.engine.adapters import integration_health, is_integration_available
+from app.engine.registry import select_dependency_provider
 from app.engine.semantic_mapper import map_record
 from app.engine.workflow_engine import DEPENDENCIES, transition_application
 from app.mocks.revenue_dept import issue_domicile
@@ -25,21 +26,27 @@ def ensure_domicile_dependency(app: dict) -> dict:
 
     timestamp = _now()
     dependency_id = f"DEP-{app['appId']}-{next(_dependency_counter):03d}"
+    provider_selection = select_dependency_provider("DOMICILE_PROOF", integration_health())
+    if not provider_selection:
+        raise ValueError("No registered provider can satisfy DOMICILE_PROOF")
     dependency = {
         "dependencyId": dependency_id,
         "appId": app["appId"],
         "journeyId": app["appId"],
-        "requiredService": "Domicile Certificate",
+        "requiredService": provider_selection["requiredService"],
         "requiredData": "DOMICILE_PROOF",
-        "provider": "Revenue Department",
-        "providerService": "REV-MAHA-101",
+        "provider": provider_selection["provider"],
+        "providerService": provider_selection["serviceId"],
+        "serviceName": provider_selection["serviceName"],
+        "adapter": provider_selection["adapter"],
+        "providerSelection": {"requirementCode": provider_selection["requirementCode"], "requiredService": provider_selection["requiredService"], "provider": provider_selection["provider"], "adapter": provider_selection["adapter"], "serviceId": provider_selection["serviceId"], "reason": provider_selection["reason"], "healthStatus": provider_selection["healthStatus"], "selectedAt": timestamp},
         "status": "WAITING_FOR_DEPENDENCY",
         "createdAt": timestamp,
         "updatedAt": timestamp,
         "resultReference": None,
         "attempts": 0,
         "maxAttempts": 3,
-        "providerStatus": "AVAILABLE",
+        "providerStatus": provider_selection["healthStatus"],
         "lastError": None,
         "failureHistory": [],
     }
@@ -50,6 +57,8 @@ def ensure_domicile_dependency(app: dict) -> dict:
         transition_application(app, "WAITING_FOR_DEPENDENCY")
     event_bus.publish("MISSING_PREREQUISITE_DETECTED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "requiredData": "DOMICILE_PROOF"})
     event_bus.publish("DEPENDENCY_CREATED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "provider": dependency["provider"]})
+    event_bus.publish("PROVIDER_SELECTED", {"appId": app["appId"], "dependencyId": dependency_id, "requiredService": dependency["requiredService"], "provider": dependency["provider"], "adapter": dependency["adapter"], "serviceId": dependency["providerService"], "healthStatus": provider_selection["healthStatus"]})
+    audit_bus.append("SYSTEM", "PROVIDER_SELECTION", "Registered provider selected for missing canonical requirement", dependency["provider"], "SELECT", app.get("consentId"), payload={"appId": app["appId"], "dependencyId": dependency_id, "requiredService": dependency["requiredService"], "provider": dependency["provider"], "adapter": dependency["adapter"], "serviceId": dependency["providerService"], "healthStatus": provider_selection["healthStatus"]}, correlation_id=app["appId"])
     return dependency
 
 
