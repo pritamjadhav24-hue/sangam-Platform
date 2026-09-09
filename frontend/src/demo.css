@@ -1,0 +1,15 @@
+.workflow-list { display: grid; gap: 4px; margin-top: 18px; }
+.workflow-step { display: flex; gap: 13px; align-items: flex-start; padding: 12px 10px; border-left: 3px solid #d4e4e8; background: #f8fbfb; }
+.workflow-step i { font-style: normal; display: grid; place-items: center; flex: 0 0 27px; height: 27px; border-radius: 50%; background: #16736b; color: #fff; font-weight: 700; }
+.workflow-step b { color: #173d67; }
+.workflow-step p { margin: 2px 0 4px; }
+.workflow-step small { display: inline-block; margin-right: 14px; color: #607488; }
+.dependency-grid { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px 14px; align-items: center; }
+.dependency-grid > span:nth-child(odd) { color: #607488; }
+.dependency-grid code { font-size: 12px; color: #175a68; overflow-wrap: anywhere; }
+.metric-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0 16px; }
+.metric-row span { padding: 10px 14px; background: #f1f7f8; color: #506275; }
+.metric-row b { color: #16736b; font-size: 22px; margin-right: 5px; }
+.review-box { padding: 8px; margin-bottom: 8px; border-left: 3px solid #d19a35; background: #fffaf0; }
+.review-box b, .review-box small { display: block; }
+@media (max-width: 760px) { .dependency-grid { grid-template-columns: 1fr; gap: 4px; } }

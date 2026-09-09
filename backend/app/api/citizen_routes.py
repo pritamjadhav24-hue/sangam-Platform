@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from app.core.audit_bus import audit_bus
 from app.core.event_bus import event_bus
-from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuthorizationError, authorize_access, create_consent, revoke_consent
+from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuthorizationError, authorize_access, create_consent, current, revoke_consent
 from app.engine.dependency_orchestrator import ensure_domicile_dependency, initiate_domicile
 from app.engine.registry import SCHEMES
 from app.engine.requirement_analyzer import discover
@@ -162,4 +162,11 @@ def submit(body: Submit):
 def track(app_id: str):
     if app_id not in APPLICATIONS:
         raise HTTPException(404, "Application not found")
-    return APPLICATIONS[app_id]
+    app = APPLICATIONS[app_id]
+    receipt = current(app["citizenId"])
+    consent_view = None
+    if receipt:
+        consent_view = {field: receipt.get(field) for field in ("consentId", "consumer", "purpose", "allowed", "expiresAt", "decision", "revokedAt") if field in receipt}
+    workflow_events = [event for event in event_bus.events if event.get("payload", {}).get("appId") == app_id]
+    audit_entries = [{field: entry.get(field) for field in ("sequence", "what", "why", "when", "source", "action", "consentId", "correlationId")} for entry in audit_bus.entries if entry.get("correlationId") == app_id]
+    return {**app, "consent": consent_view, "workflowEvents": workflow_events, "auditEntries": audit_entries}

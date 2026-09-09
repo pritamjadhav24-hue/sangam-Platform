@@ -40,6 +40,7 @@ def ensure_domicile_dependency(app: dict) -> dict:
     app["dependencyIds"].append(dependency_id)
     app["dependencies"].append(dependency)
     transition_application(app, "WAITING_FOR_DEPENDENCY")
+    event_bus.publish("MISSING_PREREQUISITE_DETECTED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "requiredData": "DOMICILE_PROOF"})
     event_bus.publish("DEPENDENCY_CREATED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "provider": dependency["provider"]})
     return dependency
 

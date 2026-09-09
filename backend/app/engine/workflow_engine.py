@@ -30,6 +30,7 @@ def transition_application(app: dict, status: str) -> dict:
         app["status"] = status
         app["updatedAt"] = timestamp
         app.setdefault("statusHistory", []).append({"status": status, "at": timestamp})
+        event_bus.publish("APPLICATION_STATUS_CHANGED", {"appId": app["appId"], "citizenId": app["citizenId"], "status": status, "at": timestamp})
     return app
 
 
