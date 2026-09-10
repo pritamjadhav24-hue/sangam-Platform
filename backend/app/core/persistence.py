@@ -267,7 +267,7 @@ def hydrate_state() -> None:
 
     with Session(engine) as session:
         applications = session.query(ApplicationRow).all()
-        workflow_engine.APPLICATIONS.clear(); workflow_engine.DEPENDENCIES.clear(); workflow_engine.ENTITY_REVIEWS.clear(); workflow_engine.CONFLICT_REVIEWS.clear(); consent_manager.CONSENTS.clear(); notification_manager.notifications.clear(); event_bus.events.clear(); audit_bus.entries.clear(); SESSIONS.clear(); adapters._availability.clear(); adapters._last_health.clear()
+        workflow_engine.APPLICATIONS.clear(); workflow_engine.DEPENDENCIES.clear(); workflow_engine.ENTITY_REVIEWS.clear(); workflow_engine.CONFLICT_REVIEWS.clear(); consent_manager.CONSENTS.clear(); notification_manager.notifications.clear(); notification_manager._processed_event_ids.clear(); event_bus.reset(); audit_bus.reset(); SESSIONS.clear(); adapters._availability.clear(); adapters._last_health.clear()
         for row in applications: workflow_engine.APPLICATIONS[row.app_id] = row.payload
         for row in session.query(DependencyRow).all(): workflow_engine.DEPENDENCIES[row.dependency_id] = row.payload
         for row in session.query(ConsentRow).all(): consent_manager.CONSENTS[row.citizen_id] = row.payload
@@ -278,7 +278,8 @@ def hydrate_state() -> None:
             app["entityReviews"] = [workflow_engine.ENTITY_REVIEWS[review["reviewId"]] for review in app.get("entityReviews", []) if review.get("reviewId") in workflow_engine.ENTITY_REVIEWS]
             app["conflictReviews"] = [workflow_engine.CONFLICT_REVIEWS[review["reviewId"]] for review in app.get("conflictReviews", []) if review.get("reviewId") in workflow_engine.CONFLICT_REVIEWS]
         notification_manager.notifications.extend(row.payload for row in session.query(NotificationRow).order_by(NotificationRow.notification_id).all())
-        event_bus.events.extend(row.payload for row in session.query(EventRow).order_by(EventRow.id).all())
+        notification_manager._processed_event_ids.update(item.get("sourceEventId") for item in notification_manager.notifications if item.get("sourceEventId"))
+        event_bus.hydrate([row.payload for row in session.query(EventRow).order_by(EventRow.id).all()])
         audit_bus.entries.extend(row.payload for row in session.query(AuditEntryRow).order_by(AuditEntryRow.sequence).all())
         SESSIONS.update({row.session_id: row.payload for row in session.query(SessionRow).all()})
         for row in session.query(IntegrationStateRow).all(): adapters._availability[row.system] = row.payload

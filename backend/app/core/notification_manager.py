@@ -11,6 +11,7 @@ class NotificationManager:
     def __init__(self):
         self.notifications: list[dict] = []
         self._counter = itertools.count(1)
+        self._processed_event_ids: set[str] = set()
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -27,8 +28,12 @@ class NotificationManager:
             "correlationId": payload.get("appId") or payload.get("correlationId"),
             "createdAt": self._now(),
             "read": False,
+            "sourceEventId": payload.get("eventId"),
         }
+        if item["sourceEventId"] and any(existing.get("recipientUserId") == recipient_user_id and existing.get("sourceEventId") == item["sourceEventId"] for existing in self.notifications):
+            return next(existing for existing in self.notifications if existing.get("recipientUserId") == recipient_user_id and existing.get("sourceEventId") == item["sourceEventId"])
         self.notifications.append(item)
+        event_bus.publish("NOTIFICATION_CREATED", {"notificationId": item["notificationId"], "appId": item.get("applicationId"), "correlationId": item.get("correlationId"), "recipientRole": role, "source": "notification_manager"})
         return item
 
     def _citizen(self, payload: dict, notification_type: str, title: str, message: str) -> None:
@@ -43,6 +48,11 @@ class NotificationManager:
 
     def handle(self, event: dict) -> None:
         event_type, payload = event["type"], event.get("payload", {})
+        event_id = event.get("eventId")
+        if event_id and event_id in self._processed_event_ids:
+            return
+        if event_id:
+            payload = {**payload, "eventId": event_id}
         app_id = payload.get("appId")
         if event_type == "APPLICATION_STATUS_CHANGED":
             status = payload.get("status", "").replace("_", " ")
@@ -72,6 +82,8 @@ class NotificationManager:
             notification_type = "INTEGRATION_RECOVERY" if payload.get("status") == "AVAILABLE" else "INTEGRATION_FAILURE"
             title = "Integration recovered" if payload.get("status") == "AVAILABLE" else "Integration unavailable"
             self._role("ADMIN", notification_type, title, f"{payload.get('system', 'A department')} is {payload.get('status', '').lower()}.", payload)
+        if event_id:
+            self._processed_event_ids.add(event_id)
 
     def for_user(self, user: dict) -> list[dict]:
         return [item for item in reversed(self.notifications) if item["recipientUserId"] == user["userId"] and item["role"] == user["role"]]

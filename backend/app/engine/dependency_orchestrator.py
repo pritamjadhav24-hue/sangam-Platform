@@ -57,6 +57,7 @@ def ensure_domicile_dependency(app: dict) -> dict:
         transition_application(app, "WAITING_FOR_DEPENDENCY")
     event_bus.publish("MISSING_PREREQUISITE_DETECTED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "requiredData": "DOMICILE_PROOF"})
     event_bus.publish("DEPENDENCY_CREATED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "provider": dependency["provider"]})
+    event_bus.publish("DEPENDENCY_STATUS_CHANGED", {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency_id, "consentId": app.get("consentId"), "status": dependency["status"]})
     event_bus.publish("PROVIDER_SELECTED", {"appId": app["appId"], "dependencyId": dependency_id, "requiredService": dependency["requiredService"], "provider": dependency["provider"], "adapter": dependency["adapter"], "serviceId": dependency["providerService"], "healthStatus": provider_selection["healthStatus"]})
     audit_bus.append("SYSTEM", "PROVIDER_SELECTION", "Registered provider selected for missing canonical requirement", dependency["provider"], "SELECT", app.get("consentId"), payload={"appId": app["appId"], "dependencyId": dependency_id, "requiredService": dependency["requiredService"], "provider": dependency["provider"], "adapter": dependency["adapter"], "serviceId": dependency["providerService"], "healthStatus": provider_selection["healthStatus"]}, correlation_id=app["appId"])
     return dependency
@@ -79,6 +80,7 @@ def initiate_domicile(citizen_id: str, app: dict) -> dict:
         dependency["failureHistory"].append({"attempt": dependency["attempts"], "at": dependency["updatedAt"], "error": dependency["lastError"]})
         failure_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "provider": dependency["provider"], "attempt": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "status": dependency["status"], "error": dependency["lastError"]}
         event_bus.publish("DEPENDENCY_SERVICE_FAILED", failure_payload)
+        event_bus.publish("DEPENDENCY_STATUS_CHANGED", {**failure_payload, "consentId": app.get("consentId")})
         audit_bus.append("SYSTEM", "DEPENDENCY", "Revenue domicile service failure", dependency["provider"], "FAIL", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "attempt": dependency["attempts"], "error": dependency["lastError"]}, correlation_id=app["appId"])
         if dependency["attempts"] < dependency["maxAttempts"]:
             event_bus.publish("DEPENDENCY_RETRY_SCHEDULED", failure_payload)
@@ -98,8 +100,10 @@ def initiate_domicile(citizen_id: str, app: dict) -> dict:
     event_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "recordId": record["recordId"], "service": "REV-MAHA-101"}
     event_bus.publish("DOMICILE_ISSUED", event_payload)
     event_bus.publish("DEPENDENCY_RESOLVED", event_payload)
+    event_bus.publish("DEPENDENCY_STATUS_CHANGED", {**event_payload, "status": dependency["status"]})
     if dependency["attempts"] > 1:
         event_bus.publish("DEPENDENCY_RECOVERED", {**event_payload, "attempts": dependency["attempts"]})
+        event_bus.publish("RETRY_SUCCEEDED", {**event_payload, "attempts": dependency["attempts"]})
         audit_bus.append("SYSTEM", "DEPENDENCY", "Revenue domicile service recovered", dependency["provider"], "RECOVER", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "attempts": dependency["attempts"]}, correlation_id=app["appId"])
     audit_bus.append("SYSTEM", "DEPENDENCY", "Revenue domicile service completed", dependency["provider"], "COMPLETE", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "resultReference": record["recordId"], "attempts": dependency["attempts"]}, correlation_id=app["appId"])
     event_bus.publish("WORKFLOW_RESUMED", {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "status": app["status"]})

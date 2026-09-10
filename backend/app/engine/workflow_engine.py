@@ -103,6 +103,7 @@ def create_entity_reviews(app: dict) -> list[dict]:
         }
         ENTITY_REVIEWS[review_id] = review
         reviews.append(review)
+        event_bus.publish("ENTITY_REVIEW_CREATED", {"appId": app["appId"], "correlationId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "source": requirement["source"], "confidenceLevel": "MEDIUM"})
         event_bus.publish("ENTITY_MATCH_REVIEW_REQUIRED", {"citizenId": app["citizenId"], "appId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "source": requirement["source"], "confidenceLevel": "MEDIUM"})
     return reviews
 
@@ -134,6 +135,7 @@ def entity_review_action(review_id: str, decision: str, officer_id: str, remarks
     elif not any(item["status"] == "WAITING_FOR_OFFICER" for item in app.get("entityReviews", [])) and not any(item["status"] in {"REVIEW_REQUIRED", "UNRESOLVED"} for item in app["requirements"]):
         transition_application(app, "IN_PROGRESS")
     event_bus.publish("ENTITY_MATCH_DECIDED", {"appId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "decision": decision, "officerId": officer_id})
+    event_bus.publish("ENTITY_REVIEW_RESOLVED", {"appId": app["appId"], "correlationId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "decision": decision, "officerId": officer_id})
     return app, review
 
 
@@ -216,6 +218,7 @@ def create_application(citizen_id: str, discovery: dict, eligibility: dict) -> d
         "conflicts": discovery.get("conflicts", []), "conflictReviews": [],
     }
     APPLICATIONS[app_id] = app
+    event_bus.publish("APPLICATION_CREATED", {"citizenId": citizen_id, "appId": app_id, "correlationId": app_id, "source": "workflow_engine"})
     app["entityReviews"] = create_entity_reviews(app)
     app["conflictReviews"] = create_conflict_reviews(app)
     transition_application(app, "IN_PROGRESS")
