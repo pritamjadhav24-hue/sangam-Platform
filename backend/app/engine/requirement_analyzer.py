@@ -27,7 +27,7 @@ def discover(citizen: dict, simulate_timeout: bool = False) -> dict:
             continue
         raw_records.append(record)
         source_records.append({"sourceSystem": SOURCES[code], "sourceRecordId": record.get("recordId", record.get("studentId")), "adapter": fetched["adapter"], "record": record})
-        payload = validate_payload(record); resolution = resolve(citizen, record) if record.get("name") else {"status": "MATCH", "decision": "AUTO_ACCEPT", "confidenceLevel": "HIGH", "score": 1, "matchedFields": ["source-record-verified"]}
+        payload = validate_payload(record); resolution = resolve(citizen, {**record, "sourceSystem": SOURCES[code]}) if record.get("name") else {"status": "MATCH", "decision": "AUTO_ACCEPT", "confidenceLevel": "HIGH", "score": 1, "matchedFields": ["source-record-verified"], "fieldComparisons": [], "weights": {}, "sourceSystem": SOURCES[code], "candidateRecordId": record.get("recordId", record.get("studentId"))}
         canonical = map_record(code, record); validation = validate(code, canonical, record)
         mappings = mapping_evidence(code, record, SOURCES[code], fetched["adapter"])
         mapping_records.extend(mappings)
