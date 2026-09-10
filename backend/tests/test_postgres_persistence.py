@@ -6,7 +6,8 @@ from app.core.audit_bus import audit_bus
 from app.core.demo_state import reset_demo_state
 from app.core.notification_manager import notification_manager
 from app.core.persistence import ApplicationRow, DependencyRow, engine, hydrate_state, initialize, persist_state
-from app.engine.workflow_engine import APPLICATIONS, DEPENDENCIES
+from app.engine.dependency_orchestrator import initiate_domicile
+from app.engine.workflow_engine import APPLICATIONS, DEPENDENCIES, officer_action, transition_application
 
 
 class PostgreSQLPersistenceTests(unittest.TestCase):
@@ -53,6 +54,23 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
         reset_demo_state(); persist_state()
         with engine.connect() as connection:
             self.assertIsNone(connection.execute(select(ApplicationRow).where(ApplicationRow.app_id == "SCH-MH-2026-00142")).first())
+
+    def test_invalid_terminal_transitions_are_rejected(self):
+        for current, target in (("COMPLETED", "IN_PROGRESS"), ("COMPLETED", "SUBMITTED"), ("CANCELLED", "IN_PROGRESS"), ("APPROVED", "WAITING_FOR_DEPENDENCY")):
+            app = {"appId": f"TEST-{current}", "citizenId": "CITIZEN_001", "status": current, "statusHistory": [], "createdAt": "2026-01-01T00:00:00+00:00"}
+            with self.assertRaises(ValueError):
+                transition_application(app, target)
+            self.assertEqual(app["status"], current)
+
+    def test_repeated_terminal_actions_are_idempotent(self):
+        app_id = "SCH-MH-2026-00142"
+        app = {"appId": app_id, "citizenId": "CITIZEN_001", "status": "COMPLETED", "statusHistory": [], "requirements": [], "timeline": [], "eligibility": {"eligible": True}}
+        APPLICATIONS[app_id] = app
+        self.assertIs(officer_action(app_id, "APPROVE", "Already approved"), app)
+        dependency_id = "DEP-SCH-MH-2026-00142-001"
+        dependency = {"dependencyId": dependency_id, "appId": app_id, "requiredData": "DOMICILE_PROOF", "status": "COMPLETED", "resultReference": "D-MH-9001", "attempts": 1, "maxAttempts": 3}
+        app.update({"dependencyIds": [dependency_id], "dependencies": [dependency]}); DEPENDENCIES[dependency_id] = dependency
+        self.assertFalse(initiate_domicile("CITIZEN_001", app)["success"] is False)
 
 
 if __name__ == "__main__":

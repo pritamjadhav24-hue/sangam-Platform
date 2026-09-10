@@ -66,6 +66,8 @@ def initiate_domicile(citizen_id: str, app: dict) -> dict:
     dependency = ensure_domicile_dependency(app)
     if dependency["status"] == "COMPLETED":
         return {"success": True, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "service": "REV-MAHA-101", "message": "Domicile is already linked to the scholarship application.", "recordId": dependency["resultReference"], "attempts": dependency["attempts"]}
+    if dependency["attempts"] >= dependency["maxAttempts"]:
+        return {"success": False, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "attempts": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "providerStatus": dependency["providerStatus"], "message": "The dependency reached its retry limit and remains waiting for administrative recovery."}
     dependency["attempts"] += 1
     dependency["updatedAt"] = _now()
     event_bus.publish("REVENUE_SERVICE_REQUESTED", {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "service": "REV-MAHA-101"})

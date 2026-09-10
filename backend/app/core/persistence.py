@@ -207,6 +207,20 @@ def persist_state() -> None:
         session.commit()
 
 
+def persist_transition(app: dict, history_entry: dict) -> None:
+    """Atomically store the current application snapshot and its new history row."""
+    with Session(engine) as session:
+        row = session.get(ApplicationRow, app["appId"])
+        if row is None:
+            session.add(ApplicationRow(app_id=app["appId"], citizen_id=app["citizenId"], status=app["status"], payload=app))
+        else:
+            row.citizen_id = app["citizenId"]
+            row.status = app["status"]
+            row.payload = app
+        session.add(WorkflowHistoryRow(app_id=app["appId"], status=history_entry["status"], occurred_at=history_entry["at"], payload=history_entry))
+        session.commit()
+
+
 def hydrate_state() -> None:
     from app.core.audit_bus import audit_bus
     from app.core.event_bus import event_bus
@@ -223,6 +237,10 @@ def hydrate_state() -> None:
         for row in session.query(ConsentRow).all(): consent_manager.CONSENTS[row.citizen_id] = row.payload
         for row in session.query(EntityReviewRow).all(): workflow_engine.ENTITY_REVIEWS[row.review_id] = row.payload
         for row in session.query(ConflictReviewRow).all(): workflow_engine.CONFLICT_REVIEWS[row.review_id] = row.payload
+        for app in workflow_engine.APPLICATIONS.values():
+            app["dependencies"] = [workflow_engine.DEPENDENCIES[dependency_id] for dependency_id in app.get("dependencyIds", []) if dependency_id in workflow_engine.DEPENDENCIES]
+            app["entityReviews"] = [workflow_engine.ENTITY_REVIEWS[review["reviewId"]] for review in app.get("entityReviews", []) if review.get("reviewId") in workflow_engine.ENTITY_REVIEWS]
+            app["conflictReviews"] = [workflow_engine.CONFLICT_REVIEWS[review["reviewId"]] for review in app.get("conflictReviews", []) if review.get("reviewId") in workflow_engine.CONFLICT_REVIEWS]
         notification_manager.notifications.extend(row.payload for row in session.query(NotificationRow).order_by(NotificationRow.notification_id).all())
         event_bus.events.extend(row.payload for row in session.query(EventRow).order_by(EventRow.id).all())
         audit_bus.entries.extend(row.payload for row in session.query(AuditEntryRow).order_by(AuditEntryRow.sequence).all())

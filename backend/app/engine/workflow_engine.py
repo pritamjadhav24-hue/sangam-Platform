@@ -20,20 +20,49 @@ CANONICAL_STATUSES = {
     "REJECTED", "COMPLETED", "CANCELLED",
 }
 
+VALID_TRANSITIONS = {
+    "DRAFT": {"IN_PROGRESS", "CANCELLED"},
+    "IN_PROGRESS": {"WAITING_FOR_DEPENDENCY", "WAITING_FOR_USER", "WAITING_FOR_OFFICER", "VERIFICATION_FAILED", "CONFLICT_DETECTED", "SUBMITTED", "CANCELLED"},
+    "WAITING_FOR_DEPENDENCY": {"IN_PROGRESS", "CANCELLED", "VERIFICATION_FAILED"},
+    "WAITING_FOR_USER": {"IN_PROGRESS", "SUBMITTED", "CANCELLED"},
+    "WAITING_FOR_OFFICER": {"IN_PROGRESS", "APPROVED", "REJECTED", "WAITING_FOR_USER", "CANCELLED"},
+    "VERIFICATION_FAILED": {"IN_PROGRESS", "WAITING_FOR_DEPENDENCY", "CANCELLED"},
+    "CONFLICT_DETECTED": {"WAITING_FOR_OFFICER", "IN_PROGRESS", "VERIFICATION_FAILED", "CANCELLED"},
+    "APPROVED": {"COMPLETED"},
+    "SUBMITTED": {"WAITING_FOR_OFFICER", "CANCELLED"},
+    "REJECTED": set(),
+    "COMPLETED": set(),
+    "CANCELLED": set(),
+}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def transition_application(app: dict, status: str) -> dict:
+def transition_application(app: dict, status: str, actor: str = "SYSTEM", source: str = "workflow_engine") -> dict:
     if status not in CANONICAL_STATUSES:
         raise ValueError(f"Unsupported application status: {status}")
-    if app["status"] != status:
-        timestamp = _now()
-        app["status"] = status
-        app["updatedAt"] = timestamp
-        app.setdefault("statusHistory", []).append({"status": status, "at": timestamp})
-        event_bus.publish("APPLICATION_STATUS_CHANGED", {"appId": app["appId"], "citizenId": app["citizenId"], "status": status, "at": timestamp})
+    previous = app["status"]
+    if previous == status:
+        return app
+    if status not in VALID_TRANSITIONS.get(previous, set()):
+        raise ValueError(f"Invalid application transition: {previous} -> {status}")
+    timestamp = _now()
+    history_entry = {"status": status, "at": timestamp, "actor": actor, "source": source}
+    app["status"] = status
+    app["updatedAt"] = timestamp
+    app.setdefault("statusHistory", []).append(history_entry)
+    try:
+        from app.core.persistence import persist_transition
+        persist_transition(app, history_entry)
+    except Exception:
+        app["status"] = previous
+        app["updatedAt"] = app.get("statusHistory", [{}])[-2].get("at", timestamp) if len(app.get("statusHistory", [])) > 1 else app.get("createdAt", timestamp)
+        if app.get("statusHistory"):
+            app["statusHistory"].pop()
+        raise
+    event_bus.publish("APPLICATION_STATUS_CHANGED", {"appId": app["appId"], "citizenId": app["citizenId"], "status": status, "at": timestamp, "actor": actor, "source": source})
     return app
 
 
@@ -78,6 +107,13 @@ def entity_review_action(review_id: str, decision: str, officer_id: str, remarks
         return None, None
     if decision not in {"MATCH", "REJECT"} or not remarks.strip():
         raise ValueError("Entity review requires MATCH or REJECT and mandatory remarks.")
+    if review["status"] != "WAITING_FOR_OFFICER":
+        if review.get("decision") == decision:
+            app = APPLICATIONS.get(review["appId"])
+            if app and decision == "MATCH" and app.get("status") == "WAITING_FOR_OFFICER":
+                transition_application(app, "IN_PROGRESS")
+            return app, review
+        raise ValueError("Entity review has already been decided.")
     app = APPLICATIONS.get(review["appId"])
     if not app:
         return None, None
@@ -119,6 +155,13 @@ def conflict_review_action(review_id: str, decision: str, officer_id: str, remar
     review = CONFLICT_REVIEWS.get(review_id)
     if not review:
         return None, None
+    if review["status"] != "WAITING_FOR_OFFICER":
+        if review.get("decision") == decision and review.get("selectedSource") == selected_source:
+            app = APPLICATIONS.get(review["appId"])
+            if app and decision == "SELECT" and app.get("status") == "CONFLICT_DETECTED":
+                transition_application(app, "IN_PROGRESS")
+            return app, review
+        raise ValueError("Conflict review has already been decided.")
     if decision not in {"SELECT", "REJECT"} or not remarks.strip():
         raise ValueError("Conflict review requires SELECT or REJECT and mandatory remarks.")
     if decision == "SELECT" and not selected_source:
@@ -187,6 +230,12 @@ def officer_action(app_id: str, action: str, remarks: str):
     app = APPLICATIONS.get(app_id)
     if not app: return None
     if action not in {"APPROVE", "REJECT", "REQUEST_INFO"} or not remarks.strip(): raise ValueError("A decision and mandatory remarks are required.")
+    if app["status"] == "COMPLETED" and action == "APPROVE":
+        return app
+    if app["status"] == "REJECTED" and action == "REJECT":
+        return app
+    if app["status"] in {"COMPLETED", "REJECTED", "CANCELLED"}:
+        raise ValueError(f"Application is already {app['status']} and cannot accept {action}.")
     app["officerRemarks"] = remarks
     if action == "APPROVE":
         if any(review["status"] == "WAITING_FOR_OFFICER" for review in app.get("entityReviews", []) + app.get("conflictReviews", [])):
