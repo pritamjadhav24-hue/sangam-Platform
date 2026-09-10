@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, setSessionToken } from './api';
+import { api, setAuthFailureHandler, setSessionToken } from './api';
 import { initialLanguage, LANGUAGE_KEY } from './i18n';
 import Navbar from './components/Navbar';
 import LoginPage from './pages/LoginPage';
@@ -16,6 +16,7 @@ import SangamMark from './components/SangamMark';
 
 export default function App() {
   const [user, setUser] = useState(null), [page, setPage] = useState('dashboard'), [schemes, setSchemes] = useState([]), [discovery, setDiscovery] = useState(null), [appId, setAppId] = useState(null), [language, setLanguage] = useState(initialLanguage);
+  useEffect(() => { setAuthFailureHandler(() => { setSessionToken(null); setUser(null); setAppId(null); setDiscovery(null); setPage('dashboard'); }); return () => setAuthFailureHandler(null); }, []);
   useEffect(() => { if (user?.role === 'CITIZEN') api.schemes().then(x => setSchemes(x.schemes)).catch(() => {}); }, [user]);
   function changeLanguage(next) { setLanguage(next); localStorage.setItem(LANGUAGE_KEY, next); }
   async function login(id, pw) { const result = await api.login(id, pw); setSessionToken(result.token); setUser(result.user); setPage(result.user.role === 'CITIZEN' ? 'dashboard' : result.user.role === 'OFFICER' ? 'officer' : 'health'); }

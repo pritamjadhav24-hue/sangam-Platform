@@ -22,7 +22,7 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
 
     def test_connection_and_required_schema(self):
         tables = set(inspect(engine).get_table_names())
-        self.assertTrue({"applications", "dependencies", "consents", "workflow_history", "audit_entries", "notifications"}.issubset(tables))
+        self.assertTrue({"applications", "dependencies", "consents", "workflow_history", "audit_entries", "notifications", "user_accounts"}.issubset(tables))
 
     def test_application_dependency_relationship_survives_roundtrip(self):
         app_id = "SCH-MH-2026-00142"

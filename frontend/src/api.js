@@ -1,11 +1,14 @@
 const BASE = 'http://127.0.0.1:8000/api';
 let sessionToken = null;
+let onUnauthorized = () => {};
 export const setSessionToken = token => { sessionToken = token; };
+export const setAuthFailureHandler = handler => { onUnauthorized = handler || (() => {}); };
 async function request(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
   const res = await fetch(`${BASE}${path}`, { ...options, headers });
   const data = await res.json();
+  if (res.status === 401) { sessionToken = null; onUnauthorized(); }
   if (!res.ok) throw new Error(data.detail || 'The service could not complete this request.');
   return data;
 }

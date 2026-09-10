@@ -116,6 +116,14 @@ class SessionRow(Base):
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
+class UserAccountRow(Base):
+    __tablename__ = "user_accounts"
+    user_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    role: Mapped[str] = mapped_column(String(30), index=True)
+    password_hash: Mapped[str] = mapped_column(String(300))
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
 class EventRow(Base):
     __tablename__ = "events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -150,6 +158,34 @@ def initialize() -> None:
         Base.metadata.create_all(engine)
     except Exception as error:
         raise RuntimeError(f"PostgreSQL initialization failed: {error}") from error
+
+
+def ensure_user_accounts() -> None:
+    """Migrate existing demo identities into hashed PostgreSQL accounts once."""
+    from app.core.auth import hash_password
+    from app.mocks.identity_provider import USERS
+
+    with Session(engine) as session:
+        if session.query(UserAccountRow).count():
+            return
+        password_env = {
+            "CITIZEN_001": "SANGAM_CITIZEN_001_PASSWORD",
+            "CITIZEN_002": "SANGAM_CITIZEN_002_PASSWORD",
+            "OFFICER_MH_01": "SANGAM_OFFICER_MH_01_PASSWORD",
+            "ADMIN_MH_01": "SANGAM_ADMIN_MH_01_PASSWORD",
+        }
+        for user in USERS.values():
+            public_user = {key: value for key, value in user.items() if key != "password"}
+            password = os.getenv(password_env[user["userId"]])
+            if not password:
+                raise RuntimeError(f"Missing bootstrap password environment variable for {user['userId']}.")
+            session.add(UserAccountRow(
+                user_id=user["userId"],
+                role=user["role"],
+                password_hash=hash_password(password),
+                payload=public_user,
+            ))
+        session.commit()
 
 
 def _int_suffix(value: str, default: int) -> int:
@@ -190,8 +226,7 @@ def persist_state() -> None:
             session.add(EventRow(app_id=payload.get("appId"), event_type=event["type"], occurred_at=event["timestamp"], payload=event))
         for entry in audit_bus.entries:
             session.add(AuditEntryRow(sequence=entry["sequence"], correlation_id=entry.get("correlationId"), consent_id=entry.get("consentId"), payload=entry))
-        for token, user in SESSIONS.items():
-            session.add(SessionRow(session_id=token, user_id=user["userId"], payload=user))
+        # JWT access tokens are deliberately not persisted.
         for system, state in adapters._availability.items():
             session.add(IntegrationStateRow(system=system, payload=state))
         session.add(MockStateRow(state_key="revenue_domicile", payload={"record": revenue_dept.DOMICILE_RECORD}))
