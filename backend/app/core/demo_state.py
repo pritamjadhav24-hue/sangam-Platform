@@ -5,7 +5,7 @@ import itertools
 from app.core.audit_bus import audit_bus
 from app.core.event_bus import event_bus
 from app.core.notification_manager import notification_manager
-from app.engine import adapters, consent_manager, dependency_orchestrator, workflow_engine
+from app.engine import adapters, consent_manager, dependency_orchestrator, semantic_mapper, workflow_engine
 from app.mocks import education_dept, revenue_dept
 from app.mocks.identity_provider import SESSIONS
 
@@ -32,3 +32,4 @@ def reset_demo_state() -> None:
     adapters._last_health.clear()
     revenue_dept.DOMICILE_RECORD = None
     education_dept.set_income_conflict(False)
+    semantic_mapper.reset_mapping_state()

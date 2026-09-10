@@ -199,7 +199,7 @@ def persist_state() -> None:
     from app.core.audit_bus import audit_bus
     from app.core.event_bus import event_bus
     from app.core.notification_manager import notification_manager
-    from app.engine import adapters, consent_manager, dependency_orchestrator, workflow_engine
+    from app.engine import adapters, consent_manager, dependency_orchestrator, semantic_mapper, workflow_engine
     from app.mocks import education_dept, revenue_dept
     from app.mocks.identity_provider import SESSIONS
 
@@ -231,6 +231,7 @@ def persist_state() -> None:
             session.add(IntegrationStateRow(system=system, payload=state))
         session.add(MockStateRow(state_key="revenue_domicile", payload={"record": revenue_dept.DOMICILE_RECORD}))
         session.add(MockStateRow(state_key="education", payload={"familyAnnualIncome": education_dept.EDUCATION_RECORD["familyAnnualIncome"]}))
+        session.add(MockStateRow(state_key="semantic_mapping_reviews", payload={"reviews": semantic_mapper.MAPPING_REVIEWS, "counter": semantic_mapper.MAPPING_REVIEW_COUNTER, "evidence": semantic_mapper.SIMULATED_SCHEMA_EVIDENCE}))
         counters = {
             "application": max([_int_suffix(key, 142) for key in workflow_engine.APPLICATIONS] or [142]),
             "dependency": max([_int_suffix(key, 1) for key in workflow_engine.DEPENDENCIES] or [1]),
@@ -260,7 +261,7 @@ def hydrate_state() -> None:
     from app.core.audit_bus import audit_bus
     from app.core.event_bus import event_bus
     from app.core.notification_manager import notification_manager
-    from app.engine import adapters, consent_manager, dependency_orchestrator, workflow_engine
+    from app.engine import adapters, consent_manager, dependency_orchestrator, semantic_mapper, workflow_engine
     from app.mocks import education_dept, revenue_dept
     from app.mocks.identity_provider import SESSIONS
 
@@ -284,5 +285,9 @@ def hydrate_state() -> None:
         for row in session.query(MockStateRow).all():
             if row.state_key == "revenue_domicile": revenue_dept.DOMICILE_RECORD = row.payload.get("record")
             if row.state_key == "education": education_dept.set_income_conflict(row.payload.get("familyAnnualIncome") == "550000")
+            if row.state_key == "semantic_mapping_reviews":
+                semantic_mapper.MAPPING_REVIEWS.clear(); semantic_mapper.MAPPING_REVIEWS.update(row.payload.get("reviews", {}))
+                semantic_mapper.MAPPING_REVIEW_COUNTER = row.payload.get("counter", 1)
+                semantic_mapper.SIMULATED_SCHEMA_EVIDENCE = row.payload.get("evidence", semantic_mapper.SIMULATED_SCHEMA_EVIDENCE)
         counters = {row.counter_key: row.next_value for row in session.query(CounterRow).all()}
         workflow_engine._counter = itertools.count(counters.get("application", 142)); dependency_orchestrator._dependency_counter = itertools.count(counters.get("dependency", 1)); workflow_engine._review_counter = itertools.count(counters.get("review", 1)); workflow_engine._conflict_counter = itertools.count(counters.get("conflict", 1)); notification_manager._counter = itertools.count(counters.get("notification", 1))

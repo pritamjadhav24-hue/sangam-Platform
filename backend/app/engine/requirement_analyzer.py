@@ -1,5 +1,6 @@
 from app.engine.adapters import CSVFileAdapter, LegacySOAPAdapter, RestAPIAdapter, validate_payload
 from app.engine.entity_resolution import resolve
+from app.engine import semantic_mapper
 from app.engine.semantic_mapper import map_record, mapping_evidence
 from app.engine.validation_engine import detect_canonical_conflicts, detect_conflicts, validate
 from app.mocks import education_dept, revenue_dept, social_welfare_dept
@@ -33,4 +34,4 @@ def discover(citizen: dict, simulate_timeout: bool = False) -> dict:
         status = "FOUND" if payload["valid"] and resolution["decision"] == "AUTO_ACCEPT" and validation["valid"] else "REVIEW_REQUIRED" if resolution["decision"] == "REVIEW" else "UNRESOLVED"
         record_id = record.get("recordId", record.get("studentId"))
         requirements.append({"code": code, "source": SOURCES[code], "status": status, "recordId": record_id, "canonical": canonical, "provenance": {"sourceSystem": SOURCES[code], "adapter": fetched["adapter"], "sourceRecordId": record_id}, "mappingEvidence": mappings, "resolution": resolution, "validation": validation, "verifiedOn": record.get("validUntil"), "adapter": fetched["adapter"], "delayed": fetched.get("delayed", False)})
-    return {"requirements": requirements, "mappingMode": "DETERMINISTIC_CANONICAL_RULES", "mappingEvidence": mapping_records, "conflicts": detect_canonical_conflicts(source_records), "legacyConflictMessages": detect_conflicts(raw_records), "resilienceBanner": "Verification temporarily delayed; retrying automatically in background." if any(r.get("delayed") for r in requirements) else None}
+    return {"requirements": requirements, "mappingMode": "HYBRID_DETERMINISTIC_PLUS_LOCAL_AI", "mappingEvidence": mapping_records, "semanticMappingEvidence": semantic_mapper.current_schema_evidence(), "conflicts": detect_canonical_conflicts(source_records), "legacyConflictMessages": detect_conflicts(raw_records), "resilienceBanner": "Verification temporarily delayed; retrying automatically in background." if any(r.get("delayed") for r in requirements) else None}
