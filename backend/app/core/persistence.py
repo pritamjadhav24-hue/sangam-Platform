@@ -1,0 +1,235 @@
+"""Small PostgreSQL-backed persistence boundary for the existing in-memory engine.
+
+The domain modules keep their current dictionaries as the runtime cache and API
+shape. This module hydrates that cache at startup and snapshots it after each
+request, so the prototype can gain restart durability without an architecture
+rewrite. PostgreSQL is mandatory; there is deliberately no in-memory fallback.
+"""
+from __future__ import annotations
+
+import itertools
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine, delete
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+
+def _load_local_env() -> None:
+    if os.getenv("DATABASE_URL"):
+        return
+    for path in (Path(__file__).resolve().parents[2] / ".env", Path(__file__).resolve().parents[3] / ".env"):
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("DATABASE_URL="):
+                    os.environ["DATABASE_URL"] = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    return
+
+
+_load_local_env()
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is required; PostgreSQL persistence cannot start without it.")
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+if not DATABASE_URL.startswith("postgresql+psycopg://"):
+    raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class ApplicationRow(Base):
+    __tablename__ = "applications"
+    app_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    citizen_id: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(50), index=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class DependencyRow(Base):
+    __tablename__ = "dependencies"
+    dependency_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    app_id: Mapped[str] = mapped_column(ForeignKey("applications.app_id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(50), index=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class ConsentRow(Base):
+    __tablename__ = "consents"
+    consent_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    citizen_id: Mapped[str] = mapped_column(String(120), index=True)
+    app_id: Mapped[Optional[str]] = mapped_column(ForeignKey("applications.app_id", ondelete="SET NULL"), nullable=True, index=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class EntityReviewRow(Base):
+    __tablename__ = "entity_reviews"
+    review_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    app_id: Mapped[str] = mapped_column(ForeignKey("applications.app_id", ondelete="CASCADE"), index=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class ConflictReviewRow(Base):
+    __tablename__ = "conflict_reviews"
+    review_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    app_id: Mapped[str] = mapped_column(ForeignKey("applications.app_id", ondelete="CASCADE"), index=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class NotificationRow(Base):
+    __tablename__ = "notifications"
+    notification_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    recipient_user_id: Mapped[str] = mapped_column(String(120), index=True)
+    app_id: Mapped[Optional[str]] = mapped_column(ForeignKey("applications.app_id", ondelete="SET NULL"), nullable=True, index=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class WorkflowHistoryRow(Base):
+    __tablename__ = "workflow_history"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    app_id: Mapped[str] = mapped_column(ForeignKey("applications.app_id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(50))
+    occurred_at: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class AuditEntryRow(Base):
+    __tablename__ = "audit_entries"
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    correlation_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    consent_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class SessionRow(Base):
+    __tablename__ = "sessions"
+    session_id: Mapped[str] = mapped_column(String(180), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(120), index=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class EventRow(Base):
+    __tablename__ = "events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    app_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(120), index=True)
+    occurred_at: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class IntegrationStateRow(Base):
+    __tablename__ = "integration_state"
+    system: Mapped[str] = mapped_column(String(120), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class MockStateRow(Base):
+    __tablename__ = "mock_department_state"
+    state_key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class CounterRow(Base):
+    __tablename__ = "counters"
+    counter_key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    next_value: Mapped[int] = mapped_column(Integer)
+
+
+def initialize() -> None:
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("SELECT 1")
+        Base.metadata.create_all(engine)
+    except Exception as error:
+        raise RuntimeError(f"PostgreSQL initialization failed: {error}") from error
+
+
+def _int_suffix(value: str, default: int) -> int:
+    try:
+        return int(value.rsplit("-", 1)[-1]) + 1
+    except (ValueError, AttributeError):
+        return default
+
+
+def persist_state() -> None:
+    from app.core.audit_bus import audit_bus
+    from app.core.event_bus import event_bus
+    from app.core.notification_manager import notification_manager
+    from app.engine import adapters, consent_manager, dependency_orchestrator, workflow_engine
+    from app.mocks import education_dept, revenue_dept
+    from app.mocks.identity_provider import SESSIONS
+
+    with Session(engine) as session:
+        for model in (WorkflowHistoryRow, EventRow, AuditEntryRow, NotificationRow, EntityReviewRow, ConflictReviewRow, DependencyRow, ConsentRow, ApplicationRow, SessionRow, IntegrationStateRow, MockStateRow, CounterRow):
+            session.execute(delete(model))
+        for app_id, app in workflow_engine.APPLICATIONS.items():
+            session.add(ApplicationRow(app_id=app_id, citizen_id=app["citizenId"], status=app["status"], payload=app))
+            for history in app.get("statusHistory", []):
+                session.add(WorkflowHistoryRow(app_id=app_id, status=history["status"], occurred_at=history["at"], payload=history))
+        for dep_id, dependency in workflow_engine.DEPENDENCIES.items():
+            session.add(DependencyRow(dependency_id=dep_id, app_id=dependency["appId"], status=dependency["status"], payload=dependency))
+        for citizen_id, receipt in consent_manager.CONSENTS.items():
+            app = next((candidate for candidate in workflow_engine.APPLICATIONS.values() if candidate.get("consentId") == receipt.get("consentId")), None) or workflow_engine.find_active_application(citizen_id)
+            session.add(ConsentRow(consent_id=receipt["consentId"], citizen_id=citizen_id, app_id=app["appId"] if app else None, payload=receipt))
+        for review_id, review in workflow_engine.ENTITY_REVIEWS.items():
+            session.add(EntityReviewRow(review_id=review_id, app_id=review["appId"], payload=review))
+        for review_id, review in workflow_engine.CONFLICT_REVIEWS.items():
+            session.add(ConflictReviewRow(review_id=review_id, app_id=review["appId"], payload=review))
+        for item in notification_manager.notifications:
+            session.add(NotificationRow(notification_id=item["notificationId"], recipient_user_id=item["recipientUserId"], app_id=item.get("applicationId"), payload=item))
+        for event in event_bus.events:
+            payload = event.get("payload", {})
+            session.add(EventRow(app_id=payload.get("appId"), event_type=event["type"], occurred_at=event["timestamp"], payload=event))
+        for entry in audit_bus.entries:
+            session.add(AuditEntryRow(sequence=entry["sequence"], correlation_id=entry.get("correlationId"), consent_id=entry.get("consentId"), payload=entry))
+        for token, user in SESSIONS.items():
+            session.add(SessionRow(session_id=token, user_id=user["userId"], payload=user))
+        for system, state in adapters._availability.items():
+            session.add(IntegrationStateRow(system=system, payload=state))
+        session.add(MockStateRow(state_key="revenue_domicile", payload={"record": revenue_dept.DOMICILE_RECORD}))
+        session.add(MockStateRow(state_key="education", payload={"familyAnnualIncome": education_dept.EDUCATION_RECORD["familyAnnualIncome"]}))
+        counters = {
+            "application": max([_int_suffix(key, 142) for key in workflow_engine.APPLICATIONS] or [142]),
+            "dependency": max([_int_suffix(key, 1) for key in workflow_engine.DEPENDENCIES] or [1]),
+            "review": max([_int_suffix(key, 1) for key in workflow_engine.ENTITY_REVIEWS] or [1]),
+            "conflict": max([_int_suffix(key, 1) for key in workflow_engine.CONFLICT_REVIEWS] or [1]),
+            "notification": max([_int_suffix(item["notificationId"], 1) for item in notification_manager.notifications] or [1]),
+        }
+        for key, value in counters.items(): session.add(CounterRow(counter_key=key, next_value=value))
+        session.commit()
+
+
+def hydrate_state() -> None:
+    from app.core.audit_bus import audit_bus
+    from app.core.event_bus import event_bus
+    from app.core.notification_manager import notification_manager
+    from app.engine import adapters, consent_manager, dependency_orchestrator, workflow_engine
+    from app.mocks import education_dept, revenue_dept
+    from app.mocks.identity_provider import SESSIONS
+
+    with Session(engine) as session:
+        applications = session.query(ApplicationRow).all()
+        workflow_engine.APPLICATIONS.clear(); workflow_engine.DEPENDENCIES.clear(); workflow_engine.ENTITY_REVIEWS.clear(); workflow_engine.CONFLICT_REVIEWS.clear(); consent_manager.CONSENTS.clear(); notification_manager.notifications.clear(); event_bus.events.clear(); audit_bus.entries.clear(); SESSIONS.clear(); adapters._availability.clear(); adapters._last_health.clear()
+        for row in applications: workflow_engine.APPLICATIONS[row.app_id] = row.payload
+        for row in session.query(DependencyRow).all(): workflow_engine.DEPENDENCIES[row.dependency_id] = row.payload
+        for row in session.query(ConsentRow).all(): consent_manager.CONSENTS[row.citizen_id] = row.payload
+        for row in session.query(EntityReviewRow).all(): workflow_engine.ENTITY_REVIEWS[row.review_id] = row.payload
+        for row in session.query(ConflictReviewRow).all(): workflow_engine.CONFLICT_REVIEWS[row.review_id] = row.payload
+        notification_manager.notifications.extend(row.payload for row in session.query(NotificationRow).order_by(NotificationRow.notification_id).all())
+        event_bus.events.extend(row.payload for row in session.query(EventRow).order_by(EventRow.id).all())
+        audit_bus.entries.extend(row.payload for row in session.query(AuditEntryRow).order_by(AuditEntryRow.sequence).all())
+        SESSIONS.update({row.session_id: row.payload for row in session.query(SessionRow).all()})
+        for row in session.query(IntegrationStateRow).all(): adapters._availability[row.system] = row.payload
+        for row in session.query(MockStateRow).all():
+            if row.state_key == "revenue_domicile": revenue_dept.DOMICILE_RECORD = row.payload.get("record")
+            if row.state_key == "education": education_dept.set_income_conflict(row.payload.get("familyAnnualIncome") == "550000")
+        counters = {row.counter_key: row.next_value for row in session.query(CounterRow).all()}
+        workflow_engine._counter = itertools.count(counters.get("application", 142)); dependency_orchestrator._dependency_counter = itertools.count(counters.get("dependency", 1)); workflow_engine._review_counter = itertools.count(counters.get("review", 1)); workflow_engine._conflict_counter = itertools.count(counters.get("conflict", 1)); notification_manager._counter = itertools.count(counters.get("notification", 1))
