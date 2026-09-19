@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 from datetime import datetime, timezone
 
 from app.core.event_bus import event_bus
@@ -35,6 +36,7 @@ def ensure_dependency(app: dict, requirement_code: str) -> dict:
         "requiredService": provider_selection["requiredService"],
         "requiredData": requirement_code,
         "provider": provider_selection["provider"],
+        "providerId": provider_selection.get("providerId", provider_selection["provider"]),
         "providerService": provider_selection["serviceId"],
         "serviceName": provider_selection["serviceName"],
         "adapter": provider_selection["adapter"],
@@ -81,13 +83,28 @@ def ensure_missing_dependencies(app: dict) -> list[dict]:
     return dependencies
 
 
-def initiate_dependency(citizen_id: str, app: dict, requirement_code: str) -> dict:
+def initiate_dependency(citizen_id: str, app: dict, requirement_code: str, async_override: bool = False) -> dict:
     dependency = ensure_dependency(app, requirement_code)
     service_id = dependency.get("providerService") or dependency.get("serviceId")
     if dependency["status"] == "COMPLETED":
         return {"success": True, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "service": service_id, "message": "The required service result is already linked to the application.", "recordId": dependency["resultReference"], "attempts": dependency["attempts"]}
     if dependency["attempts"] >= dependency["maxAttempts"]:
         return {"success": False, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "attempts": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "providerStatus": dependency["providerStatus"], "message": "The dependency reached its retry limit and remains waiting for administrative recovery."}
+    if os.getenv("ASYNC_PROVIDER_JOBS", "false").lower() in {"1", "true", "yes"} and not async_override:
+        from app.core.job_queue import JobQueue
+        from app.core.redis_service import RedisService
+        if dependency.get("jobStatus") in {"QUEUED", "RUNNING"}:
+            return {"success": False, "queued": True, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "message": "The provider request is already queued."}
+        job = JobQueue(RedisService(enabled=True)).enqueue(
+            "provider.dependency.retrieve", app["appId"], app["appId"], dependency["dependencyId"],
+            {"serviceId": service_id, "requirementCode": requirement_code,
+             "providerId": dependency.get("providerId"), "idempotencyKey": dependency["dependencyId"], "maxAttempts": dependency["maxAttempts"]},
+        )
+        dependency.update({"jobId": job["jobId"], "jobStatus": "QUEUED", "updatedAt": _now()})
+        event_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "correlationId": app["appId"], "jobId": job["jobId"], "service": service_id}
+        event_bus.publish("PROVIDER_JOB_ENQUEUED", event_payload)
+        audit_bus.append("SYSTEM", "DEPENDENCY", "Provider operation queued", dependency.get("provider", "CONFIGURED_PROVIDER"), "QUEUE", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "jobId": job["jobId"]}, correlation_id=app["appId"])
+        return {"success": False, "queued": True, "jobId": job["jobId"], "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "message": "The provider request was queued for processing."}
     dependency["attempts"] += 1
     dependency["updatedAt"] = _now()
     event_bus.publish("REVENUE_SERVICE_REQUESTED", {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "service": service_id, "requiredData": requirement_code})
@@ -97,7 +114,7 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str) -> di
     if not record:
         dependency["status"] = "WAITING_FOR_DEPENDENCY"
         dependency["providerStatus"] = "UNAVAILABLE" if not service_available(dependency["provider"]) else "DEGRADED"
-        dependency["errorCategory"] = "UNAVAILABLE"
+        dependency["errorCategory"] = getattr(adapter_result, "error_category", None) or "UPSTREAM_UNAVAILABLE"
         dependency["lastError"] = f"{dependency['provider']} service unavailable."
         dependency["failureHistory"].append({"attempt": dependency["attempts"], "at": dependency["updatedAt"], "error": dependency["lastError"]})
         failure_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "provider": dependency["provider"], "attempt": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "status": dependency["status"], "error": dependency["lastError"]}
@@ -143,3 +160,46 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str) -> di
 
 def initiate_domicile(citizen_id: str, app: dict) -> dict:
     return initiate_dependency(citizen_id, app, "DOMICILE_PROOF")
+
+
+def execute_provider_job(job: dict) -> dict:
+    """Generic worker entry point: job -> dependency -> configured adapter."""
+    from app.engine.workflow_engine import APPLICATIONS
+    payload = job.get("payload", {})
+    app = APPLICATIONS.get(job.get("applicationId"))
+    dependency = DEPENDENCIES.get(job.get("dependencyId"))
+    if not app or not dependency:
+        raise RuntimeError("Provider job references missing application or dependency")
+    if dependency.get("status") == "COMPLETED":
+        return {"status": "ALREADY_COMPLETED", "dependencyId": dependency["dependencyId"]}
+    result = initiate_dependency(payload.get("citizenId", app["citizenId"]), app, payload.get("requirementCode", dependency.get("requiredData")), async_override=True)
+    if result.get("success"):
+        dependency.update({"jobId": job["jobId"], "jobStatus": "COMPLETED"})
+        from app.core.persistence import persist_state
+        persist_state()
+        return result
+    dependency["jobStatus"] = "WAITING"
+    category = dependency.get("errorCategory") or "UPSTREAM_UNAVAILABLE"
+    error = RuntimeError(result.get("message", "Provider operation failed"))
+    error.category = category
+    error.retryable = category in {"TRANSIENT", "TIMEOUT", "UPSTREAM_UNAVAILABLE", "UNAVAILABLE", "NETWORK"}
+    from app.core.persistence import persist_state
+    persist_state()
+    raise error
+
+
+def mark_provider_job_dead_letter(job: dict, category: str, message: str) -> None:
+    from app.core.persistence import persist_state
+    from app.core.job_queue import safe_error_message
+    from app.engine.workflow_engine import APPLICATIONS
+    app = APPLICATIONS.get(job.get("applicationId"))
+    dependency = DEPENDENCIES.get(job.get("dependencyId"))
+    if not app or not dependency:
+        return
+    safe_message = safe_error_message(message)
+    dependency.update({"jobStatus": "DEAD_LETTER", "errorCategory": category, "lastError": safe_message, "updatedAt": _now()})
+    payload = {"citizenId": app["citizenId"], "appId": app["appId"], "dependencyId": dependency["dependencyId"], "jobId": job["jobId"], "correlationId": job["correlationId"], "provider": dependency.get("provider"), "errorCategory": category, "error": safe_message}
+    event_bus.publish("PROVIDER_JOB_DEAD_LETTER", payload)
+    event_bus.publish("DEPENDENCY_SERVICE_FAILED", payload)
+    audit_bus.append("SYSTEM", "DEPENDENCY", "Provider operation moved to dead letter", dependency.get("provider", "CONFIGURED_PROVIDER"), "DEAD_LETTER", app.get("consentId"), payload=payload, correlation_id=job["correlationId"])
+    persist_state()

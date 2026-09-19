@@ -118,6 +118,7 @@ class AdapterResult:
     correlation_id: str | None = None
     idempotency_key: str | None = None
     response_ms: float | None = None
+    error_category: str | None = None
 
 
 class AdapterError(Exception):
@@ -207,7 +208,7 @@ class SourceAdapter(ProviderAdapter):
         except ConnectionError as error:
             raise AdapterError(str(error), "NETWORK", transient=True) from error
         except Exception as error:
-            raise AdapterError(str(error), "UPSTREAM", transient=False) from error
+            raise AdapterError(str(error), "PERMANENT", transient=False) from error
         elapsed = round((time.perf_counter() - started) * 1000, 2)
         return AdapterResult(self.normalize(record), provider=self.source, operation=context.get("operation", "retrieve"), correlation_id=context.get("correlation_id"), idempotency_key=context.get("idempotency_key"), response_ms=elapsed)
 
@@ -228,11 +229,11 @@ class SourceAdapter(ProviderAdapter):
 
     def discover(self, request: dict, **context) -> AdapterResult:
         result = self.fetch(request["citizenId"], correlation_id=context.get("correlation_id"), idempotency_key=context.get("idempotency_key"))
-        return AdapterResult(result.get("record"), result.get("attempts", 1), result.get("delayed", False), result.get("queued", False), self.source, "discover", context.get("correlation_id"), context.get("idempotency_key"))
+        return AdapterResult(result.get("record"), result.get("attempts", 1), result.get("delayed", False), result.get("queued", False), self.source, "discover", context.get("correlation_id"), context.get("idempotency_key"), error_category=result.get("errorCategory"))
 
     def retrieve(self, request: Any, **context) -> AdapterResult:
         result = self.fetch(request if isinstance(request, str) else request["citizenId"], correlation_id=context.get("correlation_id"), idempotency_key=context.get("idempotency_key"))
-        return AdapterResult(result.get("record"), result.get("attempts", 1), result.get("delayed", False), result.get("queued", False), self.source, "retrieve", context.get("correlation_id"), context.get("idempotency_key"))
+        return AdapterResult(result.get("record"), result.get("attempts", 1), result.get("delayed", False), result.get("queued", False), self.source, "retrieve", context.get("correlation_id"), context.get("idempotency_key"), error_category=result.get("errorCategory"))
 
     def get_status(self, operation_id: str, **context) -> AdapterResult:
         return AdapterResult({"operationId": operation_id, "status": "UNKNOWN"}, provider=self.source, operation="get_status")

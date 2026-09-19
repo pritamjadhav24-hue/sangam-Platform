@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0003_provider_capabilities"
+MIGRATION_HEAD = "0004_provider_jobs"
 
 
 class Base(DeclarativeBase):
@@ -152,6 +152,25 @@ class CounterRow(Base):
     next_value: Mapped[int] = mapped_column(Integer)
 
 
+class ProviderJobRow(Base):
+    __tablename__ = "provider_jobs"
+    job_id: Mapped[str] = mapped_column(String(180), primary_key=True)
+    job_type: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    correlation_id: Mapped[str] = mapped_column(String(120), index=True)
+    application_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    dependency_id: Mapped[Optional[str]] = mapped_column(String(160), nullable=True, index=True)
+    provider_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    created_at: Mapped[str] = mapped_column(String(64))
+    started_at: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    completed_at: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    error_category: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
 class DepartmentRow(Base):
     __tablename__ = "departments"
     department_id: Mapped[str] = mapped_column(String(120), primary_key=True)
@@ -217,7 +236,79 @@ def initialize() -> None:
         if version != MIGRATION_HEAD:
             raise RuntimeError(f"Database schema is at migration {version!r}; run 'alembic upgrade head' before starting SANGAM.")
     except Exception as error:
-        raise RuntimeError(f"PostgreSQL initialization failed: {error}") from error
+            raise RuntimeError(f"PostgreSQL initialization failed: {error}") from error
+
+
+def _job_from_row(row: ProviderJobRow) -> dict:
+    return {"jobId": row.job_id, "jobType": row.job_type, "status": row.status,
+            "correlationId": row.correlation_id, "applicationId": row.application_id,
+            "dependencyId": row.dependency_id, "providerId": row.provider_id,
+            "attempt": row.attempt, "maxAttempts": row.max_attempts,
+            "createdAt": row.created_at, "startedAt": row.started_at,
+            "completedAt": row.completed_at, "error": ({"category": row.error_category, "message": row.error_message} if row.error_category else None),
+            "payload": row.payload or {}}
+
+
+def persist_provider_job(job: dict) -> dict:
+    """Persist the authoritative job record before it is put on Redis."""
+    with Session(engine) as session:
+        row = session.get(ProviderJobRow, job["jobId"])
+        error = job.get("error") or {}
+        values = {"job_type": job["jobType"], "status": job["status"], "correlation_id": job["correlationId"],
+                  "application_id": job.get("applicationId"), "dependency_id": job.get("dependencyId"),
+                  "provider_id": job.get("providerId"), "attempt": job.get("attempt", 0),
+                  "max_attempts": job.get("maxAttempts", 3), "created_at": job["createdAt"],
+                  "started_at": job.get("startedAt"), "completed_at": job.get("completedAt"),
+                  "error_category": error.get("category"), "error_message": str(error.get("message", ""))[:500] or None,
+                  "payload": job.get("payload") or {}}
+        if row is None:
+            session.add(ProviderJobRow(job_id=job["jobId"], **values))
+        else:
+            for key, value in values.items(): setattr(row, key, value)
+        session.commit()
+    return job
+
+
+def claim_provider_job(job_id: str) -> dict | None:
+    """Atomically claim only a queued job; duplicate deliveries become no-ops."""
+    with Session(engine) as session:
+        row = session.execute(select(ProviderJobRow).where(ProviderJobRow.job_id == job_id).with_for_update()).scalar_one_or_none()
+        if row is None or row.status != "QUEUED":
+            return None
+        row.status = "RUNNING"
+        row.attempt += 1
+        row.started_at = datetime.now(timezone.utc).isoformat()
+        session.commit()
+        return _job_from_row(row)
+
+
+def update_provider_job(job: dict) -> dict:
+    with Session(engine) as session:
+        row = session.get(ProviderJobRow, job["jobId"])
+        if row is None:
+            raise KeyError(f"Unknown provider job {job['jobId']}")
+        row.status = job["status"]
+        row.attempt = job.get("attempt", row.attempt)
+        row.started_at = job.get("startedAt")
+        row.completed_at = job.get("completedAt")
+        error = job.get("error") or {}
+        row.error_category = error.get("category")
+        row.error_message = str(error.get("message", ""))[:500] or None
+        session.commit()
+    return job
+
+
+def recover_provider_jobs() -> list[dict]:
+    """Turn abandoned RUNNING jobs back into queued work after a restart."""
+    recovered = []
+    with Session(engine) as session:
+        rows = session.execute(select(ProviderJobRow).where(ProviderJobRow.status.in_(["QUEUED", "RUNNING"])).with_for_update()).scalars().all()
+        for row in rows:
+            row.status = "QUEUED"
+            row.started_at = None
+            recovered.append(_job_from_row(row))
+        session.commit()
+    return recovered
 
 
 def catalog_seeded() -> bool:
@@ -259,10 +350,17 @@ def seed_catalog() -> None:
             if session.get(ProviderCapabilityRow, capability_id) is None:
                 session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=definition["requirementCode"], service_id=definition["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": definition["requirementCode"], "providerId": provider_id, "serviceId": definition["serviceId"]}))
         session.commit()
+    from app.core.redis_service import RedisService
+    RedisService().delete("sangam:cache:catalog:v1")
 
 
 def catalog_snapshot() -> dict:
     from app.core.provider_config import provider_runtime_config
+    from app.core.redis_service import RedisService
+    cache = RedisService()
+    cached = cache.get_json("sangam:cache:catalog:v1")
+    if cached:
+        return cached
     def safe_payload(payload: dict) -> dict:
         blocked = {"password", "secret", "token", "credential", "clientsecret", "client_secret"}
         return {key: value for key, value in payload.items() if not any(term in key.lower() for term in blocked)}
@@ -274,7 +372,9 @@ def catalog_snapshot() -> dict:
         safe_providers = []
         for row in session.query(ProviderRow).filter_by(active=True).all():
             safe_providers.append({"providerId": row.provider_id, "name": row.name, "departmentId": row.department_id, "adapter": row.adapter_type, "runtime": provider_runtime_config(row.provider_id, row.payload)})
-        return {"schemes": schemes, "services": services, "capabilities": capabilities, "departments": departments, "providers": safe_providers}
+        snapshot = {"schemes": schemes, "services": services, "capabilities": capabilities, "departments": departments, "providers": safe_providers}
+        cache.set_json("sangam:cache:catalog:v1", snapshot, 300)
+        return snapshot
 
 
 def ensure_user_accounts() -> None:

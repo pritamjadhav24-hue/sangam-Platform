@@ -6,6 +6,12 @@ The production-upgrade foundation adds PostgreSQL-backed departments, providers,
 
 Integrations use a provider adapter contract with health checks, discovery, submission, status, retrieval, normalization, bounded retries, error categories, correlation IDs, and idempotency keys. REST, SOAP-ready, file/CSV-ready, and webhook-ready implementations can share this contract; the current adapters are sandbox/mock implementations only.
 
+Redis is an explicit, non-authoritative platform dependency. When enabled, it is used only for short-lived catalog metadata caching, rate/coordination primitives, and the generic job queue. PostgreSQL remains authoritative for applications, requirements, dependencies, workflow state, audit, events, notifications, providers, and capabilities. Set `REDIS_ENABLED=false` for local tests or a no-Redis development run; set `REDIS_ENABLED=true` with a valid `REDIS_URL` when Redis is required. An enabled but unavailable Redis instance fails readiness rather than silently degrading.
+
+The worker is started by Compose as a separate process and consumes generic jobs containing job type, correlation ID, application/dependency IDs, attempt, timestamps, status, and a safe payload. The current application path remains synchronous by default so the existing golden path is preserved; provider operations can be moved behind the same queue as handlers are introduced. No credentials or citizen payloads are cached in Redis, and Redis is not exposed on a host port.
+
+Set `ASYNC_PROVIDER_JOBS=true` to route provider dependency retrieval through the durable PostgreSQL-backed job record and Redis transport. The worker claims jobs atomically in PostgreSQL, invokes the configured adapter factory, and lets the existing dependency engine perform the canonical workflow transition and event/audit/notification side effects. `ASYNC_PROVIDER_JOBS=false` retains synchronous compatibility for local tests.
+
 Provider metadata and capabilities are stored in PostgreSQL. Sensitive runtime values are referenced through environment variables such as `PROVIDER_<ID>_BASE_URL`, `PROVIDER_<ID>_CLIENT_ID`, and `PROVIDER_<ID>_CLIENT_SECRET`. Catalog APIs expose only whether a referenced value is configured, never the value itself. No real government credentials or live government API integrations are included.
 
 To onboard a provider, create its department/provider records, assign a `provider_capabilities` row pointing to the service and requirement code, set the adapter type/protocol and non-secret retry metadata, configure secret references in the deployment environment, then enable the provider. The dependency engine and requirement analyzer discover the capability from PostgreSQL; no provider-specific branch is required. Sandbox implementations use configuration-only handler names and the same adapter factory used by future real integrations.
@@ -23,6 +29,8 @@ copy .env.example .env
 ```
 
 Edit `.env` and replace the placeholder PostgreSQL password, JWT secret, and demo bootstrap passwords. The Compose backend connects to the PostgreSQL service as `postgres`, not to a developer-installed database on `localhost`.
+
+For Compose, use `REDIS_URL=redis://redis:6379/0` (or leave `REDIS_URL` unset so the Compose default is used). The `localhost` value in `.env.example` is for a backend running directly on the host.
 
 Production defaults do not seed demo users or catalog data. For a development/demo environment, explicitly set `SANGAM_SEED_CATALOG=true` and `SANGAM_SEED_DEMO_USERS=true` in `.env`.
 

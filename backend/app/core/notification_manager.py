@@ -70,7 +70,7 @@ class NotificationManager:
             self._citizen(payload, "APPLICATION_COMPLETED", "Application completed", "Your application journey has completed successfully.")
         elif event_type == "APPLICATION_REJECTED":
             self._citizen(payload, "APPLICATION_REJECTED", "Application rejected", "Your application was rejected after review.")
-        elif event_type in {"DEPENDENCY_SERVICE_FAILED", "DEPENDENCY_RETRY_SCHEDULED"}:
+        elif event_type in {"DEPENDENCY_SERVICE_FAILED", "DEPENDENCY_RETRY_SCHEDULED", "PROVIDER_JOB_DEAD_LETTER"}:
             self._citizen(payload, "INTEGRATION_FAILURE", "Department service unavailable", "A required department service is unavailable; your application remains waiting for retry.")
             self._role("ADMIN", "INTEGRATION_FAILURE", "Integration failure", "A simulated department service reported a dependency failure.", payload)
         elif event_type == "DEPENDENCY_RECOVERED":
@@ -100,7 +100,7 @@ notification_manager = NotificationManager()
 for _event_name in [
     "APPLICATION_STATUS_CHANGED", "DEPENDENCY_CREATED", "DOMICILE_ISSUED", "DEPENDENCY_RESOLVED",
     "APPLICATION_SUBMITTED", "APPLICATION_COMPLETED", "APPLICATION_REJECTED", "DEPENDENCY_SERVICE_FAILED",
-    "DEPENDENCY_RETRY_SCHEDULED", "DEPENDENCY_RECOVERED", "ENTITY_MATCH_REVIEW_REQUIRED", "CONFLICT_DETECTED",
+    "DEPENDENCY_RETRY_SCHEDULED", "DEPENDENCY_RECOVERED", "PROVIDER_JOB_DEAD_LETTER", "ENTITY_MATCH_REVIEW_REQUIRED", "CONFLICT_DETECTED",
     "INTEGRATION_HEALTH_CHANGED",
 ]:
     event_bus.subscribe(_event_name, notification_manager.handle)
