@@ -256,6 +256,22 @@ def initialize() -> None:
             raise RuntimeError(f"PostgreSQL initialization failed: {error}") from error
 
 
+def validate_production_configuration() -> None:
+    """Reject development/demo defaults when explicitly running in production."""
+    mode = os.getenv("SANGAM_ENV", "development").strip().lower()
+    if mode not in {"production", "prod"}:
+        return
+    if os.getenv("SANGAM_SEED_CATALOG", "false").lower() in {"1", "true", "yes"} or os.getenv("SANGAM_SEED_DEMO_USERS", "false").lower() in {"1", "true", "yes"}:
+        raise RuntimeError("Demo catalog/user seeding must be disabled in production.")
+    origins = [item.strip().lower() for item in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if item.strip()]
+    if not origins or "*" in origins or any("localhost" in item or "127.0.0.1" in item for item in origins):
+        raise RuntimeError("Production requires explicit non-local CORS_ALLOWED_ORIGINS.")
+    with Session(engine) as session:
+        sandbox = session.query(ProviderRow).filter(ProviderRow.active.is_(True), ProviderRow.environment != "PRODUCTION").count()
+    if sandbox:
+        raise RuntimeError("Production cannot start with active non-PRODUCTION providers.")
+
+
 def _job_from_row(row: ProviderJobRow) -> dict:
     return {"jobId": row.job_id, "jobType": row.job_type, "status": row.status,
             "correlationId": row.correlation_id, "applicationId": row.application_id,

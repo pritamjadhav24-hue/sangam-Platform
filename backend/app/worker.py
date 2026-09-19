@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 import os
 import socket
+import sys
 
 from app.core.job_queue import JobQueue, safe_error_message
 from app.core.redis_service import RedisService
@@ -90,4 +91,18 @@ def main():
         time.sleep(0.25)
 
 
-if __name__ == "__main__": main()
+def healthcheck() -> int:
+    """Container healthcheck: infrastructure and a fresh worker heartbeat are required."""
+    from app.core.persistence import initialize, worker_operational_status
+    initialize()
+    service = RedisService(enabled=True)
+    service.health_check()
+    heartbeat = service.get("sangam:worker:heartbeat")
+    workers = worker_operational_status()
+    if not heartbeat or not any(item["status"] == "AVAILABLE" and item["redisStatus"] == "AVAILABLE" for item in workers):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(healthcheck() if "--healthcheck" in sys.argv else (main() or 0))

@@ -10,5 +10,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY main.py .
 
+RUN addgroup --system sangam && adduser --system --ingroup sangam sangam \
+    && chown -R sangam:sangam /app
+USER sangam
+
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

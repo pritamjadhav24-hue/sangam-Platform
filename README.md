@@ -87,3 +87,83 @@ npm run build
 ```
 
 Do not place real passwords, JWT secrets, database URLs containing credentials, or access tokens in source control or documentation.
+
+## Deployment readiness
+
+### Configuration and startup order
+
+Required deployment settings are `DATABASE_URL`, `JWT_SECRET`, `CORS_ALLOWED_ORIGINS`, `REDIS_URL` when Redis is enabled, and `SANGAM_ENV`. `JWT_SECRET` must be a high-entropy deployment secret; placeholders in the example files are not valid production values. `ASYNC_PROVIDER_JOBS`, rate-limit settings, and worker identity are optional operational settings. Provider endpoints and credentials are configured by authorized deployment owners through PostgreSQL metadata and environment secret references; no live government credentials or contracts are included here.
+
+For Compose, the startup order is PostgreSQL and Redis health, backend migration-state/configuration validation, worker heartbeat, then frontend. The backend intentionally refuses to start when PostgreSQL is unavailable, Alembic is not at `head`, or production-mode configuration contains demo/local defaults. The worker exits if PostgreSQL or Redis is unavailable and its healthcheck requires a fresh PostgreSQL-backed heartbeat.
+
+Production deployment should use an explicit non-local origin and mode:
+
+```text
+copy .env.example .env
+# Set SANGAM_ENV=production, replace every placeholder, and provide authorized provider references.
+docker compose up -d postgres redis
+docker compose run --rm backend alembic upgrade head
+docker compose up -d backend worker frontend
+docker compose ps
+```
+
+The frontend API URL is a build-time value (`VITE_API_BASE_URL`). Set it to the externally reachable backend API before building the frontend image. Do not put JWTs, provider credentials, or database URLs in frontend variables.
+
+### Health, restart, and recovery
+
+- `/health/live` reports process liveness only.
+- `/health/ready` checks PostgreSQL migration state, Redis when enabled, and worker availability when Redis jobs are enabled.
+- The worker healthcheck verifies PostgreSQL, Redis, and a fresh heartbeat.
+- PostgreSQL is authoritative. Redis queues/cache/locks can be rebuilt from PostgreSQL state.
+- Restarting the worker reclaims abandoned `RUNNING` provider jobs from PostgreSQL.
+- If Redis restarts while PostgreSQL remains available, queued transport messages are rebuilt from durable provider-job state by worker recovery. A disabled/unavailable Redis instance makes async job operations unavailable rather than falsely successful.
+
+Useful checks:
+
+```text
+curl http://localhost:8001/health/live
+curl http://localhost:8001/health/ready
+docker compose logs --no-color backend worker postgres redis frontend
+```
+
+### Backup and restore
+
+Back up PostgreSQL using a custom-format dump:
+
+```text
+pg_dump --format=custom --file=sangam-$(Get-Date -Format yyyyMMdd-HHmmss).dump "$env:DATABASE_URL"
+```
+
+Restore only into a separate test database first; never overwrite the development or production database during validation:
+
+```text
+createdb sangam_restore_test
+pg_restore --clean --if-exists --dbname="$env:RESTORE_DATABASE_URL" sangam-backup.dump
+set ALEMBIC_DATABASE_URL=%RESTORE_DATABASE_URL%
+cd backend
+alembic current
+alembic check
+```
+
+Successful `pg_dump` or `pg_restore` is not proof of a usable backup. Validate that the restored database reaches the expected Alembic head, passes application readiness, and can read persisted applications and workflow state. Redis is non-authoritative and is intentionally excluded from backup/restore requirements.
+
+### Demo, sandbox, and provider boundaries
+
+Demo users and catalog seeding require explicit `SANGAM_SEED_DEMO_USERS=true` and `SANGAM_SEED_CATALOG=true`; both must remain disabled in production. Production startup rejects active non-`PRODUCTION` providers and local CORS origins. Mock/sandbox adapters are for development/demo only. Real provider credentials, endpoints, contracts, and authorization remain deployment-owner responsibilities.
+
+### Troubleshooting and known limitations
+
+- `Database schema is at migration ...; run 'alembic upgrade head'`: apply migrations before starting backend/worker.
+- Redis readiness failure: verify `REDIS_ENABLED`, `REDIS_URL`, and Redis health; do not switch Redis to an in-memory fallback in deployment.
+- Worker `UNAVAILABLE` or `STALE`: inspect worker logs and PostgreSQL/Redis readiness; abandoned jobs remain recoverable from PostgreSQL.
+- Production configuration rejection: remove demo seeding, use explicit non-local CORS origins, and ensure active providers are marked `PRODUCTION` with authorized secret references.
+- This repository does not include real government integrations, production secret management, distributed rate-limit coordination, TLS termination, WAF policy, or an executed backup restore test.
+
+Shutdown and restart without deleting data:
+
+```text
+docker compose stop
+docker compose start
+```
+
+Do not use `docker compose down -v` unless intentional destruction of the PostgreSQL volume has been approved.

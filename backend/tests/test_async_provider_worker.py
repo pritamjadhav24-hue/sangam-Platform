@@ -8,7 +8,7 @@ from app.core.demo_state import reset_demo_state
 from app.core.event_bus import event_bus
 from app.core.notification_manager import notification_manager
 from app.core.persistence import persist_state
-from app.core.redis_service import MemoryRedis, test_redis_service
+from app.core.redis_service import MemoryRedis, build_test_redis_service
 from app.engine.adapters import set_integration_availability
 from app.engine.consent_manager import create_consent
 from app.engine.dependency_orchestrator import ensure_domicile_dependency, initiate_domicile
@@ -25,7 +25,7 @@ class AsyncProviderWorkerTests(unittest.TestCase):
         reset_demo_state()
         set_integration_availability("Revenue Department", True)
         self.memory = MemoryRedis()
-        self.redis = test_redis_service(self.memory)
+        self.redis = build_test_redis_service(self.memory)
         self.patches = [
             patch.dict(os.environ, {"ASYNC_PROVIDER_JOBS": "true"}),
             patch("app.core.redis_service.RedisService", lambda enabled=True: self.redis),

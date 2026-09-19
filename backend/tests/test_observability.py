@@ -7,7 +7,7 @@ from app.core.observability import structured_log
 from app.core.persistence import job_operational_summary, record_worker_heartbeat, worker_operational_status
 from app.core.persistence import provider_job_detail, replay_dead_letter_job
 from app.core.job_queue import JobQueue
-from app.core.redis_service import MemoryRedis, RedisService, test_redis_service
+from app.core.redis_service import MemoryRedis, RedisService, build_test_redis_service
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class ObservabilityTests(unittest.TestCase):
         self.assertNotIn("raw_response", record)
 
     def test_worker_heartbeat_and_postgres_job_metrics_are_operational_views(self):
-        record_worker_heartbeat("test-worker", "AVAILABLE", test_redis_service(MemoryRedis()).health_check()["status"])
+        record_worker_heartbeat("test-worker", "AVAILABLE", build_test_redis_service(MemoryRedis()).health_check()["status"])
         self.assertTrue(any(item["workerId"] == "test-worker" for item in worker_operational_status()))
         summary = job_operational_summary()
         self.assertIn("QUEUED", summary["counts"])
@@ -33,7 +33,7 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 403)
 
     def test_dead_letter_replay_requeues_and_redis_failure_does_not_change_state(self):
-        redis = test_redis_service(MemoryRedis())
+        redis = build_test_redis_service(MemoryRedis())
         queue = JobQueue(redis)
         job = queue.enqueue("replay.test", "APP-REPLAY", "APP-REPLAY", "DEP-REPLAY", {})
         claimed = queue.claim(job)

@@ -2,14 +2,14 @@ import time
 import unittest
 
 from app.core.job_queue import JobQueue
-from app.core.redis_service import MemoryRedis, RedisConfigurationError, RedisService, RedisUnavailable, test_redis_service
+from app.core.redis_service import MemoryRedis, RedisConfigurationError, RedisService, RedisUnavailable, build_test_redis_service
 from app.worker import run_once
 
 
 class RedisJobTests(unittest.TestCase):
     def test_cache_ttl_and_invalidation(self):
         memory = MemoryRedis()
-        redis = test_redis_service(memory)
+        redis = build_test_redis_service(memory)
         redis.set_json("catalog", {"schemes": ["safe-metadata"]}, 1)
         self.assertEqual(redis.get_json("catalog")["schemes"], ["safe-metadata"])
         time.sleep(1.05)
@@ -19,7 +19,7 @@ class RedisJobTests(unittest.TestCase):
         self.assertIsNone(redis.get("catalog"))
 
     def test_queue_worker_metadata_and_idempotent_payload(self):
-        redis = test_redis_service(MemoryRedis())
+        redis = build_test_redis_service(MemoryRedis())
         queue = JobQueue(redis)
         job = queue.enqueue("provider.retrieve", "APP-1", "APP-1", "DEP-1", {"safe": True})
         handled = []
@@ -39,13 +39,13 @@ class RedisJobTests(unittest.TestCase):
             JobQueue(RedisService(enabled=False))
 
     def test_short_lived_lock_is_available_at_service_boundary(self):
-        redis = test_redis_service(MemoryRedis())
+        redis = build_test_redis_service(MemoryRedis())
         with redis.lock("application:APP-1"):
             self.assertEqual(redis.get("lock:application:APP-1"), "1")
         self.assertIsNone(redis.get("lock:application:APP-1"))
 
     def test_restart_requeues_abandoned_running_job_from_postgres(self):
-        redis = test_redis_service(MemoryRedis())
+        redis = build_test_redis_service(MemoryRedis())
         queue = JobQueue(redis)
         job = queue.enqueue("restart.test", "APP-RESTART", "APP-RESTART", "DEP-RESTART", {})
         self.assertIsNotNone(queue.claim(job))
@@ -55,7 +55,7 @@ class RedisJobTests(unittest.TestCase):
         self.assertEqual(result["status"], "COMPLETED")
 
     def test_job_payload_rejects_sensitive_identity_fields(self):
-        redis = test_redis_service(MemoryRedis())
+        redis = build_test_redis_service(MemoryRedis())
         with self.assertRaises(ValueError):
             JobQueue(redis).enqueue("unsafe", "APP-1", payload={"citizenId": "CITIZEN_001"})
 

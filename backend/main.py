@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import admin_routes, auth_routes, citizen_routes, officer_routes, catalog_routes
 from app.api import notification_routes
 import app.core.notification_manager
-from app.core.persistence import ensure_user_accounts, initialize, hydrate_state, persist_state, seed_catalog, worker_operational_status
+from app.core.persistence import ensure_user_accounts, initialize, hydrate_state, persist_state, seed_catalog, validate_production_configuration, worker_operational_status
 from app.core.redis_service import RedisService
 
 app = FastAPI(title="GovOrchestrator", version="1.0.0", description="Purpose-bound federated government service orchestration")
@@ -20,6 +20,7 @@ app.include_router(auth_routes.router); app.include_router(citizen_routes.router
 @app.on_event("startup")
 def startup_persistence():
     initialize()
+    validate_production_configuration()
     RedisService().health_check()
     ensure_user_accounts()
     seed_catalog()

@@ -142,5 +142,5 @@ class RedisService:
         finally: lock.release()
 
 
-def test_redis_service(backend=None) -> RedisService:
+def build_test_redis_service(backend=None) -> RedisService:
     return RedisService(enabled=True, url="redis://test.invalid/0", backend=backend or MemoryRedis())
