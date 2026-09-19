@@ -49,7 +49,7 @@ services:
     networks:
       - sangam-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://backend:8000/')"]
       interval: 10s
       timeout: 5s
       retries: 12

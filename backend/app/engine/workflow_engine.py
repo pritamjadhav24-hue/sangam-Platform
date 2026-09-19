@@ -200,18 +200,25 @@ def conflict_review_action(review_id: str, decision: str, officer_id: str, remar
     return app, review
 
 
-def create_application(citizen_id: str, discovery: dict, eligibility: dict) -> dict:
-    app_id = f"SCH-MH-2026-{next(_counter):05d}"
+def create_application(citizen_id: str, discovery: dict, eligibility: dict, service_id: str | None = None) -> dict:
+    service_id = service_id or discovery.get("serviceId") or discovery.get("schemeId")
+    app_id = f"SCH-MH-2026-{next(_counter):05d}" if service_id == "SCH-MH-2026" else f"APP-{service_id or 'SERVICE'}-{next(_counter):05d}"
     created_at = _now()
     requirement_map = {r["code"]: r for r in discovery["requirements"]}
     timeline = []
-    for stage in STAGES:
+    configured_stages = discovery.get("workflowStages") or (STAGES if service_id == "SCH-MH-2026" else ["Submitted", "Requirements", "Verification", "Officer Review", "Completed"])
+    for stage in configured_stages:
         lookup = {"Identity": "IDENTITY", "Income": "INCOME_PROOF", "Academic": "ACADEMIC_RECORD", "Domicile": "DOMICILE_PROOF"}.get(stage)
+        if lookup is None:
+            lookup = next((item["code"] for item in discovery["requirements"] if item.get("label") == stage), None)
         state = "COMPLETED" if lookup and requirement_map.get(lookup, {}).get("status") == "FOUND" else "PENDING"
         timeline.append({"stage": stage, "state": state, "at": created_at if state == "COMPLETED" else None})
 
     app = {
-        "appId": app_id, "citizenId": citizen_id, "schemeId": discovery.get("schemeId"), "status": "DRAFT", "createdAt": created_at,
+        "appId": app_id, "citizenId": citizen_id, "serviceId": service_id, "schemeId": service_id,
+        "serviceName": discovery.get("service", {}).get("name") if isinstance(discovery.get("service"), dict) else discovery.get("serviceName"),
+        "department": discovery.get("service", {}).get("department") if isinstance(discovery.get("service"), dict) else discovery.get("department"),
+        "status": "DRAFT", "createdAt": created_at,
         "updatedAt": created_at, "requirements": discovery["requirements"], "eligibility": eligibility,
         "timeline": timeline, "statusHistory": [{"status": "DRAFT", "at": created_at}],
         "dependencyIds": [], "dependencies": [], "consentId": None, "officerRemarks": None,

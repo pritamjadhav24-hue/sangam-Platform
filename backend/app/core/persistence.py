@@ -509,6 +509,46 @@ def catalog_snapshot() -> dict:
         return snapshot
 
 
+def citizen_service_snapshot(service_id: str | None = None) -> list[dict] | dict | None:
+    """Return the citizen-safe service catalog assembled from normalized DB rows.
+
+    Provider, adapter, endpoint and runtime details intentionally do not cross this
+    boundary.  The scheme catalog is the public application-service catalog while
+    provider_capabilities remains the internal dependency selection source.
+    """
+    def requirement_view(row: SchemeRequirementRow) -> dict:
+        metadata = row.payload or {}
+        return {
+            "code": row.requirement_code,
+            "label": row.label,
+            "mandatory": row.mandatory,
+            "requirementType": metadata.get("requirementType", "VERIFICATION"),
+            "source": metadata.get("source", "GOVERNMENT_SERVICE"),
+            "dependencyServiceId": metadata.get("dependencyServiceId"),
+        }
+
+    with Session(engine) as session:
+        rows = session.query(SchemeCatalogRow).filter_by(active=True).all()
+        result = []
+        for row in rows:
+            metadata = row.payload or {}
+            requirements = [requirement_view(item) for item in session.query(SchemeRequirementRow).filter_by(scheme_id=row.scheme_id).order_by(SchemeRequirementRow.id).all()]
+            result.append({
+                "serviceId": row.scheme_id,
+                "schemeId": row.scheme_id,
+                "name": row.name,
+                "nameMr": metadata.get("nameMr", row.name),
+                "department": row.department,
+                "description": metadata.get("description", "Configured government service"),
+                "category": metadata.get("category", "Government services"),
+                "enabled": row.active,
+                "requirements": requirements,
+            })
+    if service_id is not None:
+        return next((item for item in result if item["serviceId"] == service_id), None)
+    return result
+
+
 def ensure_user_accounts() -> None:
     """Migrate existing demo identities into hashed PostgreSQL accounts once."""
     from app.core.auth import hash_password

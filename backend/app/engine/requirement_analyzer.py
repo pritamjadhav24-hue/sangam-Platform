@@ -10,11 +10,12 @@ from app.engine.validation_engine import detect_canonical_conflicts, detect_conf
 SOURCES = {"IDENTITY": "Civil Registry"}
 
 
-def discover(citizen: dict, simulate_timeout: bool = False, scheme_id: str | None = None) -> dict:
+def discover(citizen: dict, simulate_timeout: bool = False, scheme_id: str | None = None, service_id: str | None = None) -> dict:
     requirements, raw_records, mapping_records, source_records = [], [], [], []
     identity = {"recordId": citizen["citizenId"], "name": citizen["name"], "dob": citizen["dob"], "phone": citizen["phone"], "validUntil": "2030-12-31", "signature": "CIVIL-SIGNED"}
     fetched = {"record": identity, "attempts": 1, "delayed": False, "adapter": "Federated SSO"}
-    scheme = get_scheme(scheme_id) if scheme_id else None
+    selected_service_id = service_id or scheme_id
+    scheme = get_scheme(selected_service_id) if selected_service_id else None
     if scheme is None:
         from app.core.persistence import catalog_snapshot
         configured = catalog_snapshot()["schemes"]
@@ -33,7 +34,7 @@ def discover(citizen: dict, simulate_timeout: bool = False, scheme_id: str | Non
                 fetched = {"record": None, "attempts": 0, "delayed": False, "adapter": "Unregistered adapter"}
         record = fetched["record"]
         if not record:
-            requirements.append({"code": code, "source": source, "status": "MISSING", "action": "Select a registered provider" if not adapter else "Queued connector retry", "adapter": fetched["adapter"]})
+            requirements.append({"code": code, "source": source, "status": "MISSING", "action": "Select a registered provider" if fetched["adapter"] == "Unregistered adapter" else "Queued connector retry", "adapter": fetched["adapter"]})
             continue
         raw_records.append(record)
         source_records.append({"sourceSystem": source, "sourceRecordId": record.get("recordId", record.get("studentId")), "adapter": fetched["adapter"], "record": record})
@@ -44,4 +45,4 @@ def discover(citizen: dict, simulate_timeout: bool = False, scheme_id: str | Non
         status = "FOUND" if payload["valid"] and resolution["decision"] == "AUTO_ACCEPT" and validation["valid"] else "REVIEW_REQUIRED" if resolution["decision"] == "REVIEW" else "UNRESOLVED"
         record_id = record.get("recordId", record.get("studentId"))
         requirements.append({"code": code, "source": source, "status": status, "recordId": record_id, "canonical": canonical, "provenance": {"sourceSystem": source, "adapter": fetched["adapter"], "sourceRecordId": record_id}, "mappingEvidence": mappings, "resolution": resolution, "validation": validation, "verifiedOn": record.get("validUntil"), "adapter": fetched["adapter"], "delayed": fetched.get("delayed", False)})
-    return {"schemeId": scheme.get("id"), "requirements": requirements, "mappingMode": "HYBRID_DETERMINISTIC_PLUS_LOCAL_AI", "mappingEvidence": mapping_records, "semanticMappingEvidence": semantic_mapper.current_schema_evidence(), "conflicts": detect_canonical_conflicts(source_records), "legacyConflictMessages": detect_conflicts(raw_records), "resilienceBanner": "Verification temporarily delayed; retrying automatically in background." if any(r.get("delayed") for r in requirements) else None}
+    return {"schemeId": scheme.get("id"), "serviceId": scheme.get("id"), "service": {"serviceId": scheme.get("id"), "name": scheme.get("name"), "department": scheme.get("department")}, "requirements": requirements, "mappingMode": "HYBRID_DETERMINISTIC_PLUS_LOCAL_AI", "mappingEvidence": mapping_records, "semanticMappingEvidence": semantic_mapper.current_schema_evidence(), "conflicts": detect_canonical_conflicts(source_records), "legacyConflictMessages": detect_conflicts(raw_records), "resilienceBanner": "Verification temporarily delayed; retrying automatically in background." if any(r.get("delayed") for r in requirements) else None}

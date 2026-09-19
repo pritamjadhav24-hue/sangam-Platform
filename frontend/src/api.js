@@ -15,6 +15,11 @@ async function request(path, options = {}) {
 export const api = {
   login: (citizenId, password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ citizenId, password }) }),
   schemes: () => request('/citizen/schemes'),
+  services: () => request('/citizen/services'),
+  service: serviceId => request(`/citizen/services/${encodeURIComponent(serviceId)}`),
+  applications: () => request('/citizen/applications'),
+  application: applicationId => request(`/citizen/applications/${encodeURIComponent(applicationId)}`),
+  createApplication: body => request('/citizen/applications', { method: 'POST', body: JSON.stringify(body) }),
   catalog: () => request('/catalog'),
   discover: (citizenId, timeout = false, schemeId = '') => request(`/citizen/discover?citizen_id=${encodeURIComponent(citizenId)}&simulate_timeout=${timeout}${schemeId ? `&scheme_id=${encodeURIComponent(schemeId)}` : ''}`),
   consent: (citizenId, allow, schemeId = null) => request('/citizen/consent', { method: 'POST', body: JSON.stringify({ citizenId, allow, schemeId }) }),
