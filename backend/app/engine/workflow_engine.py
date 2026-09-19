@@ -211,7 +211,7 @@ def create_application(citizen_id: str, discovery: dict, eligibility: dict) -> d
         timeline.append({"stage": stage, "state": state, "at": created_at if state == "COMPLETED" else None})
 
     app = {
-        "appId": app_id, "citizenId": citizen_id, "status": "DRAFT", "createdAt": created_at,
+        "appId": app_id, "citizenId": citizen_id, "schemeId": discovery.get("schemeId"), "status": "DRAFT", "createdAt": created_at,
         "updatedAt": created_at, "requirements": discovery["requirements"], "eligibility": eligibility,
         "timeline": timeline, "statusHistory": [{"status": "DRAFT", "at": created_at}],
         "dependencyIds": [], "dependencies": [], "consentId": None, "officerRemarks": None,

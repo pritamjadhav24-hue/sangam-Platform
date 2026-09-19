@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -83,7 +84,7 @@ def decode_token(token: str) -> dict:
         if not payload.get("sub") or not payload.get("role") or not payload.get("iat") or not payload.get("jti"):
             raise ValueError("incomplete token")
         return payload
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
         raise HTTPException(status_code=401, detail="Invalid or expired access token.")
 
 

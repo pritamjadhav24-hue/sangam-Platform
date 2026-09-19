@@ -1,4 +1,4 @@
-const BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
+const BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8001/api';
 let sessionToken = null;
 let onUnauthorized = () => {};
 export const setSessionToken = token => { sessionToken = token; };
@@ -15,8 +15,9 @@ async function request(path, options = {}) {
 export const api = {
   login: (citizenId, password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ citizenId, password }) }),
   schemes: () => request('/citizen/schemes'),
-  discover: (citizenId, timeout = false) => request(`/citizen/discover?citizen_id=${encodeURIComponent(citizenId)}&simulate_timeout=${timeout}`),
-  consent: (citizenId, allow) => request('/citizen/consent', { method: 'POST', body: JSON.stringify({ citizenId, allow }) }),
+  catalog: () => request('/catalog'),
+  discover: (citizenId, timeout = false, schemeId = '') => request(`/citizen/discover?citizen_id=${encodeURIComponent(citizenId)}&simulate_timeout=${timeout}${schemeId ? `&scheme_id=${encodeURIComponent(schemeId)}` : ''}`),
+  consent: (citizenId, allow, schemeId = null) => request('/citizen/consent', { method: 'POST', body: JSON.stringify({ citizenId, allow, schemeId }) }),
   domicile: (citizenId, appId) => request('/citizen/orchestrate-dependency', { method: 'POST', body: JSON.stringify({ citizenId, appId }) }),
   submit: (citizenId, appId, timeout = false) => request('/citizen/submit', { method: 'POST', body: JSON.stringify({ citizenId, appId, simulateTimeout: timeout }) }),
   track: (appId) => request(`/citizen/track/${appId}`),

@@ -10,11 +10,11 @@ from app.core.auth import require_roles
 from app.core.event_bus import event_bus
 from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuthorizationError, authorize_access, create_consent, current, revoke_consent
 from app.engine.dependency_orchestrator import ensure_domicile_dependency, initiate_domicile
+from app.core.persistence import catalog_snapshot
 from app.engine.registry import SCHEMES
 from app.engine.requirement_analyzer import discover
 from app.engine.rules_engine import evaluate
 from app.engine.workflow_engine import APPLICATIONS, create_application, find_active_application, transition_application
-from app.mocks.identity_provider import CITIZENS
 
 router = APIRouter(prefix="/api/citizen", tags=["Citizen"])
 
@@ -23,6 +23,7 @@ class Consent(BaseModel):
     citizenId: str
     allow: bool
     attributes: Optional[List[str]] = None
+    schemeId: Optional[str] = None
 
 
 class Dependency(BaseModel):
@@ -70,20 +71,21 @@ def _assert_own_citizen(user: dict, citizen_id: str) -> None:
 
 @router.get("/schemes")
 def schemes(user: dict = Depends(require_roles("CITIZEN"))):
-    return {"schemes": SCHEMES}
+    configured = catalog_snapshot()["schemes"]
+    return {"schemes": configured or SCHEMES}
 
 
 @router.get("/discover")
-def discovery(citizen_id: str = "CITIZEN_001", simulate_timeout: bool = False, purpose: Optional[str] = None, attributes: Optional[List[str]] = None, user: dict = Depends(require_roles("CITIZEN"))):
+def discovery(citizen_id: str = "CITIZEN_001", simulate_timeout: bool = False, scheme_id: Optional[str] = None, purpose: Optional[str] = None, attributes: Optional[List[str]] = None, user: dict = Depends(require_roles("CITIZEN"))):
     _assert_own_citizen(user, citizen_id)
-    citizen = CITIZENS.get(citizen_id)
+    citizen = user if user.get("citizenId") == citizen_id else None
     if not citizen:
         raise HTTPException(404, "Citizen not found")
     if purpose is not None or attributes:
         if not purpose:
             raise HTTPException(status_code=403, detail="Protected access denied: a purpose is required.")
         _require_consent(citizen_id, purpose, attributes)
-    result = discover({k: v for k, v in citizen.items() if k != "password"}, simulate_timeout)
+    result = discover({k: v for k, v in citizen.items() if k != "password"}, simulate_timeout, scheme_id)
     app = find_active_application(citizen_id)
     _record_discovery(citizen_id, result, app["appId"] if app else None)
     return result
@@ -107,7 +109,7 @@ def dependency(body: Dependency, user: dict = Depends(require_roles("CITIZEN")))
 @router.post("/consent")
 def consent(body: Consent, user: dict = Depends(require_roles("CITIZEN"))):
     _assert_own_citizen(user, body.citizenId)
-    citizen = CITIZENS.get(body.citizenId)
+    citizen = user if user.get("citizenId") == body.citizenId else None
     if not citizen:
         raise HTTPException(404, "Citizen not found")
     try:
@@ -116,7 +118,7 @@ def consent(body: Consent, user: dict = Depends(require_roles("CITIZEN"))):
         raise HTTPException(status_code=400, detail=str(error))
     app = None
     if body.allow:
-        result = discover({k: v for k, v in citizen.items() if k != "password"})
+        result = discover({k: v for k, v in citizen.items() if k != "password"}, scheme_id=body.schemeId)
         app = find_active_application(body.citizenId) or create_application(body.citizenId, result, evaluate(result["requirements"]))
         app["consentId"] = receipt["consentId"]
         _record_discovery(body.citizenId, result, app["appId"])
@@ -145,11 +147,11 @@ def revoke(body: RevokeConsent, user: dict = Depends(require_roles("CITIZEN"))):
 @router.post("/submit")
 def submit(body: Submit, user: dict = Depends(require_roles("CITIZEN"))):
     _assert_own_citizen(user, body.citizenId)
-    citizen = CITIZENS.get(body.citizenId)
+    citizen = user if user.get("citizenId") == body.citizenId else None
     if not citizen:
         raise HTTPException(404, "Citizen not found")
     consent_receipt = _require_consent(body.citizenId, PURPOSE, PERMITTED)
-    result = discover({k: v for k, v in citizen.items() if k != "password"}, body.simulateTimeout)
+    result = discover({k: v for k, v in citizen.items() if k != "password"}, body.simulateTimeout, app.get("schemeId") if app else None)
     eligibility = evaluate(result["requirements"])
     app = APPLICATIONS.get(body.appId) if body.appId else find_active_application(body.citizenId)
     app = app if app and app["citizenId"] == body.citizenId else create_application(body.citizenId, result, eligibility)

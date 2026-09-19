@@ -14,8 +14,7 @@ SCHEMES = [{
 }]
 
 
-# Deterministic service catalog for prototype dependency selection. The adapter
-# names and action identifiers point to the existing mock integrations.
+# Development fallback catalog. Production selection reads the PostgreSQL catalog.
 DEPENDENCY_SERVICES = [
     {
         "requirementCode": "DOMICILE_PROOF", "requiredService": "Domicile Certificate",
@@ -33,12 +32,23 @@ DEPENDENCY_SERVICES = [
 
 
 def get_scheme(scheme_id: str):
-    return next((s for s in SCHEMES if s["id"] == scheme_id), None)
+    try:
+        from app.core.persistence import catalog_snapshot
+        configured = catalog_snapshot()["schemes"]
+    except Exception:
+        configured = []
+    return next((s for s in (configured or SCHEMES) if s["id"] == scheme_id), None)
 
 
 def dependency_registry(health: list[dict]) -> list[dict]:
     health_by_provider = {item["system"]: item for item in health}
-    return [{**definition, "healthStatus": health_by_provider.get(definition["provider"], {}).get("status", "UNAVAILABLE")} for definition in DEPENDENCY_SERVICES]
+    try:
+        from app.core.persistence import catalog_snapshot
+        configured = catalog_snapshot()["services"]
+    except Exception:
+        configured = []
+    definitions = configured or DEPENDENCY_SERVICES
+    return [{**definition, "healthStatus": health_by_provider.get(definition["provider"], {}).get("status", "UNAVAILABLE")} for definition in definitions]
 
 
 def select_dependency_provider(requirement_code: str, health: list[dict]) -> dict | None:

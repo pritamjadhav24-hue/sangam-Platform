@@ -19,6 +19,25 @@ _integrations = {
 }
 
 
+def fetch_registered_service(service_id: str, citizen_id: str) -> dict | None:
+    """Stable provider contract used by orchestration.
+
+    Real adapters can register the same service-id contract. The current
+    development registrations are deliberately kept behind this boundary.
+    """
+    from app.mocks import education_dept, revenue_dept, social_welfare_dept
+    mock_services = {
+        "REV-MAHA-101": revenue_dept.issue_domicile,
+        "EDU-ACA-201": education_dept.get_academic,
+    }
+    fetcher = mock_services.get(service_id)
+    return fetcher(citizen_id) if fetcher else None
+
+
+def service_available(provider: str) -> bool:
+    return is_integration_available(provider)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 

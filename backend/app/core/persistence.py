@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine, delete
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -40,6 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
+MIGRATION_HEAD = "62ebc0864a84"
 
 
 class Base(DeclarativeBase):
@@ -151,19 +152,111 @@ class CounterRow(Base):
     next_value: Mapped[int] = mapped_column(Integer)
 
 
+class DepartmentRow(Base):
+    __tablename__ = "departments"
+    department_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class ProviderRow(Base):
+    __tablename__ = "providers"
+    provider_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    department_id: Mapped[str] = mapped_column(ForeignKey("departments.department_id"), index=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    adapter_type: Mapped[str] = mapped_column(String(120))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class ServiceCatalogRow(Base):
+    __tablename__ = "service_catalog"
+    service_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(ForeignKey("providers.provider_id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    requirement_code: Mapped[str] = mapped_column(String(120), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class SchemeCatalogRow(Base):
+    __tablename__ = "scheme_catalog"
+    scheme_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    name: Mapped[str] = mapped_column(String(240))
+    department: Mapped[str] = mapped_column(String(200))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class SchemeRequirementRow(Base):
+    __tablename__ = "scheme_requirements"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scheme_id: Mapped[str] = mapped_column(ForeignKey("scheme_catalog.scheme_id", ondelete="CASCADE"), index=True)
+    requirement_code: Mapped[str] = mapped_column(String(120), index=True)
+    label: Mapped[str] = mapped_column(String(200))
+    mandatory: Mapped[bool] = mapped_column(Boolean, default=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
 def initialize() -> None:
     try:
         with engine.connect() as connection:
             connection.exec_driver_sql("SELECT 1")
-        Base.metadata.create_all(engine)
+            version = connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one_or_none()
+        if version != MIGRATION_HEAD:
+            raise RuntimeError(f"Database schema is at migration {version!r}; run 'alembic upgrade head' before starting SANGAM.")
     except Exception as error:
         raise RuntimeError(f"PostgreSQL initialization failed: {error}") from error
+
+
+def catalog_seeded() -> bool:
+    with Session(engine) as session:
+        return session.query(SchemeCatalogRow).count() > 0
+
+
+def seed_catalog() -> None:
+    """Bootstrap catalog rows once; subsequent changes are DB-owned."""
+    if os.getenv("SANGAM_SEED_CATALOG", "false").lower() not in {"1", "true", "yes"} or catalog_seeded():
+        return
+    from app.engine.registry import DEPENDENCY_SERVICES, SCHEMES
+    departments: dict[str, dict] = {}
+    with Session(engine) as session:
+        for scheme in SCHEMES:
+            department = scheme["department"]
+            department_id = department.upper().replace(" ", "-")
+            departments[department_id] = {"departmentId": department_id, "name": department}
+            session.add(SchemeCatalogRow(scheme_id=scheme["id"], name=scheme["name"], department=department, payload=scheme))
+            for requirement in scheme.get("requirements", []):
+                session.add(SchemeRequirementRow(scheme_id=scheme["id"], requirement_code=requirement["code"], label=requirement["label"], mandatory=requirement.get("mandatory", True), payload=requirement))
+        for department_id, department in departments.items():
+            session.add(DepartmentRow(department_id=department_id, name=department["name"], payload=department))
+        for definition in DEPENDENCY_SERVICES:
+            provider_id = definition["provider"].upper().replace(" ", "-")
+            if session.get(DepartmentRow, provider_id) is None:
+                session.add(DepartmentRow(department_id=provider_id, name=definition["provider"], payload={"departmentId": provider_id, "name": definition["provider"]}))
+            if session.get(ProviderRow, provider_id) is None:
+                session.add(ProviderRow(provider_id=provider_id, department_id=provider_id, name=definition["provider"], adapter_type=definition["adapter"], payload={"providerId": provider_id, "name": definition["provider"], "adapter": definition["adapter"]}))
+            if session.get(ServiceCatalogRow, definition["serviceId"]) is None:
+                session.add(ServiceCatalogRow(service_id=definition["serviceId"], provider_id=provider_id, name=definition["serviceName"], requirement_code=definition["requirementCode"], payload=definition))
+        session.commit()
+
+
+def catalog_snapshot() -> dict:
+    with Session(engine) as session:
+        schemes = [row.payload for row in session.query(SchemeCatalogRow).filter_by(active=True).all()]
+        services = [row.payload for row in session.query(ServiceCatalogRow).filter_by(active=True).all()]
+        departments = [row.payload for row in session.query(DepartmentRow).filter_by(active=True).all()]
+        return {"schemes": schemes, "services": services, "departments": departments}
 
 
 def ensure_user_accounts() -> None:
     """Migrate existing demo identities into hashed PostgreSQL accounts once."""
     from app.core.auth import hash_password
     from app.mocks.identity_provider import USERS
+
+    if os.getenv("SANGAM_SEED_DEMO_USERS", "false").lower() not in {"1", "true", "yes"}:
+        return
 
     with Session(engine) as session:
         if session.query(UserAccountRow).count():
