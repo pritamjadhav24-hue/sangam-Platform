@@ -250,6 +250,82 @@ class SchemeRequirementRow(Base):
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
+def _application_payload(row: ApplicationRow) -> dict:
+    payload = dict(row.payload or {})
+    payload["appId"] = row.app_id
+    payload["citizenId"] = row.citizen_id
+    payload["status"] = row.status
+    return payload
+
+
+def _dependency_payload(row: DependencyRow) -> dict:
+    payload = dict(row.payload or {})
+    payload["dependencyId"] = row.dependency_id
+    payload["appId"] = row.app_id
+    payload["status"] = row.status
+    return payload
+
+
+def get_application(app_id: str, for_update: bool = False, session: Session | None = None) -> dict | None:
+    """Read one application directly from PostgreSQL.
+
+    Database errors intentionally propagate. No process-local workflow cache is
+    consulted, and the optional lock is held only for this database transaction.
+    """
+    def read(db_session: Session) -> dict | None:
+        query = db_session.query(ApplicationRow).filter(ApplicationRow.app_id == app_id)
+        if for_update:
+            query = query.with_for_update()
+        row = query.first()
+        return _application_payload(row) if row else None
+    if session is not None:
+        return read(session)
+    with Session(engine) as owned_session:
+        return read(owned_session)
+
+
+def list_applications_for_citizen(citizen_id: str, session: Session | None = None) -> list[dict]:
+    """Read all applications for a citizen directly from PostgreSQL."""
+    def read(db_session: Session) -> list[dict]:
+        rows = (db_session.query(ApplicationRow)
+                .filter(ApplicationRow.citizen_id == citizen_id)
+                .order_by(ApplicationRow.app_id.asc())
+                .all())
+        return [_application_payload(row) for row in rows]
+    if session is not None:
+        return read(session)
+    with Session(engine) as owned_session:
+        return read(owned_session)
+
+
+def get_dependency(dependency_id: str, for_update: bool = False, session: Session | None = None) -> dict | None:
+    """Read one dependency directly from PostgreSQL."""
+    def read(db_session: Session) -> dict | None:
+        query = db_session.query(DependencyRow).filter(DependencyRow.dependency_id == dependency_id)
+        if for_update:
+            query = query.with_for_update()
+        row = query.first()
+        return _dependency_payload(row) if row else None
+    if session is not None:
+        return read(session)
+    with Session(engine) as owned_session:
+        return read(owned_session)
+
+
+def list_dependencies_for_application(app_id: str, session: Session | None = None) -> list[dict]:
+    """Read all dependencies for an application directly from PostgreSQL."""
+    def read(db_session: Session) -> list[dict]:
+        rows = (db_session.query(DependencyRow)
+                .filter(DependencyRow.app_id == app_id)
+                .order_by(DependencyRow.dependency_id.asc())
+                .all())
+        return [_dependency_payload(row) for row in rows]
+    if session is not None:
+        return read(session)
+    with Session(engine) as owned_session:
+        return read(owned_session)
+
+
 def initialize() -> None:
     try:
         with engine.connect() as connection:
