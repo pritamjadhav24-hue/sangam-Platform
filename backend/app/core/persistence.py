@@ -12,7 +12,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, select, update as sql_update
 from sqlalchemy.dialects.postgresql import JSONB
@@ -268,6 +268,182 @@ def _application_payload(row: ApplicationRow) -> dict:
     payload["citizenId"] = row.citizen_id
     payload["status"] = row.status
     return payload
+
+
+class ApplicationConcurrencyError(RuntimeError):
+    """Raised when an application write was based on a stale version."""
+
+
+def _application_timestamp(value: str | datetime | None, field_name: str) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        try:
+            timestamp = datetime.fromisoformat(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid application {field_name} timestamp") from error
+    return timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+
+
+def _application_iso(timestamp: datetime) -> str:
+    return timestamp.astimezone(timezone.utc).isoformat()
+
+
+def _run_application_owned(operation):
+    with Session(engine) as owned_session:
+        try:
+            result = operation(owned_session)
+            owned_session.commit()
+            return result
+        except Exception:
+            owned_session.rollback()
+            raise
+
+
+def _application_result(row: ApplicationRow) -> dict:
+    return _application_payload(row)
+
+
+def allocate_application_id(service_id: str | None = None, session: Session | None = None) -> str:
+    """Allocate an application identifier under a PostgreSQL row lock."""
+    def allocate(db_session: Session) -> str:
+        from sqlalchemy.dialects.postgresql import insert as postgres_insert
+
+        db_session.execute(
+            postgres_insert(CounterRow)
+            .values(counter_key="application", next_value=142)
+            .on_conflict_do_nothing(index_elements=[CounterRow.counter_key])
+        )
+        counter = db_session.execute(
+            select(CounterRow).where(CounterRow.counter_key == "application").with_for_update()
+        ).scalar_one()
+        value = counter.next_value
+        prefix = "SCH-MH-2026" if service_id == "SCH-MH-2026" else f"APP-{service_id or 'SERVICE'}"
+        while True:
+            app_id = f"{prefix}-{value:05d}"
+            if db_session.get(ApplicationRow, app_id) is None:
+                counter.next_value = value + 1
+                db_session.flush()
+                return app_id
+            value += 1
+
+    if session is not None:
+        return allocate(session)
+    return _run_application_owned(allocate)
+
+
+def create_application(application: Mapping, session: Session | None = None) -> dict:
+    """Create an application row using PostgreSQL as the write authority."""
+    def create(db_session: Session) -> dict:
+        payload = dict(application)
+        citizen_id = payload.get("citizenId")
+        status = payload.get("status", "DRAFT")
+        if not citizen_id:
+            raise ValueError("Application requires citizenId")
+        app_id = payload.get("appId") or allocate_application_id(payload.get("serviceId"), session=db_session)
+        created_at = _application_timestamp(payload.get("createdAt"), "createdAt") or datetime.now(timezone.utc)
+        updated_at = _application_timestamp(payload.get("updatedAt"), "updatedAt") or created_at
+        payload["appId"] = app_id
+        payload["citizenId"] = citizen_id
+        payload["status"] = status
+        payload["createdAt"] = _application_iso(created_at)
+        payload["updatedAt"] = _application_iso(updated_at)
+        row = ApplicationRow(
+            app_id=app_id,
+            citizen_id=citizen_id,
+            status=status,
+            version=1,
+            created_at=created_at,
+            updated_at=updated_at,
+            payload=payload,
+        )
+        db_session.add(row)
+        db_session.flush()
+        return _application_result(row)
+
+    if session is not None:
+        return create(session)
+    return _run_application_owned(create)
+
+
+def update_application_payload(app_id: str, patch: Mapping, expected_version: int | None = None, session: Session | None = None) -> dict:
+    """Apply a narrow JSONB patch to the locked PostgreSQL application row."""
+    def update(db_session: Session) -> dict:
+        row = db_session.execute(
+            select(ApplicationRow).where(ApplicationRow.app_id == app_id).with_for_update()
+        ).scalar_one_or_none()
+        if row is None:
+            raise KeyError(app_id)
+        if expected_version is not None and row.version != expected_version:
+            raise ApplicationConcurrencyError(f"Application {app_id} has version {row.version}, expected {expected_version}")
+        forbidden = {"appId", "citizenId", "status", "version", "createdAt"}.intersection(patch)
+        if forbidden:
+            raise ValueError(f"Application patch cannot update {', '.join(sorted(forbidden))}")
+        payload = dict(row.payload or {})
+        payload.update(dict(patch))
+        now = datetime.now(timezone.utc)
+        payload["appId"] = row.app_id
+        payload["citizenId"] = row.citizen_id
+        payload["status"] = row.status
+        payload["createdAt"] = _application_iso(row.created_at or now)
+        payload["updatedAt"] = _application_iso(now)
+        row.payload = payload
+        row.updated_at = now
+        row.version += 1
+        db_session.flush()
+        return _application_result(row)
+
+    if session is not None:
+        return update(session)
+    return _run_application_owned(update)
+
+
+def transition_application_status(app_id: str, status: str, actor: str = "SYSTEM", source: str = "workflow_engine", expected_version: int | None = None, session: Session | None = None) -> dict:
+    """Transition an application and append history in one caller-scoped transaction."""
+    def transition(db_session: Session) -> dict:
+        from app.engine.workflow_engine import CANONICAL_STATUSES, VALID_TRANSITIONS
+
+        row = db_session.execute(
+            select(ApplicationRow).where(ApplicationRow.app_id == app_id).with_for_update()
+        ).scalar_one_or_none()
+        if row is None:
+            raise KeyError(app_id)
+        if expected_version is not None and row.version != expected_version:
+            raise ApplicationConcurrencyError(f"Application {app_id} has version {row.version}, expected {expected_version}")
+        if status not in CANONICAL_STATUSES:
+            raise ValueError(f"Unsupported application status: {status}")
+        previous = row.status
+        if previous == status:
+            return _application_result(row)
+        if status not in VALID_TRANSITIONS.get(previous, set()):
+            raise ValueError(f"Invalid application transition: {previous} -> {status}")
+        timestamp = datetime.now(timezone.utc)
+        timestamp_iso = _application_iso(timestamp)
+        history_entry = {"status": status, "at": timestamp_iso, "actor": actor, "source": source}
+        payload = dict(row.payload or {})
+        payload["appId"] = row.app_id
+        payload["citizenId"] = row.citizen_id
+        payload["status"] = status
+        payload["updatedAt"] = timestamp_iso
+        payload["createdAt"] = _application_iso(row.created_at) if row.created_at else payload.get("createdAt", timestamp_iso)
+        row.status = status
+        row.updated_at = timestamp
+        row.version += 1
+        row.payload = payload
+        db_session.add(WorkflowHistoryRow(app_id=app_id, status=status, occurred_at=timestamp_iso, payload=history_entry))
+        db_session.flush()
+        return _application_result(row)
+
+    if session is not None:
+        return transition(session)
+    return _run_application_owned(transition)
+
+
+def mark_application_write_authoritative(request) -> None:
+    """Mark only this request to bypass destructive legacy snapshot persistence."""
+    request.state.application_write_authoritative = True
 
 
 def _dependency_payload(row: DependencyRow) -> dict:

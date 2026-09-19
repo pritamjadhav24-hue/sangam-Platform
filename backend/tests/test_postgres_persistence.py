@@ -1,5 +1,8 @@
 import unittest
 import importlib.util
+import asyncio
+import threading
+from types import SimpleNamespace
 from datetime import timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -11,9 +14,12 @@ from sqlalchemy.orm import Session
 from app.core.audit_bus import audit_bus
 from app.core.demo_state import reset_demo_state
 from app.core.notification_manager import notification_manager
-from app.core.persistence import (ApplicationRow, DependencyRow, engine, get_application, get_dependency,
-                                  hydrate_state, initialize, list_applications_for_citizen,
-                                  list_dependencies_for_application, persist_state)
+from app.core.persistence import (ApplicationConcurrencyError, ApplicationRow, DependencyRow,
+                                  WorkflowHistoryRow, allocate_application_id, create_application, engine,
+                                  get_application, get_dependency, hydrate_state, initialize,
+                                  list_applications_for_citizen, list_dependencies_for_application,
+                                  mark_application_write_authoritative, persist_state,
+                                  transition_application_status, update_application_payload)
 from app.engine.dependency_orchestrator import initiate_domicile
 from app.engine.workflow_engine import APPLICATIONS, DEPENDENCIES, officer_action, transition_application
 
@@ -37,6 +43,133 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
     def test_connection_and_required_schema(self):
         tables = set(inspect(engine).get_table_names())
         self.assertTrue({"applications", "dependencies", "consents", "workflow_history", "audit_entries", "notifications", "user_accounts"}.issubset(tables))
+
+    def test_application_repository_creation_and_database_id_allocation(self):
+        with Session(engine) as session:
+            application = create_application({
+                "citizenId": "CITIZEN-REPOSITORY-WRITE",
+                "serviceId": "SCH-MH-2026",
+                "status": "DRAFT",
+                "requirements": [],
+            }, session=session)
+            self.assertTrue(session.in_transaction())
+            app_id = application["appId"]
+            self.assertTrue(app_id.startswith("SCH-MH-2026-"))
+            self.assertEqual(application["appId"], app_id)
+            session.commit()
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertIsNotNone(row)
+            self.assertEqual(row.version, 1)
+            self.assertIsNotNone(row.created_at)
+            self.assertIsNotNone(row.updated_at)
+            self.assertEqual(row.payload["requirements"], [])
+
+    def test_application_repository_update_preserves_unpatched_payload_and_expected_version(self):
+        app_id = "APP-REPOSITORY-WRITE-001"
+        original = {"appId": app_id, "citizenId": "CITIZEN-REPOSITORY-WRITE", "status": "DRAFT", "requirements": [{"code": "IDENTITY"}], "eligibility": {"eligible": False}}
+        create_application(original)
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            created_at = row.created_at
+            version = row.version
+        updated = update_application_payload(app_id, {"eligibility": {"eligible": True}}, expected_version=version)
+        self.assertTrue(updated["eligibility"]["eligible"])
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertEqual(row.version, version + 1)
+            self.assertEqual(row.created_at, created_at)
+            self.assertGreater(row.updated_at, created_at)
+            self.assertEqual(row.payload["requirements"], original["requirements"])
+        with self.assertRaises(ApplicationConcurrencyError):
+            update_application_payload(app_id, {"eligibility": {"eligible": False}}, expected_version=version)
+
+    def test_application_repository_transition_updates_status_json_and_history_in_one_transaction(self):
+        app_id = "APP-REPOSITORY-TRANSITION-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-REPOSITORY-WRITE", "status": "DRAFT", "statusHistory": []})
+        with Session(engine) as session:
+            session.begin()
+            transitioned = transition_application_status(app_id, "IN_PROGRESS", actor="OFFICER", source="test", session=session)
+            self.assertEqual(transitioned["status"], "IN_PROGRESS")
+            row = session.get(ApplicationRow, app_id)
+            self.assertEqual(row.version, 2)
+            self.assertTrue(session.in_transaction())
+            self.assertEqual(session.query(WorkflowHistoryRow).filter_by(app_id=app_id).count(), 1)
+            session.rollback()
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertEqual(row.status, "DRAFT")
+            self.assertEqual(row.version, 1)
+            self.assertEqual(session.query(WorkflowHistoryRow).filter_by(app_id=app_id).count(), 0)
+
+    def test_application_repository_row_lock_serializes_mutations(self):
+        app_id = "APP-REPOSITORY-LOCK-WRITE-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-REPOSITORY-WRITE", "status": "DRAFT"})
+        first = Session(engine)
+        second = Session(engine)
+        try:
+            first.begin()
+            transition_application_status(app_id, "IN_PROGRESS", session=first)
+            second.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            with self.assertRaises(OperationalError):
+                transition_application_status(app_id, "WAITING_FOR_USER", session=second)
+            second.rollback()
+            first.commit()
+            transition_application_status(app_id, "WAITING_FOR_USER", session=second)
+            second.commit()
+        finally:
+            first.close()
+            second.close()
+        self.assertEqual(get_application(app_id)["status"], "WAITING_FOR_USER")
+
+    def test_application_id_allocation_serializes_across_sessions(self):
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+
+        def allocate_in_session():
+            try:
+                with Session(engine) as session:
+                    barrier.wait(timeout=5)
+                    results.append(allocate_application_id("SCH-MH-2026", session=session))
+                    session.commit()
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=allocate_in_session) for _ in range(2)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout=10)
+        self.assertFalse(errors)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len(set(results)), 2)
+
+    def test_application_repository_does_not_use_stale_process_cache_or_fallback_on_db_failure(self):
+        app_id = "APP-REPOSITORY-STALE-WRITE-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-REPOSITORY-WRITE", "status": "DRAFT", "requirements": [{"code": "IDENTITY"}]})
+        APPLICATIONS[app_id] = {"appId": app_id, "citizenId": "CITIZEN-REPOSITORY-WRITE", "status": "COMPLETED", "requirements": []}
+        update_application_payload(app_id, {"eligibility": {"eligible": True}})
+        self.assertEqual(get_application(app_id)["status"], "DRAFT")
+        self.assertEqual(get_application(app_id)["requirements"], [{"code": "IDENTITY"}])
+        with patch("app.core.persistence.Session", side_effect=RuntimeError("database unavailable")):
+            with self.assertRaises(RuntimeError):
+                update_application_payload(app_id, {"eligibility": {"eligible": False}})
+
+    def test_application_write_marker_skips_only_explicit_snapshot_request(self):
+        import main
+
+        async def call_next(_request):
+            return SimpleNamespace(status_code=200, headers={})
+
+        migrated_request = SimpleNamespace(url=SimpleNamespace(path="/api/applications"), state=SimpleNamespace())
+        mark_application_write_authoritative(migrated_request)
+        with patch("main.persist_state") as persist:
+            asyncio.run(main.persist_after_request(migrated_request, call_next))
+            persist.assert_not_called()
+
+        legacy_request = SimpleNamespace(url=SimpleNamespace(path="/api/legacy"), state=SimpleNamespace())
+        with patch("main.persist_state") as persist:
+            asyncio.run(main.persist_after_request(legacy_request, call_next))
+            persist.assert_called_once()
 
     def test_checkpoint_2_metadata_schema_and_backfill(self):
         app_id = "APP-METADATA-001"

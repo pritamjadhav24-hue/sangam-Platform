@@ -34,7 +34,7 @@ async def persist_after_request(request, call_next):
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
-    if not request.url.path.startswith("/health/") and response.status_code < 500:
+    if not request.url.path.startswith("/health/") and response.status_code < 500 and not getattr(request.state, "application_write_authoritative", False):
         persist_state()
     return response
 
