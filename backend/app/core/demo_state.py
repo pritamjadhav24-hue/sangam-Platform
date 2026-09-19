@@ -31,6 +31,7 @@ def reset_demo_state() -> None:
 
     adapters._availability.clear()
     adapters._last_health.clear()
+    adapters._runtime_health.clear()
     revenue_dept.DOMICILE_RECORD = None
     education_dept.set_income_conflict(False)
     semantic_mapper.reset_mapping_state()

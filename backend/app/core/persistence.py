@@ -252,6 +252,9 @@ def seed_catalog() -> None:
                 session.add(ProviderRow(provider_id=provider_id, department_id=provider_id, name=definition["provider"], adapter_type=definition["adapter"], payload={"providerId": provider_id, "name": definition["provider"], "adapter": definition["adapter"]}))
             if session.get(ServiceCatalogRow, definition["serviceId"]) is None:
                 session.add(ServiceCatalogRow(service_id=definition["serviceId"], provider_id=provider_id, name=definition["serviceName"], requirement_code=definition["requirementCode"], payload=definition))
+            else:
+                existing_service = session.get(ServiceCatalogRow, definition["serviceId"])
+                existing_service.payload = {**(existing_service.payload or {}), **definition}
             capability_id = f"{provider_id}:{definition['requirementCode']}"
             if session.get(ProviderCapabilityRow, capability_id) is None:
                 session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=definition["requirementCode"], service_id=definition["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": definition["requirementCode"], "providerId": provider_id, "serviceId": definition["serviceId"]}))
@@ -259,12 +262,19 @@ def seed_catalog() -> None:
 
 
 def catalog_snapshot() -> dict:
+    from app.core.provider_config import provider_runtime_config
+    def safe_payload(payload: dict) -> dict:
+        blocked = {"password", "secret", "token", "credential", "clientsecret", "client_secret"}
+        return {key: value for key, value in payload.items() if not any(term in key.lower() for term in blocked)}
     with Session(engine) as session:
-        schemes = [row.payload for row in session.query(SchemeCatalogRow).filter_by(active=True).all()]
-        services = [row.payload for row in session.query(ServiceCatalogRow).filter_by(active=True).all()]
-        capabilities = [row.payload for row in session.query(ProviderCapabilityRow).filter_by(enabled=True).all()]
-        departments = [row.payload for row in session.query(DepartmentRow).filter_by(active=True).all()]
-        return {"schemes": schemes, "services": services, "capabilities": capabilities, "departments": departments}
+        schemes = [safe_payload(row.payload) for row in session.query(SchemeCatalogRow).filter_by(active=True).all()]
+        services = [safe_payload(row.payload) for row in session.query(ServiceCatalogRow).filter_by(active=True).all()]
+        capabilities = [safe_payload(row.payload) for row in session.query(ProviderCapabilityRow).filter_by(enabled=True).all()]
+        departments = [safe_payload(row.payload) for row in session.query(DepartmentRow).filter_by(active=True).all()]
+        safe_providers = []
+        for row in session.query(ProviderRow).filter_by(active=True).all():
+            safe_providers.append({"providerId": row.provider_id, "name": row.name, "departmentId": row.department_id, "adapter": row.adapter_type, "runtime": provider_runtime_config(row.provider_id, row.payload)})
+        return {"schemes": schemes, "services": services, "capabilities": capabilities, "departments": departments, "providers": safe_providers}
 
 
 def ensure_user_accounts() -> None:
@@ -338,7 +348,7 @@ def persist_state() -> None:
             session.add(AuditEntryRow(sequence=entry["sequence"], correlation_id=entry.get("correlationId"), consent_id=entry.get("consentId"), payload=entry))
         # JWT access tokens are deliberately not persisted.
         for system, state in adapters._availability.items():
-            session.add(IntegrationStateRow(system=system, payload=state))
+            session.add(IntegrationStateRow(system=system, payload={**state, "runtimeHealth": adapters._runtime_health.get(system, {})}))
         session.add(MockStateRow(state_key="revenue_domicile", payload={"record": revenue_dept.DOMICILE_RECORD}))
         session.add(MockStateRow(state_key="education", payload={"familyAnnualIncome": education_dept.EDUCATION_RECORD["familyAnnualIncome"]}))
         session.add(MockStateRow(state_key="semantic_mapping_reviews", payload={"reviews": semantic_mapper.MAPPING_REVIEWS, "counter": semantic_mapper.MAPPING_REVIEW_COUNTER, "evidence": semantic_mapper.SIMULATED_SCHEMA_EVIDENCE}))
@@ -377,7 +387,7 @@ def hydrate_state() -> None:
 
     with Session(engine) as session:
         applications = session.query(ApplicationRow).all()
-        workflow_engine.APPLICATIONS.clear(); workflow_engine.DEPENDENCIES.clear(); workflow_engine.ENTITY_REVIEWS.clear(); workflow_engine.CONFLICT_REVIEWS.clear(); consent_manager.CONSENTS.clear(); notification_manager.notifications.clear(); notification_manager._processed_event_ids.clear(); event_bus.reset(); audit_bus.reset(); SESSIONS.clear(); adapters._availability.clear(); adapters._last_health.clear()
+        workflow_engine.APPLICATIONS.clear(); workflow_engine.DEPENDENCIES.clear(); workflow_engine.ENTITY_REVIEWS.clear(); workflow_engine.CONFLICT_REVIEWS.clear(); consent_manager.CONSENTS.clear(); notification_manager.notifications.clear(); notification_manager._processed_event_ids.clear(); event_bus.reset(); audit_bus.reset(); SESSIONS.clear(); adapters._availability.clear(); adapters._last_health.clear(); adapters._runtime_health.clear()
         for row in applications: workflow_engine.APPLICATIONS[row.app_id] = row.payload
         for row in session.query(DependencyRow).all(): workflow_engine.DEPENDENCIES[row.dependency_id] = row.payload
         for row in session.query(ConsentRow).all(): consent_manager.CONSENTS[row.citizen_id] = row.payload
@@ -392,7 +402,9 @@ def hydrate_state() -> None:
         event_bus.hydrate([row.payload for row in session.query(EventRow).order_by(EventRow.id).all()])
         audit_bus.entries.extend(row.payload for row in session.query(AuditEntryRow).order_by(AuditEntryRow.sequence).all())
         SESSIONS.update({row.session_id: row.payload for row in session.query(SessionRow).all()})
-        for row in session.query(IntegrationStateRow).all(): adapters._availability[row.system] = row.payload
+        for row in session.query(IntegrationStateRow).all():
+            adapters._availability[row.system] = {key: value for key, value in row.payload.items() if key != "runtimeHealth"}
+            adapters._runtime_health[row.system] = row.payload.get("runtimeHealth", {})
         for row in session.query(MockStateRow).all():
             if row.state_key == "revenue_domicile": revenue_dept.DOMICILE_RECORD = row.payload.get("record")
             if row.state_key == "education": education_dept.set_income_conflict(row.payload.get("familyAnnualIncome") == "550000")

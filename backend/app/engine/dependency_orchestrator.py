@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from app.core.event_bus import event_bus
 from app.core.audit_bus import audit_bus
-from app.engine.adapters import fetch_registered_service, integration_health, service_available
+from app.engine.adapters import integration_health, request_registered_service, service_available
 from app.engine.registry import select_dependency_provider
 from app.engine.semantic_mapper import map_record
 from app.engine.workflow_engine import DEPENDENCIES, transition_application
@@ -44,7 +44,7 @@ def ensure_dependency(app: dict, requirement_code: str) -> dict:
         "updatedAt": timestamp,
         "resultReference": None,
         "attempts": 0,
-        "maxAttempts": 3,
+        "maxAttempts": provider_selection.get("maxAttempts", 3),
         "providerStatus": provider_selection["healthStatus"],
         "lastError": None,
         "failureHistory": [],
@@ -91,10 +91,13 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str) -> di
     dependency["attempts"] += 1
     dependency["updatedAt"] = _now()
     event_bus.publish("REVENUE_SERVICE_REQUESTED", {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "service": service_id, "requiredData": requirement_code})
-    record = fetch_registered_service(service_id, citizen_id) if service_id else None
+    adapter_result = request_registered_service(service_id, citizen_id, correlation_id=app["appId"], idempotency_key=dependency["dependencyId"]) if service_id else None
+    record = adapter_result.record if adapter_result else None
+    dependency["lastRequest"] = {"correlationId": app["appId"], "idempotencyKey": dependency["dependencyId"], "operation": adapter_result.operation if adapter_result else "retrieve", "attempts": adapter_result.attempts if adapter_result else 0, "responseMs": adapter_result.response_ms if adapter_result else None}
     if not record:
         dependency["status"] = "WAITING_FOR_DEPENDENCY"
         dependency["providerStatus"] = "UNAVAILABLE" if not service_available(dependency["provider"]) else "DEGRADED"
+        dependency["errorCategory"] = "UNAVAILABLE"
         dependency["lastError"] = f"{dependency['provider']} service unavailable."
         dependency["failureHistory"].append({"attempt": dependency["attempts"], "at": dependency["updatedAt"], "error": dependency["lastError"]})
         failure_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "provider": dependency["provider"], "attempt": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "status": dependency["status"], "error": dependency["lastError"]}
@@ -104,7 +107,7 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str) -> di
         if dependency["attempts"] < dependency["maxAttempts"]:
             event_bus.publish("DEPENDENCY_RETRY_SCHEDULED", failure_payload)
             audit_bus.append("SYSTEM", "DEPENDENCY", "Bounded retry scheduled", dependency["provider"], "RETRY", app.get("consentId"), payload={"dependencyId": dependency["dependencyId"], "attempt": dependency["attempts"], "maxAttempts": dependency["maxAttempts"]}, correlation_id=app["appId"])
-        return {"success": False, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "attempts": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "providerStatus": dependency["providerStatus"], "message": "Revenue Department is unavailable; the same dependency remains waiting for retry."}
+        return {"success": False, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "attempts": dependency["attempts"], "maxAttempts": dependency["maxAttempts"], "providerStatus": dependency["providerStatus"], "message": f"{dependency['provider']} is unavailable; the same dependency remains waiting for retry."}
 
     dependency["status"] = "COMPLETED"
     dependency["updatedAt"] = _now()
@@ -113,6 +116,7 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str) -> di
         raise ValueError(f"Provider {dependency['provider']} returned no stable result identifier")
     dependency["resultReference"] = result_reference
     dependency["providerStatus"] = "AVAILABLE"
+    dependency["errorCategory"] = None
     dependency["lastError"] = None
     domicile = next((item for item in app["requirements"] if item["code"] == requirement_code), None)
     if domicile:

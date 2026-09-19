@@ -7,5 +7,5 @@ router = APIRouter(prefix="/api/catalog", tags=["Catalog"])
 
 
 @router.get("")
-def catalog(user: dict = Depends(require_roles("CITIZEN", "OFFICER", "ADMIN"))):
+def catalog(user: dict = Depends(require_roles("OFFICER", "ADMIN"))):
     return catalog_snapshot()

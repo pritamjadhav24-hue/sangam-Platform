@@ -1,24 +1,16 @@
 from __future__ import annotations
 
-from app.engine.adapters import CSVFileAdapter, LegacySOAPAdapter, RestAPIAdapter, validate_payload
+from app.engine.adapters import request_registered_service, validate_payload
 from app.engine.entity_resolution import resolve
 from app.engine import semantic_mapper
 from app.engine.registry import get_scheme
 from app.engine.semantic_mapper import map_record, mapping_evidence
 from app.engine.validation_engine import detect_canonical_conflicts, detect_conflicts, validate
-from app.mocks import education_dept, revenue_dept, social_welfare_dept
 
-SOURCES = {"IDENTITY": "Civil Registry", "INCOME_PROOF": "Revenue Department", "CASTE_PROOF": "Social Welfare Department", "DOMICILE_PROOF": "Revenue Department", "ACADEMIC_RECORD": "Education Department", "BANK_DETAILS": "Authorized DBT"}
+SOURCES = {"IDENTITY": "Civil Registry"}
 
 
 def discover(citizen: dict, simulate_timeout: bool = False, scheme_id: str | None = None) -> dict:
-    adapters = {
-        "INCOME_PROOF": RestAPIAdapter("Revenue Department", revenue_dept.get_income),
-        "CASTE_PROOF": LegacySOAPAdapter("Social Welfare Department", social_welfare_dept.get_caste),
-        "DOMICILE_PROOF": RestAPIAdapter("Revenue Department", revenue_dept.get_domicile),
-        "ACADEMIC_RECORD": CSVFileAdapter("Education Department", education_dept.get_academic),
-        "BANK_DETAILS": RestAPIAdapter("Authorized DBT", social_welfare_dept.get_bank_status),
-    }
     requirements, raw_records, mapping_records, source_records = [], [], [], []
     identity = {"recordId": citizen["citizenId"], "name": citizen["name"], "dob": citizen["dob"], "phone": citizen["phone"], "validUntil": "2030-12-31", "signature": "CIVIL-SIGNED"}
     fetched = {"record": identity, "attempts": 1, "delayed": False, "adapter": "Federated SSO"}
@@ -30,9 +22,15 @@ def discover(citizen: dict, simulate_timeout: bool = False, scheme_id: str | Non
     configured_codes = [item["code"] for item in scheme.get("requirements", [])]
     for code in configured_codes:
         source = SOURCES.get(code, "Configured provider")
-        adapter = adapters.get(code)
         if code != "IDENTITY":
-            fetched = adapter.fetch(citizen["citizenId"], simulate_timeout and code == "INCOME_PROOF") if adapter else {"record": None, "attempts": 0, "delayed": False, "adapter": "Unregistered adapter"}
+            from app.core.persistence import catalog_snapshot
+            configured_service = next((item for item in catalog_snapshot()["services"] if item.get("requirementCode") == code), None)
+            if configured_service:
+                result = request_registered_service(configured_service["serviceId"], citizen["citizenId"], correlation_id=citizen.get("citizenId"))
+                source = configured_service.get("provider", source)
+                fetched = {"record": None if simulate_timeout and code == "INCOME_PROOF" else result.record, "attempts": result.attempts, "delayed": result.delayed, "adapter": configured_service.get("adapter", "Configured adapter")}
+            else:
+                fetched = {"record": None, "attempts": 0, "delayed": False, "adapter": "Unregistered adapter"}
         record = fetched["record"]
         if not record:
             requirements.append({"code": code, "source": source, "status": "MISSING", "action": "Select a registered provider" if not adapter else "Queued connector retry", "adapter": fetched["adapter"]})

@@ -24,15 +24,33 @@ SCHEMES = [{
 # Development fallback catalog. Production selection reads the PostgreSQL catalog.
 DEPENDENCY_SERVICES = [
     {
+        "requirementCode": "INCOME_PROOF", "requiredService": "Income Verification",
+        "serviceName": "Income Verification", "provider": "Revenue Department",
+        "adapter": "REST API", "serviceId": "REV-INCOME-102", "sandboxHandler": "income_fetch", "priority": 10, "timeoutSeconds": 5, "maxAttempts": 3,
+        "reason": "Provider registered for required canonical service",
+    },
+    {
+        "requirementCode": "CASTE_PROOF", "requiredService": "Caste Verification",
+        "serviceName": "Caste Verification", "provider": "Social Welfare Department",
+        "adapter": "Legacy SOAP Wrapper", "serviceId": "SW-CASTE-301", "sandboxHandler": "caste_fetch", "priority": 10, "timeoutSeconds": 5, "maxAttempts": 3,
+        "reason": "Provider registered for required canonical service",
+    },
+    {
         "requirementCode": "DOMICILE_PROOF", "requiredService": "Domicile Certificate",
         "serviceName": "Domicile Issuance", "provider": "Revenue Department",
-        "adapter": "REST API", "serviceId": "REV-MAHA-101",
+        "adapter": "REST API", "serviceId": "REV-MAHA-101", "sandboxHandler": "domicile_issue", "priority": 10, "timeoutSeconds": 5, "maxAttempts": 3,
         "reason": "Provider registered for required canonical service",
     },
     {
         "requirementCode": "ACADEMIC_RECORD", "requiredService": "Academic Record",
         "serviceName": "Academic Verification", "provider": "Education Department",
-        "adapter": "CSV/File Adapter", "serviceId": "EDU-ACA-201",
+        "adapter": "CSV/File Adapter", "serviceId": "EDU-ACA-201", "sandboxHandler": "academic_fetch", "priority": 10, "timeoutSeconds": 5, "maxAttempts": 3,
+        "reason": "Provider registered for required canonical service",
+    },
+    {
+        "requirementCode": "BANK_DETAILS", "requiredService": "Bank Status",
+        "serviceName": "DBT Account Verification", "provider": "Authorized DBT",
+        "adapter": "REST API", "serviceId": "DBT-BANK-401", "sandboxHandler": "bank_fetch", "priority": 10, "timeoutSeconds": 5, "maxAttempts": 3,
         "reason": "Provider registered for required canonical service",
     },
 ]
@@ -63,4 +81,4 @@ def select_dependency_provider(requirement_code: str, health: list[dict]) -> dic
     if not candidates:
         return None
     # Stable registry order is the tie-breaker after availability.
-    return sorted(candidates, key=lambda item: (item["healthStatus"] != "AVAILABLE", item["provider"]))[0]
+    return sorted(candidates, key=lambda item: (item["healthStatus"] != "AVAILABLE", item.get("priority", 100), item["provider"]))[0]

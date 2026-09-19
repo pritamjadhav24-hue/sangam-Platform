@@ -4,6 +4,12 @@ SANGAM is a local prototype for purpose-bound government service orchestration. 
 
 The production-upgrade foundation adds PostgreSQL-backed departments, providers, services, schemes, and scheme requirements. `GET /api/catalog` exposes the configured catalog. Demo users and initial catalog rows are isolated in the development seed modules and are inserted only when the corresponding database tables are empty and seeding is enabled (`SANGAM_SEED_CATALOG=true`).
 
+Integrations use a provider adapter contract with health checks, discovery, submission, status, retrieval, normalization, bounded retries, error categories, correlation IDs, and idempotency keys. REST, SOAP-ready, file/CSV-ready, and webhook-ready implementations can share this contract; the current adapters are sandbox/mock implementations only.
+
+Provider metadata and capabilities are stored in PostgreSQL. Sensitive runtime values are referenced through environment variables such as `PROVIDER_<ID>_BASE_URL`, `PROVIDER_<ID>_CLIENT_ID`, and `PROVIDER_<ID>_CLIENT_SECRET`. Catalog APIs expose only whether a referenced value is configured, never the value itself. No real government credentials or live government API integrations are included.
+
+To onboard a provider, create its department/provider records, assign a `provider_capabilities` row pointing to the service and requirement code, set the adapter type/protocol and non-secret retry metadata, configure secret references in the deployment environment, then enable the provider. The dependency engine and requirement analyzer discover the capability from PostgreSQL; no provider-specific branch is required. Sandbox implementations use configuration-only handler names and the same adapter factory used by future real integrations.
+
 ## Run locally with Docker Compose
 
 Prerequisites:
