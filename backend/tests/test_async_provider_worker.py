@@ -1,5 +1,7 @@
 import os
 import json
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -10,7 +12,7 @@ from app.core.notification_manager import notification_manager
 from app.core.persistence import persist_state
 from app.core.redis_service import MemoryRedis, build_test_redis_service
 from app.engine.adapters import set_integration_availability
-from app.engine.consent_manager import create_consent
+from app.engine.consent_manager import CONSUMER, PURPOSE, ConsentAuthorizationError, authorize_persisted_access, create_consent, execute_with_persisted_authorization, revoke_consent
 from app.engine.dependency_orchestrator import ensure_domicile_dependency, initiate_domicile
 from app.engine.requirement_analyzer import discover
 from app.engine.rules_engine import evaluate
@@ -42,6 +44,7 @@ class AsyncProviderWorkerTests(unittest.TestCase):
     def test_provider_operation_is_durable_queued_claimed_and_completed(self):
         citizen_id = "CITIZEN_001"
         create_consent(citizen_id, True)
+        persist_state()
         result = discover(CITIZENS[citizen_id])
         app = create_application(citizen_id, result, evaluate(result["requirements"]))
         dependency = ensure_domicile_dependency(app)
@@ -73,6 +76,70 @@ class AsyncProviderWorkerTests(unittest.TestCase):
         self.memory.rpush(queue.queue_name, json.dumps(job))
         duplicate = run_once(queue, {"test.transient": handler})
         self.assertEqual(duplicate["status"], "DUPLICATE_OR_ALREADY_FINISHED")
+
+    def test_revoked_consent_cancels_queued_provider_job_without_adapter_call(self):
+        citizen_id = "CITIZEN_001"
+        receipt = create_consent(citizen_id, True)
+        persist_state()
+        result = discover(CITIZENS[citizen_id])
+        app = create_application(citizen_id, result, evaluate(result["requirements"]))
+        app["consentId"] = receipt["consentId"]
+        dependency = ensure_domicile_dependency(app)
+        queued = initiate_domicile(citizen_id, app)
+        revoke_consent(citizen_id, receipt["consentId"])
+        persist_state()
+        with patch("app.engine.dependency_orchestrator.request_registered_service") as adapter:
+            finished = run_once(JobQueue(self.redis), {})
+        self.assertEqual(finished["status"], "FAILED")
+        self.assertEqual(finished["error"]["category"], "AUTHORIZATION_ERROR")
+        self.assertEqual(dependency["jobStatus"], "CANCELLED")
+        adapter.assert_not_called()
+        self.assertTrue(any(event["type"] == "PROVIDER_JOB_CANCELLED" for event in event_bus.events))
+
+    def test_revocation_is_visible_after_fresh_hydration(self):
+        citizen_id = "CITIZEN_001"
+        receipt = create_consent(citizen_id, True)
+        revoke_consent(citizen_id, receipt["consentId"])
+        from app.engine import consent_manager
+        consent_manager.CONSENTS.clear()
+        from app.core.persistence import hydrate_state
+        hydrate_state()
+        with self.assertRaises(ConsentAuthorizationError):
+            authorize_persisted_access(citizen_id, CONSUMER, PURPOSE, consent_id=receipt["consentId"])
+
+    def test_concurrent_revoke_waits_for_locked_provider_execution(self):
+        citizen_id = "CITIZEN_001"
+        receipt = create_consent(citizen_id, True)
+        started = threading.Event()
+        release = threading.Event()
+        revoked = threading.Event()
+        calls = []
+
+        def provider_call():
+            calls.append("called")
+            started.set()
+            release.wait(timeout=5)
+            return "provider-result"
+
+        result = {}
+        def execute():
+            result["value"] = execute_with_persisted_authorization(
+                citizen_id, CONSUMER, PURPOSE, consent_id=receipt["consentId"], operation=provider_call
+            )
+
+        executor = threading.Thread(target=execute)
+        executor.start()
+        self.assertTrue(started.wait(timeout=5))
+        revoker = threading.Thread(target=lambda: (revoke_consent(citizen_id, receipt["consentId"]), revoked.set()))
+        revoker.start()
+        time.sleep(0.2)
+        self.assertFalse(revoked.is_set())
+        release.set()
+        executor.join(timeout=5)
+        revoker.join(timeout=5)
+        self.assertEqual(result["value"], "provider-result")
+        self.assertTrue(revoked.is_set())
+        self.assertEqual(calls, ["called"])
 
 
 if __name__ == "__main__":

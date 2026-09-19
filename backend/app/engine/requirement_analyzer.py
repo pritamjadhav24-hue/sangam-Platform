@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from app.engine.adapters import request_registered_service, validate_payload
+from app.engine.adapters import integration_health, request_registered_service, validate_payload
 from app.engine.entity_resolution import resolve
 from app.engine import semantic_mapper
-from app.engine.registry import get_scheme
+from app.engine.registry import get_scheme, select_dependency_provider
 from app.engine.semantic_mapper import map_record, mapping_evidence
 from app.engine.validation_engine import detect_canonical_conflicts, detect_conflicts, validate
 
@@ -19,15 +19,17 @@ def discover(citizen: dict, simulate_timeout: bool = False, scheme_id: str | Non
     if scheme is None:
         from app.core.persistence import catalog_snapshot
         configured = catalog_snapshot()["schemes"]
-        scheme = configured[0] if configured else {"requirements": [{"code": code} for code in ["IDENTITY", "INCOME_PROOF", "CASTE_PROOF", "DOMICILE_PROOF", "ACADEMIC_RECORD", "BANK_DETAILS"]]}
+        if not configured:
+            raise RuntimeError("Configured service catalog is unavailable")
+        scheme = configured[0]
     configured_codes = [item["code"] for item in scheme.get("requirements", [])]
     for code in configured_codes:
         source = SOURCES.get(code, "Configured provider")
         if code != "IDENTITY":
             from app.core.persistence import catalog_snapshot
-            configured_service = next((item for item in catalog_snapshot()["services"] if item.get("requirementCode") == code), None)
+            configured_service = select_dependency_provider(code, integration_health())
             if configured_service:
-                result = request_registered_service(configured_service["serviceId"], citizen["citizenId"], correlation_id=citizen.get("citizenId"))
+                result = request_registered_service(configured_service["serviceId"], citizen["citizenId"], requirement_code=code, correlation_id=citizen.get("citizenId"))
                 source = configured_service.get("provider", source)
                 fetched = {"record": None if simulate_timeout and code == "INCOME_PROOF" else result.record, "attempts": result.attempts, "delayed": result.delayed, "adapter": configured_service.get("adapter", "Configured adapter")}
             else:

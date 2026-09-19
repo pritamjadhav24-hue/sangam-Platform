@@ -65,7 +65,37 @@ class SecurityHardeningTests(unittest.TestCase):
     def test_safe_application_view_does_not_return_raw_requirement_records(self):
         from app.api.citizen_routes import _safe_application
         safe = _safe_application({"appId": "APP-SAFE", "citizenId": "CITIZEN_001", "requirements": [{"code": "INCOME_PROOF", "source": "Revenue Department", "status": "FOUND", "canonical": {"incomeAmount": 123}, "recordId": "RAW-1"}], "dependencies": [], "conflicts": []})
-        self.assertEqual(safe["requirements"], [{"code": "INCOME_PROOF", "source": "Revenue Department", "status": "FOUND"}])
+        self.assertEqual(safe["requirements"], [{"requirementCode": "INCOME_PROOF", "displayLabel": "Income Proof", "status": "FOUND", "userAction": "No action required"}])
+        self.assertNotIn("recordId", str(safe))
+        self.assertNotIn("canonical", str(safe))
+
+    def test_safe_application_view_hides_provider_operational_metadata(self):
+        from app.api.citizen_routes import _safe_application
+        safe = _safe_application({"appId": "APP-SAFE", "requirements": [], "dependencies": [{
+            "dependencyId": "DEP-1", "requiredService": "Income verification", "providerStatus": "AVAILABLE",
+            "resultReference": "INTERNAL-123", "lastError": "provider stack trace", "errorCategory": "INTERNAL_ERROR",
+            "status": "COMPLETED", "attempts": 1, "maxAttempts": 3,
+        }], "conflicts": []})
+        text = str(safe)
+        self.assertNotIn("INTERNAL-123", text)
+        self.assertNotIn("provider stack trace", text)
+        self.assertNotIn("providerStatus", text)
+        self.assertNotIn("errorCategory", text)
+
+    def test_safe_discovery_view_contains_only_citizen_actionable_fields(self):
+        from app.api.citizen_routes import _safe_discovery
+        safe = _safe_discovery({
+            "schemeId": "SERVICE-1", "serviceId": "SERVICE-1",
+            "service": {"serviceId": "SERVICE-1", "name": "Configured service", "department": "Configured department"},
+            "requirements": [{"code": "INCOME_PROOF", "status": "FOUND", "canonical": {"income": 10}, "recordId": "RAW-1", "mappingEvidence": [{"sourceField": "x"},], "resolution": {"score": 1}}],
+            "mappingEvidence": [{"sourceRecordId": "RAW-1"}], "semanticMappingEvidence": [{"internal": True}], "conflicts": [],
+        })
+        text = str(safe)
+        self.assertEqual(safe["requirements"][0]["requirementCode"], "INCOME_PROOF")
+        self.assertNotIn("RAW-1", text)
+        self.assertNotIn("canonical", text)
+        self.assertNotIn("mappingEvidence", text)
+        self.assertNotIn("resolution", text)
 
 
 if __name__ == "__main__":

@@ -46,15 +46,22 @@ class JobQueue:
         job = {"jobId": f"JOB-{uuid.uuid4().hex}", "jobType": job_type, "correlationId": correlation_id, "applicationId": application_id, "dependencyId": dependency_id, "providerId": payload.get("providerId"), "attempt": 0, "maxAttempts": max_attempts, "status": "QUEUED", "createdAt": now(), "startedAt": None, "completedAt": None, "error": None, "payload": payload}
         from app.core.persistence import persist_provider_job
         persist_provider_job(job)
-        self.redis.enqueue(self.queue_name, job)
+        try:
+            self.redis.enqueue(self.queue_name, job)
+            from app.core.persistence import mark_provider_job_dispatched
+            mark_provider_job_dispatched(job["jobId"])
+        except Exception:
+            from app.core.persistence import release_provider_job_dispatch
+            release_provider_job_dispatch(job["jobId"])
+            raise
         return job
 
     def dequeue(self):
         return self.redis.dequeue(self.queue_name)
 
-    def claim(self, job):
+    def claim(self, job, worker_id=None):
         from app.core.persistence import claim_provider_job
-        return claim_provider_job(job["jobId"])
+        return claim_provider_job(job["jobId"], worker_id=worker_id)
 
     def update(self, job):
         from app.core.persistence import update_provider_job
@@ -64,6 +71,29 @@ class JobQueue:
         jobs = []
         from app.core.persistence import recover_provider_jobs
         for job in recover_provider_jobs():
-            self.redis.enqueue(self.queue_name, job)
+            try:
+                self.redis.enqueue(self.queue_name, job)
+                from app.core.persistence import mark_provider_job_dispatched
+                mark_provider_job_dispatched(job["jobId"])
+            except Exception:
+                from app.core.persistence import release_provider_job_dispatch
+                release_provider_job_dispatch(job["jobId"])
+                raise
             jobs.append(job)
         return jobs
+
+    def reconcile(self, limit: int = 25, lease_seconds: int = 30) -> dict:
+        """Republish only PostgreSQL-eligible jobs using short DB leases."""
+        from app.core.persistence import claim_queued_provider_jobs, mark_provider_job_dispatched, release_provider_job_dispatch
+        jobs = claim_queued_provider_jobs(limit=limit, lease_seconds=lease_seconds)
+        dispatched = 0
+        failed = 0
+        for job in jobs:
+            try:
+                self.redis.enqueue(self.queue_name, job)
+                mark_provider_job_dispatched(job["jobId"])
+                dispatched += 1
+            except Exception:
+                release_provider_job_dispatch(job["jobId"])
+                failed += 1
+        return {"eligible": len(jobs), "dispatched": dispatched, "failed": failed}
