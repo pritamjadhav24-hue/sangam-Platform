@@ -11,7 +11,6 @@ from app.core.event_bus import event_bus
 from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuthorizationError, authorize_access, create_consent, current, revoke_consent
 from app.engine.dependency_orchestrator import ensure_missing_dependencies, initiate_dependency
 from app.core.persistence import citizen_service_snapshot, catalog_snapshot
-from app.engine.registry import SCHEMES
 from app.engine.requirement_analyzer import discover
 from app.engine.rules_engine import evaluate
 from app.engine.workflow_engine import APPLICATIONS, create_application, find_active_application, transition_application
@@ -82,7 +81,7 @@ def _assert_own_citizen(user: dict, citizen_id: str) -> None:
 @router.get("/schemes")
 def schemes(user: dict = Depends(require_roles("CITIZEN"))):
     configured = citizen_service_snapshot()
-    return {"schemes": configured or SCHEMES, "services": configured or SCHEMES}
+    return {"schemes": configured, "services": configured}
 
 
 @router.get("/services")
@@ -111,22 +110,89 @@ def discovery(citizen_id: str = "CITIZEN_001", simulate_timeout: bool = False, s
     result = discover({k: v for k, v in citizen.items() if k != "password"}, simulate_timeout, scheme_id)
     app = find_active_application(citizen_id)
     _record_discovery(citizen_id, result, app["appId"] if app else None)
-    return result
+    return _safe_discovery(result)
+
+
+def _safe_discovery(result: dict) -> dict:
+    """Return only citizen-actionable discovery state.
+
+    Provider records, mapping evidence, source identifiers, and resolution
+    internals remain server-side for workflow/audit purposes.
+    """
+    service = result.get("service") or {}
+    requirements = []
+    for item in result.get("requirements", []):
+        requirements.append({
+            "requirementCode": item.get("code"),
+            "displayLabel": item.get("label") or str(item.get("code", "")).replace("_", " ").title(),
+            "status": item.get("status"),
+            "userAction": item.get("action") or ("No action required" if item.get("status") == "FOUND" else "Retry verification or request help"),
+        })
+    return {
+        "serviceId": result.get("serviceId") or result.get("schemeId"),
+        "service": {field: service.get(field) for field in ("serviceId", "name", "department") if service.get(field) is not None},
+        "requirements": requirements,
+        "conflicts": [{"status": item.get("status"), "field": item.get("canonicalField"), "message": "Additional review is required."} for item in result.get("conflicts", [])],
+        "resilienceBanner": result.get("resilienceBanner"),
+    }
 
 
 def _safe_application(app: dict) -> dict:
     safe_requirements = []
     for requirement in app.get("requirements", []):
-        safe_requirements.append({field: requirement.get(field) for field in ("code", "source", "status", "verifiedOn") if field in requirement})
-    safe_conflicts = [{"canonicalField": item.get("canonicalField"), "status": item.get("status"), "sources": [source.get("sourceSystem") for source in item.get("sources", [])]} for item in app.get("conflicts", [])]
+        safe_requirements.append({
+            "requirementCode": requirement.get("code"),
+            "displayLabel": requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title(),
+            "status": requirement.get("status"),
+            "userAction": requirement.get("action") or ("No action required" if requirement.get("status") == "FOUND" else "Retry verification or request help"),
+            **({"verifiedOn": requirement.get("verifiedOn")} if requirement.get("verifiedOn") else {}),
+        })
+    safe_conflicts = [{"status": item.get("status"), "field": item.get("canonicalField"), "message": "Additional review is required."} for item in app.get("conflicts", [])]
     safe_dependencies = []
     for dependency_item in app.get("dependencies", []):
-        safe_dependencies.append({field: dependency_item.get(field) for field in ("dependencyId", "requiredService", "serviceName", "status", "providerStatus", "attempts", "maxAttempts", "resultReference", "lastError", "errorCategory") if field in dependency_item})
-    return {**app, "citizenId": None, "requirements": safe_requirements, "conflicts": safe_conflicts, "entityReviews": [], "conflictReviews": [], "dependencies": safe_dependencies}
+        safe_dependencies.append({field: dependency_item.get(field) for field in ("requiredService", "serviceName", "status", "attempts", "maxAttempts") if field in dependency_item})
+    safe = {field: app.get(field) for field in ("appId", "serviceId", "schemeId", "status", "consentId", "createdAt", "updatedAt") if field in app}
+    safe["citizenId"] = None
+    safe["requirements"] = safe_requirements
+    safe["conflicts"] = safe_conflicts
+    safe["entityReviews"] = []
+    safe["conflictReviews"] = []
+    safe["dependencies"] = safe_dependencies
+    if isinstance(app.get("eligibility"), dict):
+        safe["eligibility"] = {field: app["eligibility"].get(field) for field in ("eligible", "reasons") if field in app["eligibility"]}
+    if isinstance(app.get("statusHistory"), list):
+        safe["statusHistory"] = [{field: item.get(field) for field in ("status", "at") if field in item} for item in app["statusHistory"]]
+    return safe
 
 
 def _safe_consent(receipt: dict) -> dict:
-    return {field: receipt.get(field) for field in ("consentId", "serviceId", "purpose", "allowed", "decision", "createdAt", "expiresAt", "revokedAt", "appId", "applicationStatus", "dependencyId") if field in receipt}
+    return {field: receipt.get(field) for field in ("consentId", "serviceId", "purpose", "allowed", "decision", "createdAt", "expiresAt", "revokedAt", "appId", "applicationStatus") if field in receipt}
+
+
+def _safe_workflow_events(events: list[dict], app_id: str) -> list[dict]:
+    safe_types = {
+        "DEPENDENCY_RESOLVED": ("VERIFICATION_COMPLETED", "Verification completed."),
+        "DOMICILE_ISSUED": ("VERIFICATION_COMPLETED", "Verification completed."),
+        "PROVIDER_JOB_RETRYING": ("VERIFICATION_DELAYED", "Verification is delayed."),
+        "PROVIDER_JOB_DEAD_LETTER": ("VERIFICATION_DELAYED", "Verification is delayed; further review may be required."),
+        "PROVIDER_JOB_CANCELLED": ("APPLICATION_UPDATED", "Verification was cancelled and may require renewed consent."),
+        "DEPENDENCY_SERVICE_FAILED": ("VERIFICATION_DELAYED", "Verification is delayed."),
+        "APPLICATION_SUBMITTED": ("APPLICATION_UPDATED", "Application updated."),
+        "APPLICATION_STATUS_CHANGED": ("APPLICATION_UPDATED", "Application updated."),
+        "WORKFLOW_RESUMED": ("APPLICATION_UPDATED", "Application updated."),
+    }
+    safe_events = []
+    for event in events:
+        payload = event.get("payload") or {}
+        if payload.get("appId") != app_id:
+            continue
+        safe_type, message = safe_types.get(event.get("type"), ("APPLICATION_UPDATED", "Application updated."))
+        safe_events.append({
+            "type": safe_type,
+            "occurredAt": event.get("occurredAt"),
+            "message": message,
+        })
+    return safe_events
 
 
 @router.post("/applications")
@@ -141,6 +207,7 @@ def create_citizen_application(body: ApplicationCreate, user: dict = Depends(req
     result = discover(citizen, service_id=body.serviceId)
     app = create_application(body.citizenId, result, evaluate(result["requirements"]), body.serviceId)
     app["consentId"] = receipt["consentId"]
+    app["consentAttributes"] = list(receipt.get("allowed", []))
     _record_discovery(body.citizenId, result, app["appId"])
     _record_entity_reviews(app)
     ensure_missing_dependencies(app)
@@ -197,6 +264,7 @@ def consent(body: Consent, user: dict = Depends(require_roles("CITIZEN"))):
         result = discover({k: v for k, v in citizen.items() if k != "password"}, scheme_id=body.schemeId)
         app = find_active_application(body.citizenId) or create_application(body.citizenId, result, evaluate(result["requirements"]))
         app["consentId"] = receipt["consentId"]
+        app["consentAttributes"] = list(receipt.get("allowed", []))
         receipt["applicationId"] = app["appId"]
         receipt["serviceId"] = app.get("serviceId") or body.schemeId
         _record_discovery(body.citizenId, result, app["appId"])
@@ -236,6 +304,8 @@ def submit(body: Submit, user: dict = Depends(require_roles("CITIZEN"))):
     result = discover({k: v for k, v in citizen.items() if k != "password"}, body.simulateTimeout, service_id=service_id)
     eligibility = evaluate(result["requirements"])
     app = app if app and app["citizenId"] == body.citizenId else create_application(body.citizenId, result, eligibility, service_id)
+    app["consentId"] = consent_receipt["consentId"]
+    app["consentAttributes"] = list(consent_receipt.get("allowed", []))
     app["requirements"] = result["requirements"]
     app["eligibility"] = eligibility
     _record_discovery(body.citizenId, result, app["appId"])
@@ -252,7 +322,7 @@ def submit(body: Submit, user: dict = Depends(require_roles("CITIZEN"))):
         transition_application(app, "WAITING_FOR_OFFICER")
     event_bus.publish("APPLICATION_SUBMITTED", {"citizenId": body.citizenId, "appId": app["appId"], "consentId": consent_receipt["consentId"]})
     audit_bus.append(body.citizenId, "APPLICATION", "Configured service application submission", "GovOrchestrator", "SUBMIT", consent_receipt["consentId"], payload={"appId": app["appId"], "serviceId": app.get("serviceId"), "eligible": eligibility["eligible"], "actorRole": user["role"]}, correlation_id=app["appId"])
-    return app
+    return _safe_application(app)
 
 
 @router.get("/track/{app_id}")
@@ -266,6 +336,6 @@ def track(app_id: str, user: dict = Depends(require_roles("CITIZEN", "OFFICER"))
     consent_view = None
     if receipt:
         consent_view = {field: receipt.get(field) for field in ("consentId", "serviceId", "purpose", "allowed", "expiresAt", "decision", "createdAt", "revokedAt") if field in receipt}
-    workflow_events = [event for event in event_bus.events if event.get("payload", {}).get("appId") == app_id]
-    audit_entries = [{field: entry.get(field) for field in ("sequence", "what", "why", "when", "source", "action", "consentId", "correlationId")} for entry in audit_bus.entries if entry.get("correlationId") == app_id]
+    workflow_events = _safe_workflow_events(event_bus.events, app_id)
+    audit_entries = [{field: entry.get(field) for field in ("sequence", "what", "when", "action")} for entry in audit_bus.entries if entry.get("correlationId") == app_id]
     return {**_safe_application(app), "consent": {field: consent_view.get(field) for field in ("consentId", "serviceId", "purpose", "allowed", "decision", "createdAt", "expiresAt", "revokedAt") if consent_view and field in consent_view} if consent_view else None, "workflowEvents": workflow_events, "auditEntries": audit_entries}

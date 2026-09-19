@@ -35,9 +35,18 @@ def _configured_integrations() -> dict:
                 service = session.query(ServiceCatalogRow).filter_by(provider_id=provider.provider_id, active=True).first()
                 service_payload = service.payload if service else {}
                 configured[provider.name] = {"adapterType": provider.adapter_type, "service": service.name if service else "Configured provider service", "providerId": provider.provider_id, "contractVersion": provider.contract_version, "environment": provider.environment, "authType": provider.auth_type, "endpointRef": provider.endpoint_ref, "timeoutSeconds": provider.timeout_seconds, "maxAttempts": provider.max_attempts, "payload": {**service_payload, **(provider.payload or {})}}
-    except Exception:
+    except Exception as error:
+        mode = os.getenv("SANGAM_ENV", "development").strip().lower()
+        allow_demo = mode not in {"production", "prod"} and os.getenv("SANGAM_ALLOW_DEMO_FALLBACK", "false").lower() in {"1", "true", "yes"}
+        if not allow_demo:
+            raise RuntimeError("Configured provider catalog is unavailable") from error
         configured = {}
-    return configured or _integrations
+    if configured:
+        return configured
+    mode = os.getenv("SANGAM_ENV", "development").strip().lower()
+    if mode not in {"production", "prod"} and os.getenv("SANGAM_ALLOW_DEMO_FALLBACK", "false").lower() in {"1", "true", "yes"}:
+        return _integrations
+    return {}
 
 
 @dataclass
@@ -291,13 +300,29 @@ class CSVFileAdapter(SourceAdapter):
         except (OSError, UnicodeError, csv.Error): return self._failure(request.operation, "MALFORMED_RESPONSE", "Configured CSV could not be parsed", request.correlation_id, request.idempotency_key)
 
 
-def request_registered_service(service_id, citizen_id, correlation_id=None, idempotency_key=None):
+def request_registered_service(service_id, citizen_id, requirement_code=None, correlation_id=None, idempotency_key=None):
     from sqlalchemy.orm import Session
-    from app.core.persistence import ProviderRow, ServiceCatalogRow, engine
+    from app.core.persistence import ProviderCapabilityRow, ProviderRow, ServiceCatalogRow, engine
     with Session(engine) as session:
         service = session.get(ServiceCatalogRow, service_id)
-        provider = session.get(ProviderRow, service.provider_id) if service else None
-    if not service or not provider: return AdapterResult(None, provider=None, correlation_id=correlation_id, idempotency_key=idempotency_key, error_category="CONFIGURATION_ERROR", success=False)
+    selected_requirement = requirement_code or (service.requirement_code if service else None)
+    from app.engine.registry import select_dependency_provider
+    selected = select_dependency_provider(selected_requirement, integration_health()) if service and selected_requirement else None
+    if not selected or selected.get("serviceId") != service_id:
+        return AdapterResult(None, provider=None, correlation_id=correlation_id, idempotency_key=idempotency_key, error_category="CONFIGURATION_ERROR", success=False)
+    with Session(engine) as session:
+        service = session.get(ServiceCatalogRow, service_id)
+        capability = session.query(ProviderCapabilityRow).filter(
+            ProviderCapabilityRow.service_id == service.service_id if service else False,
+            ProviderCapabilityRow.provider_id == service.provider_id if service else False,
+            ProviderCapabilityRow.capability_code == (requirement_code or service.requirement_code) if service else False,
+            ProviderCapabilityRow.enabled.is_(True),
+        ).first() if service else None
+        provider = session.query(ProviderRow).filter_by(provider_id=service.provider_id, active=True).first() if capability and service.active else None
+    if not service or not capability or not provider: return AdapterResult(None, provider=None, correlation_id=correlation_id, idempotency_key=idempotency_key, error_category="CONFIGURATION_ERROR", success=False)
+    health = next((item for item in integration_health() if item.get("providerId") == provider.provider_id or item.get("system") == provider.name), None)
+    if not health or health.get("status") not in {"AVAILABLE", "HEALTHY"}:
+        return AdapterResult(None, provider=provider.name, correlation_id=correlation_id, idempotency_key=idempotency_key, error_category="UPSTREAM_UNAVAILABLE", success=False, retryable=True, metadata={"providerId": provider.provider_id})
     handler_name = service.payload.get("sandboxHandler") or provider.payload.get("sandboxHandler")
     config = {**(provider.payload or {}), "providerId": provider.provider_id, "environment": provider.environment, "authType": provider.auth_type, "endpointRef": provider.endpoint_ref, "timeoutSeconds": provider.timeout_seconds, "maxAttempts": provider.max_attempts}
     adapter = AdapterFactory.create(provider.adapter_type, provider.name, handler_name, provider_id=provider.provider_id, config=config)

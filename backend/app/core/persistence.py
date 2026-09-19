@@ -10,11 +10,11 @@ from __future__ import annotations
 import itertools
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, select, update as sql_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0006_provider_contract_metadata"
+MIGRATION_HEAD = "0009_quarantine_unleased"
 
 
 class Base(DeclarativeBase):
@@ -168,6 +168,11 @@ class ProviderJobRow(Base):
     completed_at: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     error_category: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    dispatch_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_dispatched_at: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    dispatch_claimed_until: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    lease_owner: Mapped[Optional[str]] = mapped_column(String(160), nullable=True, index=True)
+    lease_until: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
@@ -279,7 +284,9 @@ def _job_from_row(row: ProviderJobRow) -> dict:
             "attempt": row.attempt, "maxAttempts": row.max_attempts,
             "createdAt": row.created_at, "startedAt": row.started_at,
             "completedAt": row.completed_at, "error": ({"category": row.error_category, "message": row.error_message} if row.error_category else None),
-            "payload": row.payload or {}}
+            "payload": row.payload or {}, "dispatchAttempts": row.dispatch_attempts,
+            "lastDispatchedAt": row.last_dispatched_at, "dispatchClaimedUntil": row.dispatch_claimed_until,
+            "leaseOwner": row.lease_owner, "leaseUntil": row.lease_until}
 
 
 def persist_provider_job(job: dict) -> dict:
@@ -293,6 +300,9 @@ def persist_provider_job(job: dict) -> dict:
                   "provider_id": job.get("providerId"), "attempt": job.get("attempt", 0),
                   "max_attempts": job.get("maxAttempts", 3), "created_at": job["createdAt"],
                   "started_at": job.get("startedAt"), "completed_at": job.get("completedAt"),
+                  "dispatch_attempts": job.get("dispatchAttempts", 0), "last_dispatched_at": job.get("lastDispatchedAt"),
+                  "dispatch_claimed_until": job.get("dispatchClaimedUntil"),
+                  "lease_owner": job.get("leaseOwner"), "lease_until": job.get("leaseUntil"),
                   "error_category": error.get("category"), "error_message": safe_error_message(error.get("message", "")) or None,
                   "payload": job.get("payload") or {}}
         if row is None:
@@ -303,7 +313,7 @@ def persist_provider_job(job: dict) -> dict:
     return job
 
 
-def claim_provider_job(job_id: str) -> dict | None:
+def claim_provider_job(job_id: str, worker_id: str | None = None, lease_seconds: int = 60) -> dict | None:
     """Atomically claim only a queued job; duplicate deliveries become no-ops."""
     with Session(engine) as session:
         row = session.execute(select(ProviderJobRow).where(ProviderJobRow.job_id == job_id).with_for_update()).scalar_one_or_none()
@@ -312,23 +322,40 @@ def claim_provider_job(job_id: str) -> dict | None:
         row.status = "RUNNING"
         row.attempt += 1
         row.started_at = datetime.now(timezone.utc).isoformat()
+        row.lease_owner = worker_id or "anonymous-worker"
+        row.lease_until = (datetime.now(timezone.utc) + timedelta(seconds=max(15, min(lease_seconds, 600)))).isoformat()
+        row.dispatch_claimed_until = None
         session.commit()
         return _job_from_row(row)
 
 
-def update_provider_job(job: dict) -> dict:
+def update_provider_job(job: dict) -> dict | None:
+    """Apply a worker result only while its PostgreSQL lease is still current."""
     with Session(engine) as session:
-        row = session.get(ProviderJobRow, job["jobId"])
-        if row is None:
-            raise KeyError(f"Unknown provider job {job['jobId']}")
-        row.status = job["status"]
-        row.attempt = job.get("attempt", row.attempt)
-        row.started_at = job.get("startedAt")
-        row.completed_at = job.get("completedAt")
+        status = job["status"]
+        values = {"status": status, "attempt": job.get("attempt"), "started_at": job.get("startedAt"), "completed_at": job.get("completedAt")}
+        if status == "QUEUED":
+            values.update(last_dispatched_at=None, dispatch_claimed_until=None, lease_owner=None, lease_until=None)
+        elif status in {"COMPLETED", "FAILED", "DEAD_LETTER"}:
+            values.update(lease_owner=None, lease_until=None)
         error = job.get("error") or {}
-        row.error_category = error.get("category")
         from app.core.job_queue import safe_error_message
-        row.error_message = safe_error_message(error.get("message", "")) or None
+        values["error_category"] = error.get("category")
+        values["error_message"] = safe_error_message(error.get("message", "")) or None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        result = session.execute(
+            sql_update(ProviderJobRow)
+            .where(ProviderJobRow.job_id == job["jobId"])
+            .where(ProviderJobRow.status == "RUNNING")
+            .where(ProviderJobRow.attempt == job.get("attempt"))
+            .where(ProviderJobRow.lease_owner == job.get("leaseOwner"))
+            .where(ProviderJobRow.lease_until.is_not(None))
+            .where(ProviderJobRow.lease_until > now_iso)
+            .values(**values)
+        )
+        if result.rowcount != 1:
+            session.rollback()
+            return None
         session.commit()
     return job
 
@@ -337,13 +364,113 @@ def recover_provider_jobs() -> list[dict]:
     """Turn abandoned RUNNING jobs back into queued work after a restart."""
     recovered = []
     with Session(engine) as session:
-        rows = session.execute(select(ProviderJobRow).where(ProviderJobRow.status.in_(["QUEUED", "RUNNING"])).with_for_update()).scalars().all()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        rows = session.execute(
+            select(ProviderJobRow)
+            .where(ProviderJobRow.status == "RUNNING")
+            .where(ProviderJobRow.lease_until.is_not(None))
+            .where(ProviderJobRow.lease_until <= now_iso)
+            .with_for_update(skip_locked=True)
+        ).scalars().all()
         for row in rows:
             row.status = "QUEUED"
             row.started_at = None
+            row.last_dispatched_at = None
+            row.dispatch_claimed_until = None
+            row.lease_owner = None
+            row.lease_until = None
             recovered.append(_job_from_row(row))
         session.commit()
     return recovered
+
+
+def claim_queued_provider_jobs(limit: int = 25, lease_seconds: int = 30) -> list[dict]:
+    """Lease a bounded batch of queued jobs for Redis dispatch.
+
+    The lease is database-backed and short-lived. If a process dies after
+    Redis accepts a message but before the marker is cleared, the job becomes
+    eligible again; PostgreSQL claim remains the execution idempotency guard.
+    """
+    from datetime import timedelta
+    now_value = datetime.now(timezone.utc)
+    now_iso = now_value.isoformat()
+    lease_until = (now_value + timedelta(seconds=max(5, min(lease_seconds, 300)))).isoformat()
+    with Session(engine) as session:
+        rows = session.execute(
+            select(ProviderJobRow)
+            .where(ProviderJobRow.status == "QUEUED")
+            .where(
+                (ProviderJobRow.dispatch_claimed_until.is_(None) |
+                 (ProviderJobRow.dispatch_claimed_until <= now_iso))
+            )
+            .order_by(ProviderJobRow.created_at.asc())
+            .limit(max(1, min(limit, 100)))
+            .with_for_update(skip_locked=True)
+        ).scalars().all()
+        for row in rows:
+            row.dispatch_attempts += 1
+            row.dispatch_claimed_until = lease_until
+        session.commit()
+        return [_job_from_row(row) for row in rows]
+
+
+def mark_provider_job_dispatched(job_id: str) -> None:
+    with Session(engine) as session:
+        row = session.get(ProviderJobRow, job_id)
+        if row and row.status == "QUEUED":
+            row.last_dispatched_at = datetime.now(timezone.utc).isoformat()
+            row.dispatch_claimed_until = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+            session.commit()
+
+
+def release_provider_job_dispatch(job_id: str) -> None:
+    with Session(engine) as session:
+        row = session.get(ProviderJobRow, job_id)
+        if row and row.status == "QUEUED":
+            row.dispatch_claimed_until = None
+            session.commit()
+
+
+def renew_provider_job_lease(job_id: str, worker_id: str, lease_seconds: int = 60) -> bool:
+    with Session(engine) as session:
+        row = session.get(ProviderJobRow, job_id, with_for_update=True)
+        if not row or row.status != "RUNNING" or row.lease_owner != worker_id:
+            return False
+        row.lease_until = (datetime.now(timezone.utc) + timedelta(seconds=max(15, min(lease_seconds, 600)))).isoformat()
+        session.commit()
+        return True
+
+
+def persist_consent(receipt: dict) -> dict:
+    with Session(engine) as session:
+        row = session.get(ConsentRow, receipt["consentId"], with_for_update=True)
+        app_id = receipt.get("applicationId")
+        if app_id and session.get(ApplicationRow, app_id) is None:
+            app_id = None
+        if row is None:
+            session.add(ConsentRow(consent_id=receipt["consentId"], citizen_id=receipt["citizenId"], app_id=app_id, payload=receipt))
+        else:
+            row.citizen_id = receipt["citizenId"]
+            row.app_id = app_id
+            row.payload = receipt
+        session.commit()
+    return receipt
+
+
+def revoke_persisted_consent(citizen_id: str, consent_id: str) -> dict:
+    with Session(engine) as session:
+        row = session.execute(
+            select(ConsentRow).where(ConsentRow.consent_id == consent_id, ConsentRow.citizen_id == citizen_id).with_for_update()
+        ).scalar_one_or_none()
+        if row is None:
+            raise KeyError(consent_id)
+        receipt = dict(row.payload or {})
+        receipt["decision"] = "REVOKED"
+        receipt["allowed"] = []
+        receipt["revokedAt"] = datetime.now(timezone.utc).isoformat()
+        row.payload = receipt
+        session.commit()
+        return receipt
 
 
 def record_worker_heartbeat(worker_id: str, status: str, redis_status: str, current_job_id: str | None = None) -> dict:
@@ -523,6 +650,47 @@ def catalog_snapshot() -> dict:
         snapshot = {"schemes": schemes, "services": services, "capabilities": capabilities, "departments": departments, "providers": safe_providers}
         cache.set_json("sangam:cache:catalog:v1", snapshot, 300)
         return snapshot
+
+
+def provider_capability_snapshot(requirement_code: str | None = None) -> list[dict]:
+    """Return enabled provider capabilities joined to active provider/services.
+
+    This is the authoritative dependency-selection projection. Service payloads
+    may provide display metadata, but cannot authorize a provider by themselves.
+    Database errors intentionally propagate so callers can fail closed.
+    """
+    with Session(engine) as session:
+        query = (
+            session.query(ProviderCapabilityRow, ProviderRow, ServiceCatalogRow)
+            .join(ProviderRow, ProviderRow.provider_id == ProviderCapabilityRow.provider_id)
+            .join(ServiceCatalogRow, ServiceCatalogRow.service_id == ProviderCapabilityRow.service_id)
+            .filter(ProviderCapabilityRow.enabled.is_(True), ProviderRow.active.is_(True), ServiceCatalogRow.active.is_(True))
+        )
+        if requirement_code:
+            query = query.filter(ProviderCapabilityRow.capability_code == requirement_code)
+        definitions = []
+        for capability, provider, service in query.all():
+            capability_metadata = capability.payload or {}
+            service_metadata = service.payload or {}
+            definitions.append({
+                "capabilityId": capability.capability_id,
+                "requirementCode": capability.capability_code,
+                "requirementType": capability_metadata.get("requirementType", capability.capability_code),
+                "requiredService": service.name,
+                "serviceName": service.name,
+                "serviceId": service.service_id,
+                "provider": provider.name,
+                "providerId": provider.provider_id,
+                "adapter": provider.adapter_type,
+                "adapterType": provider.adapter_type,
+                "environment": provider.environment,
+                "priority": capability_metadata.get("priority", service_metadata.get("priority", 100)),
+                "timeoutSeconds": provider.timeout_seconds,
+                "maxAttempts": provider.max_attempts,
+                "sandboxHandler": service_metadata.get("sandboxHandler"),
+                "reason": "Enabled provider capability",
+            })
+        return definitions
 
 
 def citizen_service_snapshot(service_id: str | None = None) -> list[dict] | dict | None:

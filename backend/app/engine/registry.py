@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+import os
+
+
+class CatalogConfigurationError(RuntimeError):
+    """The authoritative catalog could not be read or is incomplete."""
+
+
+def _demo_fallback_enabled() -> bool:
+    return os.getenv("SANGAM_ENV", "development").strip().lower() not in {"production", "prod"} and os.getenv("SANGAM_ALLOW_DEMO_FALLBACK", "false").lower() in {"1", "true", "yes"}
+
 SCHEMES = [{
     "id": "SCH-MH-2026", "name": "Post-Matric Higher Education Scholarship",
     "nameMr": "माध्यमिकोत्तर उच्च शिक्षण शिष्यवृत्ती", "department": "Higher Education Department",
@@ -60,25 +70,38 @@ def get_scheme(scheme_id: str):
     try:
         from app.core.persistence import catalog_snapshot
         configured = catalog_snapshot()["schemes"]
-    except Exception:
+    except Exception as error:
+        if not _demo_fallback_enabled():
+            raise CatalogConfigurationError("Configured service catalog is unavailable") from error
         configured = []
+    if not configured and not _demo_fallback_enabled():
+        return None
     return next((s for s in (configured or SCHEMES) if s["id"] == scheme_id), None)
 
 
 def dependency_registry(health: list[dict]) -> list[dict]:
-    health_by_provider = {item["system"]: item for item in health}
     try:
-        from app.core.persistence import catalog_snapshot
-        configured = catalog_snapshot()["services"]
-    except Exception:
-        configured = []
-    definitions = configured or DEPENDENCY_SERVICES
-    return [{**definition, "healthStatus": health_by_provider.get(definition["provider"], {}).get("status", "UNAVAILABLE")} for definition in definitions]
+        from app.core.persistence import provider_capability_snapshot
+        definitions = provider_capability_snapshot()
+    except Exception as error:
+        if not _demo_fallback_enabled():
+            raise CatalogConfigurationError("Provider capability catalog is unavailable") from error
+        definitions = []
+    if not definitions:
+        if not _demo_fallback_enabled():
+            return []
+        definitions = DEPENDENCY_SERVICES
+    health_by_provider = {}
+    for item in health:
+        for key in (item.get("system"), item.get("provider"), item.get("providerId")):
+            if key:
+                health_by_provider[key] = item
+    return [{**definition, "healthStatus": health_by_provider.get(definition.get("providerId"), health_by_provider.get(definition.get("provider"), {})).get("status", "UNAVAILABLE")} for definition in definitions]
 
 
 def select_dependency_provider(requirement_code: str, health: list[dict]) -> dict | None:
     candidates = [item for item in dependency_registry(health) if item["requirementCode"] == requirement_code]
-    if not candidates:
+    eligible = [item for item in candidates if item.get("healthStatus") in {"AVAILABLE", "HEALTHY"}]
+    if not eligible:
         return None
-    # Stable registry order is the tie-breaker after availability.
-    return sorted(candidates, key=lambda item: (item["healthStatus"] != "AVAILABLE", item.get("priority", 100), item["provider"]))[0]
+    return sorted(eligible, key=lambda item: (item.get("priority", 100), item["provider"]))[0]

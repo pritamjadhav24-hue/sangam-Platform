@@ -10,6 +10,7 @@ from app.engine.adapters import integration_health, request_registered_service, 
 from app.engine.registry import select_dependency_provider
 from app.engine.semantic_mapper import map_record
 from app.engine.workflow_engine import DEPENDENCIES, transition_application
+from app.engine.consent_manager import CONSUMER, ConsentAuthorizationError, execute_with_persisted_authorization
 
 _dependency_counter = itertools.count(1)
 
@@ -83,7 +84,7 @@ def ensure_missing_dependencies(app: dict) -> list[dict]:
     return dependencies
 
 
-def initiate_dependency(citizen_id: str, app: dict, requirement_code: str, async_override: bool = False) -> dict:
+def initiate_dependency(citizen_id: str, app: dict, requirement_code: str, async_override: bool = False, authorized_adapter_result=None) -> dict:
     dependency = ensure_dependency(app, requirement_code)
     service_id = dependency.get("providerService") or dependency.get("serviceId")
     if dependency["status"] == "COMPLETED":
@@ -98,7 +99,8 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str, async
         job = JobQueue(RedisService(enabled=True)).enqueue(
             "provider.dependency.retrieve", app["appId"], app["appId"], dependency["dependencyId"],
             {"serviceId": service_id, "requirementCode": requirement_code,
-             "providerId": dependency.get("providerId"), "idempotencyKey": dependency["dependencyId"], "maxAttempts": dependency["maxAttempts"]},
+             "providerId": dependency.get("providerId"), "idempotencyKey": dependency["dependencyId"],
+             "requestedAttributes": app.get("consentAttributes", []), "maxAttempts": dependency["maxAttempts"]},
         )
         dependency.update({"jobId": job["jobId"], "jobStatus": "QUEUED", "updatedAt": _now()})
         event_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "correlationId": app["appId"], "jobId": job["jobId"], "service": service_id}
@@ -108,7 +110,13 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str, async
     dependency["attempts"] += 1
     dependency["updatedAt"] = _now()
     event_bus.publish("REVENUE_SERVICE_REQUESTED", {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "service": service_id, "requiredData": requirement_code})
-    adapter_result = request_registered_service(service_id, citizen_id, correlation_id=app["appId"], idempotency_key=dependency["dependencyId"]) if service_id else None
+    adapter_result = authorized_adapter_result
+    if adapter_result is None and service_id:
+        adapter_result = execute_with_persisted_authorization(
+            citizen_id, CONSUMER, None, requested_attributes=app.get("consentAttributes", []), service_id=app.get("serviceId"),
+            application_id=app.get("appId"), consent_id=app.get("consentId"),
+            operation=lambda: request_registered_service(service_id, citizen_id, requirement_code=requirement_code, correlation_id=app["appId"], idempotency_key=dependency["dependencyId"]),
+        )
     record = adapter_result.record if adapter_result else None
     dependency["lastRequest"] = {"correlationId": app["appId"], "idempotencyKey": dependency["dependencyId"], "operation": adapter_result.operation if adapter_result else "retrieve", "attempts": adapter_result.attempts if adapter_result else 0, "responseMs": adapter_result.response_ms if adapter_result else None}
     if not record:
@@ -172,24 +180,32 @@ def execute_provider_job(job: dict) -> dict:
         raise RuntimeError("Provider job references missing application or dependency")
     if dependency.get("status") == "COMPLETED":
         return {"status": "ALREADY_COMPLETED", "dependencyId": dependency["dependencyId"]}
-    result = initiate_dependency(payload.get("citizenId", app["citizenId"]), app, payload.get("requirementCode", dependency.get("requiredData")), async_override=True)
+    requirement_code = payload.get("requirementCode", dependency.get("requiredData"))
+    try:
+        adapter_result = execute_with_persisted_authorization(
+            app["citizenId"], CONSUMER, None, requested_attributes=payload.get("requestedAttributes", app.get("consentAttributes", [])), service_id=app.get("serviceId"),
+            application_id=app.get("appId"), consent_id=app.get("consentId"),
+            operation=lambda: request_registered_service(dependency.get("providerService"), app["citizenId"], requirement_code=requirement_code, correlation_id=app["appId"], idempotency_key=dependency["dependencyId"]),
+        )
+    except ConsentAuthorizationError as error:
+        dependency.update({"jobStatus": "CANCELLED", "status": "WAITING_FOR_DEPENDENCY", "errorCategory": "AUTHORIZATION_ERROR", "lastError": "Provider operation was cancelled because consent is no longer valid.", "updatedAt": _now()})
+        authorization_error = RuntimeError("Provider operation cancelled: consent is no longer valid.")
+        authorization_error.category = "AUTHORIZATION_ERROR"
+        authorization_error.retryable = False
+        raise authorization_error from error
+    result = initiate_dependency(payload.get("citizenId", app["citizenId"]), app, requirement_code, async_override=True, authorized_adapter_result=adapter_result)
     if result.get("success"):
         dependency.update({"jobId": job["jobId"], "jobStatus": "COMPLETED"})
-        from app.core.persistence import persist_state
-        persist_state()
         return result
     dependency["jobStatus"] = "WAITING"
     category = dependency.get("errorCategory") or "UPSTREAM_UNAVAILABLE"
     error = RuntimeError(result.get("message", "Provider operation failed"))
     error.category = category
     error.retryable = category in {"TRANSIENT", "TIMEOUT", "UPSTREAM_UNAVAILABLE", "UNAVAILABLE", "NETWORK"}
-    from app.core.persistence import persist_state
-    persist_state()
     raise error
 
 
 def mark_provider_job_dead_letter(job: dict, category: str, message: str) -> None:
-    from app.core.persistence import persist_state
     from app.core.job_queue import safe_error_message
     from app.engine.workflow_engine import APPLICATIONS
     app = APPLICATIONS.get(job.get("applicationId"))
@@ -202,4 +218,16 @@ def mark_provider_job_dead_letter(job: dict, category: str, message: str) -> Non
     event_bus.publish("PROVIDER_JOB_DEAD_LETTER", payload)
     event_bus.publish("DEPENDENCY_SERVICE_FAILED", payload)
     audit_bus.append("SYSTEM", "DEPENDENCY", "Provider operation moved to dead letter", dependency.get("provider", "CONFIGURED_PROVIDER"), "DEAD_LETTER", app.get("consentId"), payload=payload, correlation_id=job["correlationId"])
-    persist_state()
+
+
+def mark_provider_job_cancelled(job: dict, category: str, message: str) -> None:
+    from app.core.job_queue import safe_error_message
+    dependency = DEPENDENCIES.get(job.get("dependencyId"))
+    app = __import__("app.engine.workflow_engine", fromlist=["APPLICATIONS"]).APPLICATIONS.get(job.get("applicationId"))
+    if not app or not dependency:
+        return
+    safe_message = safe_error_message(message)
+    dependency.update({"jobStatus": "CANCELLED", "errorCategory": category, "lastError": safe_message, "updatedAt": _now()})
+    payload = {"appId": app["appId"], "dependencyId": dependency["dependencyId"], "jobId": job["jobId"], "correlationId": job["correlationId"], "errorCategory": category, "error": safe_message}
+    event_bus.publish("PROVIDER_JOB_CANCELLED", payload)
+    audit_bus.append("SYSTEM", "DEPENDENCY", "Provider operation cancelled", "Configured provider", "CANCEL", app.get("consentId"), payload=payload, correlation_id=job["correlationId"])
