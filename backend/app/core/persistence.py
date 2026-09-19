@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, select, update as sql_update
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, select, update as sql_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0009_quarantine_unleased"
+MIGRATION_HEAD = "0010_workflow_metadata"
 
 
 class Base(DeclarativeBase):
@@ -52,6 +52,9 @@ class ApplicationRow(Base):
     app_id: Mapped[str] = mapped_column(String(120), primary_key=True)
     citizen_id: Mapped[str] = mapped_column(String(120), index=True)
     status: Mapped[str] = mapped_column(String(50), index=True)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
@@ -60,6 +63,15 @@ class DependencyRow(Base):
     dependency_id: Mapped[str] = mapped_column(String(160), primary_key=True)
     app_id: Mapped[str] = mapped_column(ForeignKey("applications.app_id", ondelete="CASCADE"), index=True)
     status: Mapped[str] = mapped_column(String(50), index=True)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    required_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    job_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    job_status: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result_reference: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
     payload: Mapped[dict] = mapped_column(JSONB)
 
 

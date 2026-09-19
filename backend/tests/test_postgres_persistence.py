@@ -1,4 +1,7 @@
 import unittest
+import importlib.util
+from datetime import timezone
+from pathlib import Path
 from unittest.mock import patch
 
 from sqlalchemy import event, inspect, select, text, update
@@ -15,6 +18,12 @@ from app.engine.dependency_orchestrator import initiate_domicile
 from app.engine.workflow_engine import APPLICATIONS, DEPENDENCIES, officer_action, transition_application
 
 
+MIGRATION_0010_PATH = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0010_workflow_concurrency_metadata.py"
+MIGRATION_0010_SPEC = importlib.util.spec_from_file_location("migration_0010", MIGRATION_0010_PATH)
+MIGRATION_0010 = importlib.util.module_from_spec(MIGRATION_0010_SPEC)
+MIGRATION_0010_SPEC.loader.exec_module(MIGRATION_0010)
+
+
 class PostgreSQLPersistenceTests(unittest.TestCase):
     def setUp(self):
         initialize()
@@ -28,6 +37,95 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
     def test_connection_and_required_schema(self):
         tables = set(inspect(engine).get_table_names())
         self.assertTrue({"applications", "dependencies", "consents", "workflow_history", "audit_entries", "notifications", "user_accounts"}.issubset(tables))
+
+    def test_checkpoint_2_metadata_schema_and_backfill(self):
+        app_id = "APP-METADATA-001"
+        dependency_id = "DEP-METADATA-001"
+        long_required_data = "REQUIREMENT-" + ("x" * 4000)
+        long_job_id = "JOB-" + ("j" * 4000)
+        long_result_reference = "RESULT-" + ("r" * 4000)
+        app_payload = {
+            "appId": app_id,
+            "citizenId": "CITIZEN-METADATA",
+            "status": "DRAFT",
+            "createdAt": "2026-02-01T10:00:00+05:30",
+            "updatedAt": "2026-02-02T10:00:00+05:30",
+            "requirements": [{"code": long_required_data}],
+        }
+        dependency_payload = {
+            "dependencyId": dependency_id,
+            "appId": app_id,
+            "requiredData": long_required_data,
+            "jobId": long_job_id,
+            "jobStatus": "QUEUED",
+            "resultReference": long_result_reference,
+            "createdAt": "2026-02-01T10:00:00+05:30",
+            "updatedAt": "2026-02-02T10:00:00+05:30",
+        }
+        with Session(engine) as session:
+            session.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-METADATA", status="DRAFT", payload=app_payload))
+            session.add(DependencyRow(dependency_id=dependency_id, app_id=app_id, status="QUEUED", payload=dependency_payload))
+            session.commit()
+            MIGRATION_0010._validate_existing_payloads(session.connection())
+            MIGRATION_0010._backfill_existing_rows(session.connection())
+            session.commit()
+            app_row = session.get(ApplicationRow, app_id)
+            dependency_row = session.get(DependencyRow, dependency_id)
+
+        self.assertEqual(app_row.version, 1)
+        self.assertEqual(dependency_row.version, 1)
+        self.assertEqual(app_row.created_at.astimezone(timezone.utc).isoformat(), "2026-02-01T04:30:00+00:00")
+        self.assertEqual(dependency_row.updated_at.astimezone(timezone.utc).isoformat(), "2026-02-02T04:30:00+00:00")
+        self.assertEqual(dependency_row.required_data, long_required_data)
+        self.assertEqual(dependency_row.job_id, long_job_id)
+        self.assertEqual(dependency_row.job_status, "QUEUED")
+        self.assertEqual(dependency_row.result_reference, long_result_reference)
+        self.assertEqual(dependency_row.attempts, 0)
+        self.assertEqual(dependency_row.max_attempts, 3)
+        self.assertEqual(dependency_row.payload, dependency_payload)
+
+    def test_checkpoint_2_missing_optional_dependency_fields_remain_null(self):
+        app_id = "APP-METADATA-002"
+        dependency_id = "DEP-METADATA-002"
+        with Session(engine) as session:
+            session.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-METADATA", status="DRAFT", payload={"appId": app_id, "citizenId": "CITIZEN-METADATA", "status": "DRAFT"}))
+            session.add(DependencyRow(dependency_id=dependency_id, app_id=app_id, status="WAITING_FOR_DEPENDENCY", payload={"dependencyId": dependency_id, "appId": app_id, "requiredData": "DOMICILE_PROOF"}))
+            session.commit()
+            MIGRATION_0010._validate_existing_payloads(session.connection())
+            MIGRATION_0010._backfill_existing_rows(session.connection())
+            session.commit()
+            row = session.get(DependencyRow, dependency_id)
+        self.assertIsNone(row.job_id)
+        self.assertIsNone(row.job_status)
+        self.assertIsNone(row.result_reference)
+        self.assertEqual(row.attempts, 0)
+        self.assertEqual(row.max_attempts, 3)
+
+    def test_checkpoint_2_invalid_legacy_values_fail_validation(self):
+        bad_app_id = "APP-METADATA-BAD-TIMESTAMP"
+        bad_dependency_id = "DEP-METADATA-BAD-RETRY"
+        with Session(engine) as session:
+            session.add(ApplicationRow(app_id=bad_app_id, citizen_id="CITIZEN-METADATA", status="DRAFT", payload={"appId": bad_app_id, "createdAt": "not-a-timestamp"}))
+            session.commit()
+            with self.assertRaises(Exception):
+                MIGRATION_0010._validate_existing_payloads(session.connection())
+            session.rollback()
+            session.delete(session.get(ApplicationRow, bad_app_id))
+            session.commit()
+
+            session.add(ApplicationRow(app_id="APP-METADATA-BAD-RETRY", citizen_id="CITIZEN-METADATA", status="DRAFT", payload={"appId": "APP-METADATA-BAD-RETRY"}))
+            session.add(DependencyRow(dependency_id=bad_dependency_id, app_id="APP-METADATA-BAD-RETRY", status="QUEUED", payload={"dependencyId": bad_dependency_id, "requiredData": "DOMICILE_PROOF", "attempts": -1, "maxAttempts": 0}))
+            session.commit()
+            with self.assertRaises(Exception):
+                MIGRATION_0010._validate_existing_payloads(session.connection())
+
+    def test_checkpoint_2_indexes_and_phase_1_provider_job_columns_remain(self):
+        inspector = inspect(engine)
+        dependency_indexes = {index["name"] for index in inspector.get_indexes("dependencies")}
+        self.assertIn("ix_dependencies_app_id_required_data", dependency_indexes)
+        self.assertIn("ix_dependencies_job_id", dependency_indexes)
+        provider_job_columns = {column["name"] for column in inspector.get_columns("provider_jobs")}
+        self.assertTrue({"dispatch_attempts", "dispatch_claimed_until", "lease_owner", "lease_until"}.issubset(provider_job_columns))
 
     def test_application_repository_reads_postgresql_not_process_cache(self):
         app_id = "APP-REPOSITORY-001"
