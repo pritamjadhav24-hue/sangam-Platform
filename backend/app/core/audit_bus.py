@@ -15,6 +15,10 @@ class AuditBus:
     def append(self, who: str, what: str, why: str, source: str, action: str,
                consent_id: str | None = None, payload: Any = None,
                correlation_id: str | None = None) -> dict[str, Any]:
+        # Keep citizen identifiers out of the append-only audit projection while
+        # retaining a stable actor reference for investigations.
+        if str(who).startswith("CITIZEN_"):
+            who = "CITIZEN_REF-" + hashlib.sha256(str(who).encode()).hexdigest()[:12].upper()
         payload_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
         previous_hash = self.entries[-1]["entryHash"] if self.entries else "GENESIS"
         entry = {

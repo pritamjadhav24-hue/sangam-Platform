@@ -75,7 +75,7 @@ def decode_token(token: str) -> dict:
         encoded_header, encoded_payload, encoded_signature = token.split(".")
         signing_input = f"{encoded_header}.{encoded_payload}".encode()
         expected = hmac.new(JWT_SECRET.encode(), signing_input, hashlib.sha256).digest()
-        if not hmac.compare_digest(expected, _unb64(encoded_signature)):
+        if not hmac.compare_digest(_b64(expected), encoded_signature) or not hmac.compare_digest(expected, _unb64(encoded_signature)):
             raise ValueError("invalid signature")
         header = json.loads(_unb64(encoded_header))
         payload = json.loads(_unb64(encoded_payload))

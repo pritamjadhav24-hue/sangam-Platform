@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 from app.core.audit_bus import audit_bus
@@ -13,6 +13,7 @@ from app.mocks.education_dept import set_income_conflict
 from app.core.persistence import (job_operational_summary, recent_provider_jobs, provider_job_detail,
                                   provider_operational_summary, replay_dead_letter_job, worker_operational_status)
 from app.core.redis_service import RedisService, RedisUnavailable
+from app.core.rate_limit import enforce
 
 router = APIRouter(prefix="/api/admin", tags=["Administration"])
 @router.get("/audit-trail")
@@ -81,12 +82,12 @@ def job_summary(user: dict = Depends(require_roles("ADMIN"))):
 
 
 @router.get("/operations/jobs/dead-letter")
-def dead_letter_jobs(limit: int = 50, user: dict = Depends(require_roles("ADMIN"))):
+def dead_letter_jobs(limit: int = Query(50, ge=1, le=100), user: dict = Depends(require_roles("ADMIN"))):
     return {"jobs": recent_provider_jobs(limit, dead_letter_only=True)}
 
 
 @router.get("/operations/jobs/recent")
-def recent_jobs(limit: int = 50, user: dict = Depends(require_roles("ADMIN"))):
+def recent_jobs(limit: int = Query(50, ge=1, le=100), user: dict = Depends(require_roles("ADMIN"))):
     return {"jobs": recent_provider_jobs(limit)}
 
 
@@ -100,6 +101,7 @@ def job_detail(job_id: str, user: dict = Depends(require_roles("ADMIN"))):
 
 @router.post("/operations/jobs/{job_id}/replay")
 def replay_job(job_id: str, user: dict = Depends(require_roles("ADMIN"))):
+    enforce("admin_replay", user["userId"], limit=20, window_seconds=60)
     try:
         return replay_dead_letter_job(job_id, RedisService())
     except KeyError as error:

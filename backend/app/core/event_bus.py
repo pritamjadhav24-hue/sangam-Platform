@@ -2,6 +2,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import secrets
 from typing import Any, Callable
+from app.core.data_safety import redact
 
 EVENT_TYPES = frozenset({
     "APPLICATION_CREATED", "APPLICATION_STATUS_CHANGED", "CONSENT_GRANTED", "CONSENT_REVOKED",
@@ -31,6 +32,7 @@ class EventBus:
             # Existing prototype-specific events remain supported while the
             # canonical set documents the important domain event vocabulary.
             event_type = str(event_type)
+        safe_payload = redact(payload)
         event = {
             "eventId": f"EVT-{secrets.token_hex(8).upper()}",
             "type": event_type,
@@ -39,10 +41,12 @@ class EventBus:
             "correlationId": payload.get("correlationId") or payload.get("appId"),
             "actor": payload.get("actor") or payload.get("actorId") or payload.get("officerId") or "SYSTEM",
             "source": payload.get("source") or "domain",
-            "payload": payload,
+            "payload": safe_payload,
         }
         self.events.append(event)
-        self.dispatch(event)
+        # Subscribers may need a short-lived routing reference such as citizenId;
+        # it is never retained in the event ledger or persisted event row.
+        self.dispatch({**event, "payload": payload})
         return event
 
     def dispatch(self, event: dict[str, Any]) -> None:

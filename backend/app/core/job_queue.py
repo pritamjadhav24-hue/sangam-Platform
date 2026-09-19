@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import uuid
-import re
 from datetime import datetime, timezone
 
 from app.core.redis_service import RedisService, RedisUnavailable
+from app.core.data_safety import safe_error_message as _redacted_error
 
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -29,9 +29,7 @@ def _safe_payload(payload: dict) -> dict:
 
 
 def safe_error_message(message: str) -> str:
-    value = str(message or "")
-    value = re.sub(r"(?i)(password|secret|token|authorization|client_secret)\s*[=:]\s*[^,;\s]+", r"\1=[REDACTED]", value)
-    return value[:500]
+    return _redacted_error(message)
 
 
 class JobQueue:

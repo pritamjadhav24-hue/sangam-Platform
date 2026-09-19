@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.audit_bus import audit_bus
 from app.core.auth import require_roles
@@ -15,38 +15,40 @@ from app.engine.registry import SCHEMES
 from app.engine.requirement_analyzer import discover
 from app.engine.rules_engine import evaluate
 from app.engine.workflow_engine import APPLICATIONS, create_application, find_active_application, transition_application
+from app.core.rate_limit import enforce
 
 router = APIRouter(prefix="/api/citizen", tags=["Citizen"])
 
 
 class Consent(BaseModel):
-    citizenId: str
+    citizenId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
     allow: bool
     attributes: Optional[List[str]] = None
-    schemeId: Optional[str] = None
+    schemeId: Optional[str] = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    purpose: Optional[str] = Field(default=None, max_length=240)
 
 
 class Dependency(BaseModel):
-    citizenId: str
-    appId: Optional[str] = None
-    requirementCode: Optional[str] = None
+    citizenId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    appId: Optional[str] = Field(default=None, max_length=160, pattern=r"^[A-Za-z0-9_-]+$")
+    requirementCode: Optional[str] = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class Submit(BaseModel):
-    citizenId: str
-    appId: Optional[str] = None
+    citizenId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    appId: Optional[str] = Field(default=None, max_length=160, pattern=r"^[A-Za-z0-9_-]+$")
     simulateTimeout: bool = False
 
 
 class RevokeConsent(BaseModel):
-    citizenId: str
-    consentId: str
+    citizenId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    consentId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class ApplicationCreate(BaseModel):
-    citizenId: str
-    serviceId: str
-    purpose: Optional[str] = None
+    citizenId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    serviceId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    purpose: Optional[str] = Field(default=None, max_length=240)
     attributes: Optional[List[str]] = None
 
 
@@ -65,9 +67,9 @@ def _record_entity_reviews(app: dict) -> None:
         review["auditRecorded"] = True
 
 
-def _require_consent(citizen_id: str, purpose: str = PURPOSE, attributes: Optional[List[str]] = None) -> dict:
+def _require_consent(citizen_id: str, purpose: str = PURPOSE, attributes: Optional[List[str]] = None, service_id: Optional[str] = None, application_id: Optional[str] = None) -> dict:
     try:
-        return authorize_access(citizen_id, CONSUMER, purpose, attributes)
+        return authorize_access(citizen_id, CONSUMER, purpose, attributes, service_id=service_id, application_id=application_id)
     except ConsentAuthorizationError as error:
         raise HTTPException(status_code=403, detail=f"Protected access denied: {error}")
 
@@ -113,19 +115,28 @@ def discovery(citizen_id: str = "CITIZEN_001", simulate_timeout: bool = False, s
 
 
 def _safe_application(app: dict) -> dict:
+    safe_requirements = []
+    for requirement in app.get("requirements", []):
+        safe_requirements.append({field: requirement.get(field) for field in ("code", "source", "status", "verifiedOn") if field in requirement})
+    safe_conflicts = [{"canonicalField": item.get("canonicalField"), "status": item.get("status"), "sources": [source.get("sourceSystem") for source in item.get("sources", [])]} for item in app.get("conflicts", [])]
     safe_dependencies = []
     for dependency_item in app.get("dependencies", []):
         safe_dependencies.append({field: dependency_item.get(field) for field in ("dependencyId", "requiredService", "serviceName", "status", "providerStatus", "attempts", "maxAttempts", "resultReference", "lastError", "errorCategory") if field in dependency_item})
-    return {**app, "dependencies": safe_dependencies}
+    return {**app, "citizenId": None, "requirements": safe_requirements, "conflicts": safe_conflicts, "entityReviews": [], "conflictReviews": [], "dependencies": safe_dependencies}
+
+
+def _safe_consent(receipt: dict) -> dict:
+    return {field: receipt.get(field) for field in ("consentId", "serviceId", "purpose", "allowed", "decision", "createdAt", "expiresAt", "revokedAt", "appId", "applicationStatus", "dependencyId") if field in receipt}
 
 
 @router.post("/applications")
 def create_citizen_application(body: ApplicationCreate, user: dict = Depends(require_roles("CITIZEN"))):
     _assert_own_citizen(user, body.citizenId)
+    enforce("application_create", body.citizenId, limit=10, window_seconds=60)
     service = citizen_service_snapshot(body.serviceId)
     if not service:
         raise HTTPException(status_code=404, detail="Configured service not found or disabled")
-    receipt = _require_consent(body.citizenId, body.purpose or PURPOSE, body.attributes)
+    receipt = _require_consent(body.citizenId, body.purpose or PURPOSE, body.attributes, service_id=body.serviceId)
     citizen = {k: v for k, v in user.items() if k != "password"}
     result = discover(citizen, service_id=body.serviceId)
     app = create_application(body.citizenId, result, evaluate(result["requirements"]), body.serviceId)
@@ -148,7 +159,7 @@ def get_citizen_application(application_id: str, user: dict = Depends(require_ro
     if not app:
         raise HTTPException(status_code=404, detail="Application not found")
     if app.get("citizenId") != user.get("citizenId"):
-        raise HTTPException(status_code=403, detail="Citizens may access only their own applications.")
+        raise HTTPException(status_code=404, detail="Application not found")
     return _safe_application(app)
 
 
@@ -158,7 +169,7 @@ def dependency(body: Dependency, user: dict = Depends(require_roles("CITIZEN")))
     app = APPLICATIONS.get(body.appId) if body.appId else find_active_application(body.citizenId)
     if not app or app["citizenId"] != body.citizenId:
         raise HTTPException(404, "Application journey not found")
-    consent_receipt = _require_consent(body.citizenId)
+    consent_receipt = _require_consent(body.citizenId, service_id=app.get("serviceId"), application_id=app.get("appId"))
     requirement_code = body.requirementCode or next((item["code"] for item in app.get("requirements", []) if item.get("status") in {"MISSING", "UNRESOLVED"}), None)
     if not requirement_code:
         raise HTTPException(status_code=400, detail="No unresolved configured requirement is available.")
@@ -173,11 +184,12 @@ def dependency(body: Dependency, user: dict = Depends(require_roles("CITIZEN")))
 @router.post("/consent")
 def consent(body: Consent, user: dict = Depends(require_roles("CITIZEN"))):
     _assert_own_citizen(user, body.citizenId)
+    enforce("consent", body.citizenId, limit=10, window_seconds=60)
     citizen = user if user.get("citizenId") == body.citizenId else None
     if not citizen:
         raise HTTPException(404, "Citizen not found")
     try:
-        receipt = create_consent(body.citizenId, body.allow, body.attributes)
+        receipt = create_consent(body.citizenId, body.allow, body.attributes, service_id=body.schemeId, purpose=body.purpose)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     app = None
@@ -185,6 +197,8 @@ def consent(body: Consent, user: dict = Depends(require_roles("CITIZEN"))):
         result = discover({k: v for k, v in citizen.items() if k != "password"}, scheme_id=body.schemeId)
         app = find_active_application(body.citizenId) or create_application(body.citizenId, result, evaluate(result["requirements"]))
         app["consentId"] = receipt["consentId"]
+        receipt["applicationId"] = app["appId"]
+        receipt["serviceId"] = app.get("serviceId") or body.schemeId
         _record_discovery(body.citizenId, result, app["appId"])
         _record_entity_reviews(app)
         dependency_records = ensure_missing_dependencies(app)
@@ -192,7 +206,7 @@ def consent(body: Consent, user: dict = Depends(require_roles("CITIZEN"))):
         receipt = {**receipt, "appId": app["appId"], "applicationStatus": app["status"], "dependencyId": dependency_record["dependencyId"] if dependency_record else None}
         event_bus.publish("CONSENT_GRANTED", {"citizenId": body.citizenId, "appId": app["appId"], "consentId": receipt["consentId"], "purpose": receipt["purpose"]})
     audit_bus.append(body.citizenId, "CONSENT", receipt["purpose"], receipt["consumer"], receipt["decision"], receipt["consentId"], {**receipt, "actorRole": user["role"]}, correlation_id=app["appId"] if app else None)
-    return receipt
+    return _safe_consent(receipt)
 
 
 @router.post("/consent/revoke")
@@ -205,8 +219,8 @@ def revoke(body: RevokeConsent, user: dict = Depends(require_roles("CITIZEN"))):
     app = find_active_application(body.citizenId)
     correlation_id = app["appId"] if app else None
     event_bus.publish("CONSENT_REVOKED", {"citizenId": body.citizenId, "appId": correlation_id, "consentId": body.consentId})
-    audit_bus.append(body.citizenId, "CONSENT", "Citizen revoked scholarship data consent", CONSUMER, "REVOKE", body.consentId, payload={"consentId": body.consentId, "actorRole": user["role"]}, correlation_id=correlation_id)
-    return receipt
+    audit_bus.append(body.citizenId, "CONSENT", "Citizen revoked service data consent", CONSUMER, "REVOKE", body.consentId, payload={"consentId": body.consentId, "actorRole": user["role"]}, correlation_id=correlation_id)
+    return _safe_consent(receipt)
 
 
 @router.post("/submit")
@@ -215,9 +229,10 @@ def submit(body: Submit, user: dict = Depends(require_roles("CITIZEN"))):
     citizen = user if user.get("citizenId") == body.citizenId else None
     if not citizen:
         raise HTTPException(404, "Citizen not found")
-    consent_receipt = _require_consent(body.citizenId, PURPOSE, PERMITTED)
     app = APPLICATIONS.get(body.appId) if body.appId else find_active_application(body.citizenId)
     service_id = app.get("serviceId") if app else None
+    existing_consent = current(body.citizenId) or {}
+    consent_receipt = _require_consent(body.citizenId, existing_consent.get("purpose", PURPOSE), existing_consent.get("allowed", PERMITTED), service_id=service_id, application_id=app.get("appId") if app else None)
     result = discover({k: v for k, v in citizen.items() if k != "password"}, body.simulateTimeout, service_id=service_id)
     eligibility = evaluate(result["requirements"])
     app = app if app and app["citizenId"] == body.citizenId else create_application(body.citizenId, result, eligibility, service_id)
@@ -246,11 +261,11 @@ def track(app_id: str, user: dict = Depends(require_roles("CITIZEN", "OFFICER"))
         raise HTTPException(404, "Application not found")
     app = APPLICATIONS[app_id]
     if user.get("role") == "CITIZEN" and app["citizenId"] != user.get("citizenId"):
-        raise HTTPException(status_code=403, detail="Citizens may track only their own applications.")
+        raise HTTPException(status_code=404, detail="Application not found")
     receipt = current(app["citizenId"])
     consent_view = None
     if receipt:
-        consent_view = {field: receipt.get(field) for field in ("consentId", "consumer", "purpose", "allowed", "expiresAt", "decision", "revokedAt") if field in receipt}
+        consent_view = {field: receipt.get(field) for field in ("consentId", "serviceId", "purpose", "allowed", "expiresAt", "decision", "createdAt", "revokedAt") if field in receipt}
     workflow_events = [event for event in event_bus.events if event.get("payload", {}).get("appId") == app_id]
     audit_entries = [{field: entry.get(field) for field in ("sequence", "what", "why", "when", "source", "action", "consentId", "correlationId")} for entry in audit_bus.entries if entry.get("correlationId") == app_id]
-    return {**_safe_application(app), "consent": consent_view, "workflowEvents": workflow_events, "auditEntries": audit_entries}
+    return {**_safe_application(app), "consent": {field: consent_view.get(field) for field in ("consentId", "serviceId", "purpose", "allowed", "decision", "createdAt", "expiresAt", "revokedAt") if consent_view and field in consent_view} if consent_view else None, "workflowEvents": workflow_events, "auditEntries": audit_entries}
