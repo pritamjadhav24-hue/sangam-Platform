@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0005_operational_observability"
+MIGRATION_HEAD = "0006_provider_contract_metadata"
 
 
 class Base(DeclarativeBase):
@@ -196,6 +196,12 @@ class ProviderRow(Base):
     department_id: Mapped[str] = mapped_column(ForeignKey("departments.department_id"), index=True)
     name: Mapped[str] = mapped_column(String(200), unique=True)
     adapter_type: Mapped[str] = mapped_column(String(120))
+    contract_version: Mapped[str] = mapped_column(String(40), default="v1")
+    environment: Mapped[str] = mapped_column(String(20), default="SANDBOX")
+    auth_type: Mapped[str] = mapped_column(String(40), default="NONE")
+    endpoint_ref: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=5)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     payload: Mapped[dict] = mapped_column(JSONB)
 
@@ -396,7 +402,7 @@ def provider_operational_summary() -> list[dict]:
             provider_health = next((item for item in __import__("app.engine.adapters", fromlist=["integration_health"]).integration_health() if item["system"] == provider.name), {"status": "UNKNOWN"})
             safe_health = {key: provider_health.get(key) for key in ("status", "lastCheckedAt", "lastSuccessAt", "lastFailureAt", "errorCategory")}
             result.append({"providerId": provider.provider_id, "name": provider.name, "enabled": provider.active,
-                           "adapterType": provider.adapter_type, "configured": bool(provider.payload),
+                           "adapterType": provider.adapter_type, "contractVersion": provider.contract_version, "environment": provider.environment, "authType": provider.auth_type, "endpointRef": provider.endpoint_ref, "configured": bool(provider.payload),
                            "health": safe_health,
                            "lastSuccessAt": runtime.get("lastSuccessAt"), "lastFailureAt": runtime.get("lastFailureAt"),
                            "errorCategory": runtime.get("errorCategory"),
@@ -466,7 +472,7 @@ def seed_catalog() -> None:
             if session.get(DepartmentRow, provider_id) is None:
                 session.add(DepartmentRow(department_id=provider_id, name=definition["provider"], payload={"departmentId": provider_id, "name": definition["provider"]}))
             if session.get(ProviderRow, provider_id) is None:
-                session.add(ProviderRow(provider_id=provider_id, department_id=provider_id, name=definition["provider"], adapter_type=definition["adapter"], payload={"providerId": provider_id, "name": definition["provider"], "adapter": definition["adapter"]}))
+                session.add(ProviderRow(provider_id=provider_id, department_id=provider_id, name=definition["provider"], adapter_type=definition["adapter"], environment=definition.get("environment", "SANDBOX"), auth_type=definition.get("authType", "NONE"), endpoint_ref=definition.get("endpointRef"), timeout_seconds=definition.get("timeoutSeconds", 5), max_attempts=definition.get("maxAttempts", 3), payload={"providerId": provider_id, "name": definition["provider"], "adapter": definition["adapter"]}))
             if session.get(ServiceCatalogRow, definition["serviceId"]) is None:
                 session.add(ServiceCatalogRow(service_id=definition["serviceId"], provider_id=provider_id, name=definition["serviceName"], requirement_code=definition["requirementCode"], payload=definition))
             else:
@@ -497,7 +503,7 @@ def catalog_snapshot() -> dict:
         departments = [safe_payload(row.payload) for row in session.query(DepartmentRow).filter_by(active=True).all()]
         safe_providers = []
         for row in session.query(ProviderRow).filter_by(active=True).all():
-            safe_providers.append({"providerId": row.provider_id, "name": row.name, "departmentId": row.department_id, "adapter": row.adapter_type, "runtime": provider_runtime_config(row.provider_id, row.payload)})
+            safe_providers.append({"providerId": row.provider_id, "name": row.name, "departmentId": row.department_id, "adapter": row.adapter_type, "contractVersion": row.contract_version, "environment": row.environment, "authType": row.auth_type, "endpointRef": row.endpoint_ref, "timeoutSeconds": row.timeout_seconds, "maxAttempts": row.max_attempts, "runtime": provider_runtime_config(row.provider_id, {**(row.payload or {}), "endpointRef": row.endpoint_ref, "authType": row.auth_type})})
         snapshot = {"schemes": schemes, "services": services, "capabilities": capabilities, "departments": departments, "providers": safe_providers}
         cache.set_json("sangam:cache:catalog:v1", snapshot, 300)
         return snapshot
