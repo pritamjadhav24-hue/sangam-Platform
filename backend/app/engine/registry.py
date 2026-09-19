@@ -11,6 +11,13 @@ SCHEMES = [{
         {"code": "ACADEMIC_RECORD", "label": "Academic record", "mandatory": True},
         {"code": "BANK_DETAILS", "label": "DBT bank status", "mandatory": True},
     ],
+}, {
+    "id": "EDU-ACADEMIC-2026", "name": "Academic Record Verification",
+    "nameMr": "शैक्षणिक नोंद पडताळणी", "department": "Education Department",
+    "requirements": [
+        {"code": "IDENTITY", "label": "Identity", "mandatory": True},
+        {"code": "ACADEMIC_RECORD", "label": "Academic record", "mandatory": True},
+    ],
 }]
 
 

@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "62ebc0864a84"
+MIGRATION_HEAD = "0003_provider_capabilities"
 
 
 class Base(DeclarativeBase):
@@ -180,6 +180,16 @@ class ServiceCatalogRow(Base):
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
+class ProviderCapabilityRow(Base):
+    __tablename__ = "provider_capabilities"
+    capability_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(ForeignKey("providers.provider_id", ondelete="CASCADE"), index=True)
+    capability_code: Mapped[str] = mapped_column(String(120), index=True)
+    service_id: Mapped[str] = mapped_column(ForeignKey("service_catalog.service_id", ondelete="CASCADE"), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
 class SchemeCatalogRow(Base):
     __tablename__ = "scheme_catalog"
     scheme_id: Mapped[str] = mapped_column(String(120), primary_key=True)
@@ -217,7 +227,7 @@ def catalog_seeded() -> bool:
 
 def seed_catalog() -> None:
     """Bootstrap catalog rows once; subsequent changes are DB-owned."""
-    if os.getenv("SANGAM_SEED_CATALOG", "false").lower() not in {"1", "true", "yes"} or catalog_seeded():
+    if os.getenv("SANGAM_SEED_CATALOG", "false").lower() not in {"1", "true", "yes"}:
         return
     from app.engine.registry import DEPENDENCY_SERVICES, SCHEMES
     departments: dict[str, dict] = {}
@@ -226,11 +236,14 @@ def seed_catalog() -> None:
             department = scheme["department"]
             department_id = department.upper().replace(" ", "-")
             departments[department_id] = {"departmentId": department_id, "name": department}
-            session.add(SchemeCatalogRow(scheme_id=scheme["id"], name=scheme["name"], department=department, payload=scheme))
-            for requirement in scheme.get("requirements", []):
-                session.add(SchemeRequirementRow(scheme_id=scheme["id"], requirement_code=requirement["code"], label=requirement["label"], mandatory=requirement.get("mandatory", True), payload=requirement))
+            if session.get(SchemeCatalogRow, scheme["id"]) is None:
+                session.add(SchemeCatalogRow(scheme_id=scheme["id"], name=scheme["name"], department=department, payload=scheme))
+                for requirement in scheme.get("requirements", []):
+                    session.add(SchemeRequirementRow(scheme_id=scheme["id"], requirement_code=requirement["code"], label=requirement["label"], mandatory=requirement.get("mandatory", True), payload=requirement))
         for department_id, department in departments.items():
-            session.add(DepartmentRow(department_id=department_id, name=department["name"], payload=department))
+            if session.get(DepartmentRow, department_id) is None:
+                session.add(DepartmentRow(department_id=department_id, name=department["name"], payload=department))
+        session.flush()
         for definition in DEPENDENCY_SERVICES:
             provider_id = definition["provider"].upper().replace(" ", "-")
             if session.get(DepartmentRow, provider_id) is None:
@@ -239,6 +252,9 @@ def seed_catalog() -> None:
                 session.add(ProviderRow(provider_id=provider_id, department_id=provider_id, name=definition["provider"], adapter_type=definition["adapter"], payload={"providerId": provider_id, "name": definition["provider"], "adapter": definition["adapter"]}))
             if session.get(ServiceCatalogRow, definition["serviceId"]) is None:
                 session.add(ServiceCatalogRow(service_id=definition["serviceId"], provider_id=provider_id, name=definition["serviceName"], requirement_code=definition["requirementCode"], payload=definition))
+            capability_id = f"{provider_id}:{definition['requirementCode']}"
+            if session.get(ProviderCapabilityRow, capability_id) is None:
+                session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=definition["requirementCode"], service_id=definition["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": definition["requirementCode"], "providerId": provider_id, "serviceId": definition["serviceId"]}))
         session.commit()
 
 
@@ -246,8 +262,9 @@ def catalog_snapshot() -> dict:
     with Session(engine) as session:
         schemes = [row.payload for row in session.query(SchemeCatalogRow).filter_by(active=True).all()]
         services = [row.payload for row in session.query(ServiceCatalogRow).filter_by(active=True).all()]
+        capabilities = [row.payload for row in session.query(ProviderCapabilityRow).filter_by(enabled=True).all()]
         departments = [row.payload for row in session.query(DepartmentRow).filter_by(active=True).all()]
-        return {"schemes": schemes, "services": services, "departments": departments}
+        return {"schemes": schemes, "services": services, "capabilities": capabilities, "departments": departments}
 
 
 def ensure_user_accounts() -> None:

@@ -228,7 +228,7 @@ def create_application(citizen_id: str, discovery: dict, eligibility: dict) -> d
         transition_application(app, "WAITING_FOR_OFFICER")
     elif any(item.get("resolution", {}).get("confidenceLevel") == "LOW" for item in app["requirements"]):
         transition_application(app, "VERIFICATION_FAILED")
-    elif requirement_map.get("DOMICILE_PROOF", {}).get("status") != "FOUND":
+    elif any(item.get("status") != "FOUND" for item in app["requirements"]):
         transition_application(app, "WAITING_FOR_DEPENDENCY")
     elif not eligibility["eligible"]:
         transition_application(app, "VERIFICATION_FAILED")

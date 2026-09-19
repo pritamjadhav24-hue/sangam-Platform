@@ -66,6 +66,21 @@ def ensure_domicile_dependency(app: dict) -> dict:
     return ensure_dependency(app, "DOMICILE_PROOF")
 
 
+def ensure_missing_dependencies(app: dict) -> list[dict]:
+    """Create dependencies for configured requirements that are not resolved."""
+    dependencies = []
+    for requirement in app.get("requirements", []):
+        if requirement.get("status") not in {"MISSING", "UNRESOLVED"}:
+            continue
+        try:
+            dependencies.append(ensure_dependency(app, requirement["code"]))
+        except ValueError:
+            # A requirement without a registered capability remains a normal
+            # unresolved requirement; it must not be silently completed.
+            continue
+    return dependencies
+
+
 def initiate_dependency(citizen_id: str, app: dict, requirement_code: str) -> dict:
     dependency = ensure_dependency(app, requirement_code)
     service_id = dependency.get("providerService") or dependency.get("serviceId")

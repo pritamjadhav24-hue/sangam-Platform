@@ -9,7 +9,7 @@ from app.core.audit_bus import audit_bus
 from app.core.auth import require_roles
 from app.core.event_bus import event_bus
 from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuthorizationError, authorize_access, create_consent, current, revoke_consent
-from app.engine.dependency_orchestrator import ensure_domicile_dependency, initiate_domicile
+from app.engine.dependency_orchestrator import ensure_domicile_dependency, ensure_missing_dependencies, initiate_domicile
 from app.core.persistence import catalog_snapshot
 from app.engine.registry import SCHEMES
 from app.engine.requirement_analyzer import discover
@@ -123,7 +123,8 @@ def consent(body: Consent, user: dict = Depends(require_roles("CITIZEN"))):
         app["consentId"] = receipt["consentId"]
         _record_discovery(body.citizenId, result, app["appId"])
         _record_entity_reviews(app)
-        dependency_record = ensure_domicile_dependency(app) if any(item["code"] == "DOMICILE_PROOF" and item["status"] != "FOUND" for item in result["requirements"]) else None
+        dependency_records = ensure_missing_dependencies(app)
+        dependency_record = dependency_records[0] if dependency_records else None
         receipt = {**receipt, "appId": app["appId"], "applicationStatus": app["status"], "dependencyId": dependency_record["dependencyId"] if dependency_record else None}
         event_bus.publish("CONSENT_GRANTED", {"citizenId": body.citizenId, "appId": app["appId"], "consentId": receipt["consentId"], "purpose": receipt["purpose"]})
     audit_bus.append(body.citizenId, "CONSENT", receipt["purpose"], receipt["consumer"], receipt["decision"], receipt["consentId"], {**receipt, "actorRole": user["role"]}, correlation_id=app["appId"] if app else None)
@@ -159,8 +160,9 @@ def submit(body: Submit, user: dict = Depends(require_roles("CITIZEN"))):
     app["eligibility"] = eligibility
     _record_discovery(body.citizenId, result, app["appId"])
     _record_entity_reviews(app)
-    missing_domicile = any(item["code"] == "DOMICILE_PROOF" and item["status"] != "FOUND" for item in result["requirements"])
-    if missing_domicile:
+    missing_requirements = any(item.get("status") != "FOUND" for item in result["requirements"])
+    if missing_requirements:
+        ensure_missing_dependencies(app)
         transition_application(app, "WAITING_FOR_DEPENDENCY")
     elif not eligibility["eligible"]:
         transition_application(app, "VERIFICATION_FAILED")
