@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, select, update as sql_update
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select, update as sql_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0010_workflow_metadata"
+MIGRATION_HEAD = "0011_app_authority"
 
 
 class Base(DeclarativeBase):
@@ -55,6 +55,7 @@ class ApplicationRow(Base):
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    authoritative_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
@@ -357,6 +358,7 @@ def create_application(application: Mapping, session: Session | None = None) -> 
             version=1,
             created_at=created_at,
             updated_at=updated_at,
+            authoritative_at=datetime.now(timezone.utc),
             payload=payload,
         )
         db_session.add(row)
@@ -391,6 +393,7 @@ def update_application_payload(app_id: str, patch: Mapping, expected_version: in
         payload["updatedAt"] = _application_iso(now)
         row.payload = payload
         row.updated_at = now
+        row.authoritative_at = row.authoritative_at or now
         row.version += 1
         db_session.flush()
         return _application_result(row)
@@ -430,6 +433,7 @@ def transition_application_status(app_id: str, status: str, actor: str = "SYSTEM
         payload["createdAt"] = _application_iso(row.created_at) if row.created_at else payload.get("createdAt", timestamp_iso)
         row.status = status
         row.updated_at = timestamp
+        row.authoritative_at = row.authoritative_at or timestamp
         row.version += 1
         row.payload = payload
         db_session.add(WorkflowHistoryRow(app_id=app_id, status=status, occurred_at=timestamp_iso, payload=history_entry))
@@ -1044,27 +1048,75 @@ def persist_state() -> None:
     from app.mocks.identity_provider import SESSIONS
 
     with Session(engine) as session:
-        for model in (WorkflowHistoryRow, EventRow, AuditEntryRow, NotificationRow, EntityReviewRow, ConflictReviewRow, DependencyRow, ConsentRow, ApplicationRow, SessionRow, IntegrationStateRow, MockStateRow, CounterRow):
+        # The legacy snapshot is destructive, so serialize it against every
+        # application row it can replace.  These are row locks, not a table
+        # lock; repository writers either finish before this snapshot or wait
+        # until it commits and then see the resulting row.
+        application_rows = session.execute(select(ApplicationRow).with_for_update()).scalars().all()
+        protected_app_ids = {row.app_id for row in application_rows if row.authoritative_at is not None}
+
+        def delete_unprotected(model, column):
+            if not protected_app_ids:
+                session.execute(delete(model))
+                return
+            session.execute(delete(model).where(~column.in_(protected_app_ids)))
+
+        delete_unprotected(WorkflowHistoryRow, WorkflowHistoryRow.app_id)
+        delete_unprotected(DependencyRow, DependencyRow.app_id)
+        delete_unprotected(EntityReviewRow, EntityReviewRow.app_id)
+        delete_unprotected(ConflictReviewRow, ConflictReviewRow.app_id)
+        for model, column in ((ConsentRow, ConsentRow.app_id), (NotificationRow, NotificationRow.app_id)):
+            if not protected_app_ids:
+                session.execute(delete(model))
+            else:
+                session.execute(delete(model).where(or_(column.is_(None), ~column.in_(protected_app_ids))))
+        if not protected_app_ids:
+            session.execute(delete(EventRow))
+            session.execute(delete(AuditEntryRow))
+        else:
+            session.execute(delete(EventRow).where(or_(EventRow.app_id.is_(None), ~EventRow.app_id.in_(protected_app_ids))))
+            # correlation_id is the existing application-scoped audit
+            # convention.  Uncorrelated audit entries remain legacy state;
+            # no JSONB inference is used here.
+            session.execute(delete(AuditEntryRow).where(or_(AuditEntryRow.correlation_id.is_(None), ~AuditEntryRow.correlation_id.in_(protected_app_ids))))
+        session.execute(delete(ApplicationRow).where(ApplicationRow.authoritative_at.is_(None)))
+        for model in (SessionRow, IntegrationStateRow, MockStateRow):
             session.execute(delete(model))
         for app_id, app in workflow_engine.APPLICATIONS.items():
+            if app_id in protected_app_ids:
+                continue
             session.add(ApplicationRow(app_id=app_id, citizen_id=app["citizenId"], status=app["status"], payload=app))
             for history in app.get("statusHistory", []):
                 session.add(WorkflowHistoryRow(app_id=app_id, status=history["status"], occurred_at=history["at"], payload=history))
         for dep_id, dependency in workflow_engine.DEPENDENCIES.items():
+            if dependency["appId"] in protected_app_ids:
+                continue
             session.add(DependencyRow(dependency_id=dep_id, app_id=dependency["appId"], status=dependency["status"], payload=dependency))
         for citizen_id, receipt in consent_manager.CONSENTS.items():
             app = next((candidate for candidate in workflow_engine.APPLICATIONS.values() if candidate.get("consentId") == receipt.get("consentId")), None) or workflow_engine.find_active_application(citizen_id)
+            if app and app["appId"] in protected_app_ids:
+                continue
             session.add(ConsentRow(consent_id=receipt["consentId"], citizen_id=citizen_id, app_id=app["appId"] if app else None, payload=receipt))
         for review_id, review in workflow_engine.ENTITY_REVIEWS.items():
+            if review["appId"] in protected_app_ids:
+                continue
             session.add(EntityReviewRow(review_id=review_id, app_id=review["appId"], payload=review))
         for review_id, review in workflow_engine.CONFLICT_REVIEWS.items():
+            if review["appId"] in protected_app_ids:
+                continue
             session.add(ConflictReviewRow(review_id=review_id, app_id=review["appId"], payload=review))
         for item in notification_manager.notifications:
+            if item.get("applicationId") in protected_app_ids:
+                continue
             session.add(NotificationRow(notification_id=item["notificationId"], recipient_user_id=item["recipientUserId"], app_id=item.get("applicationId"), payload=item))
         for event in event_bus.events:
             payload = event.get("payload", {})
+            if payload.get("appId") in protected_app_ids:
+                continue
             session.add(EventRow(app_id=payload.get("appId"), event_type=event["type"], occurred_at=event["timestamp"], payload=event))
         for entry in audit_bus.entries:
+            if entry.get("correlationId") in protected_app_ids:
+                continue
             session.add(AuditEntryRow(sequence=entry["sequence"], correlation_id=entry.get("correlationId"), consent_id=entry.get("consentId"), payload=entry))
         # JWT access tokens are deliberately not persisted.
         for system, state in adapters._availability.items():
@@ -1079,7 +1131,23 @@ def persist_state() -> None:
             "conflict": max([_int_suffix(key, 1) for key in workflow_engine.CONFLICT_REVIEWS] or [1]),
             "notification": max([_int_suffix(item["notificationId"], 1) for item in notification_manager.notifications] or [1]),
         }
-        for key, value in counters.items(): session.add(CounterRow(counter_key=key, next_value=value))
+        from sqlalchemy.dialects.postgresql import insert as postgres_insert
+        for key, value in counters.items():
+            if key == "application":
+                session.execute(
+                    postgres_insert(CounterRow)
+                    .values(counter_key=key, next_value=value)
+                    .on_conflict_do_update(
+                        index_elements=[CounterRow.counter_key],
+                        set_={"next_value": func.greatest(CounterRow.next_value, value)},
+                    )
+                )
+            else:
+                counter = session.get(CounterRow, key)
+                if counter is None:
+                    session.add(CounterRow(counter_key=key, next_value=value))
+                else:
+                    counter.next_value = value
         session.commit()
 
 

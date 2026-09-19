@@ -7,15 +7,16 @@ from datetime import timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from sqlalchemy import event, inspect, select, text, update
+from sqlalchemy import event, inspect, or_, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.audit_bus import audit_bus
 from app.core.demo_state import reset_demo_state
 from app.core.notification_manager import notification_manager
-from app.core.persistence import (ApplicationConcurrencyError, ApplicationRow, DependencyRow,
-                                  WorkflowHistoryRow, allocate_application_id, create_application, engine,
+from app.core.persistence import (ApplicationConcurrencyError, ApplicationRow, AuditEntryRow, ConsentRow,
+                                  ConflictReviewRow, CounterRow, DependencyRow, EntityReviewRow, EventRow,
+                                  NotificationRow, WorkflowHistoryRow, allocate_application_id, create_application, engine,
                                   get_application, get_dependency, hydrate_state, initialize,
                                   list_applications_for_citizen, list_dependencies_for_application,
                                   mark_application_write_authoritative, persist_state,
@@ -31,14 +32,34 @@ MIGRATION_0010_SPEC.loader.exec_module(MIGRATION_0010)
 
 
 class PostgreSQLPersistenceTests(unittest.TestCase):
+    def _clear_authoritative_rows(self):
+        with Session(engine) as session:
+            app_ids = [row.app_id for row in session.query(ApplicationRow).filter(ApplicationRow.authoritative_at.is_not(None)).all()]
+            if app_ids:
+                for model, column in (
+                    (WorkflowHistoryRow, WorkflowHistoryRow.app_id),
+                    (DependencyRow, DependencyRow.app_id),
+                    (EntityReviewRow, EntityReviewRow.app_id),
+                    (ConflictReviewRow, ConflictReviewRow.app_id),
+                ):
+                    session.query(model).filter(column.in_(app_ids)).delete(synchronize_session=False)
+                session.query(ConsentRow).filter(ConsentRow.app_id.in_(app_ids)).delete(synchronize_session=False)
+                session.query(NotificationRow).filter(NotificationRow.app_id.in_(app_ids)).delete(synchronize_session=False)
+                session.query(EventRow).filter(EventRow.app_id.in_(app_ids)).delete(synchronize_session=False)
+                session.query(AuditEntryRow).filter(AuditEntryRow.correlation_id.in_(app_ids)).delete(synchronize_session=False)
+                session.query(ApplicationRow).filter(ApplicationRow.app_id.in_(app_ids)).delete(synchronize_session=False)
+                session.commit()
+
     def setUp(self):
         initialize()
+        self._clear_authoritative_rows()
         reset_demo_state()
         persist_state()
 
     def tearDown(self):
         reset_demo_state()
         persist_state()
+        self._clear_authoritative_rows()
 
     def test_connection_and_required_schema(self):
         tables = set(inspect(engine).get_table_names())
@@ -64,6 +85,124 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
             self.assertIsNotNone(row.created_at)
             self.assertIsNotNone(row.updated_at)
             self.assertEqual(row.payload["requirements"], [])
+
+    def test_application_repository_writes_mark_authority_and_preserve_marker(self):
+        app_id = "APP-AUTHORITY-MARKER-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-AUTHORITY", "status": "DRAFT"})
+        with Session(engine) as session:
+            marker = session.get(ApplicationRow, app_id).authoritative_at
+        update_application_payload(app_id, {"eligibility": {"eligible": True}})
+        transition_application_status(app_id, "IN_PROGRESS", source="test")
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertIsNotNone(row.authoritative_at)
+            self.assertEqual(row.authoritative_at, marker)
+
+    def test_migration_0011_adds_nullable_authority_boundary(self):
+        columns = {column["name"]: column for column in inspect(engine).get_columns("applications")}
+        self.assertIn("authoritative_at", columns)
+        self.assertTrue(columns["authoritative_at"]["nullable"])
+        indexes = {index["name"] for index in inspect(engine).get_indexes("applications")}
+        self.assertIn("ix_applications_authoritative_at", indexes)
+
+    def test_persist_state_cannot_replace_authoritative_application_or_children(self):
+        app_id = "APP-AUTHORITY-PROTECTED-001"
+        dependency_id = "DEP-AUTHORITY-PROTECTED-001"
+        review_id = "REVIEW-AUTHORITY-PROTECTED-001"
+        conflict_id = "CONFLICT-AUTHORITY-PROTECTED-001"
+        consent_id = "CONSENT-AUTHORITY-PROTECTED-001"
+        notification_id = "NOTIFICATION-AUTHORITY-PROTECTED-001"
+        with Session(engine) as session:
+            app = create_application({"appId": app_id, "citizenId": "CITIZEN-AUTHORITY", "status": "DRAFT"}, session=session)
+            session.add(WorkflowHistoryRow(app_id=app_id, status="DRAFT", occurred_at="2026-01-01T00:00:00+00:00", payload={"source": "postgres"}))
+            session.add(DependencyRow(dependency_id=dependency_id, app_id=app_id, status="QUEUED", payload={"dependencyId": dependency_id, "appId": app_id, "status": "QUEUED", "source": "postgres"}))
+            session.add(EntityReviewRow(review_id=review_id, app_id=app_id, payload={"reviewId": review_id, "appId": app_id, "source": "postgres"}))
+            session.add(ConflictReviewRow(review_id=conflict_id, app_id=app_id, payload={"reviewId": conflict_id, "appId": app_id, "source": "postgres"}))
+            session.add(ConsentRow(consent_id=consent_id, citizen_id="CITIZEN-AUTHORITY", app_id=app_id, payload={"consentId": consent_id, "source": "postgres"}))
+            session.add(NotificationRow(notification_id=notification_id, recipient_user_id="CITIZEN-AUTHORITY", app_id=app_id, payload={"notificationId": notification_id, "applicationId": app_id, "source": "postgres"}))
+            session.add(EventRow(app_id=app_id, event_type="POSTGRES_EVENT", occurred_at="2026-01-01T00:00:00+00:00", payload={"source": "postgres"}))
+            session.add(AuditEntryRow(sequence=990001, correlation_id=app_id, consent_id=consent_id, payload={"source": "postgres"}))
+            session.commit()
+
+        APPLICATIONS[app_id] = {"appId": app_id, "citizenId": "CITIZEN-AUTHORITY", "status": "STALE_LOCAL", "source": "local"}
+        DEPENDENCIES[dependency_id] = {"dependencyId": dependency_id, "appId": app_id, "status": "STALE_LOCAL"}
+        persist_state()
+
+        with Session(engine) as session:
+            self.assertEqual(session.get(ApplicationRow, app_id).status, "DRAFT")
+            self.assertEqual(session.get(DependencyRow, dependency_id).payload["source"], "postgres")
+            self.assertEqual(session.get(EntityReviewRow, review_id).payload["source"], "postgres")
+            self.assertEqual(session.get(ConflictReviewRow, conflict_id).payload["source"], "postgres")
+            self.assertEqual(session.get(ConsentRow, consent_id).payload["source"], "postgres")
+            self.assertEqual(session.get(NotificationRow, notification_id).payload["source"], "postgres")
+            self.assertEqual(session.query(EventRow).filter(EventRow.app_id == app_id).one().payload["source"], "postgres")
+            self.assertEqual(session.get(AuditEntryRow, 990001).payload["source"], "postgres")
+
+    def test_persist_state_preserves_application_counter_high_water_mark(self):
+        with Session(engine) as session:
+            counter = session.get(CounterRow, "application")
+            counter.next_value = 900000
+            session.commit()
+        persist_state()
+        with Session(engine) as session:
+            counter = session.get(CounterRow, "application")
+            self.assertGreaterEqual(counter.next_value, 900000)
+
+    def test_repository_write_waits_for_snapshot_style_application_row_lock(self):
+        app_id = "APP-AUTHORITY-RACE-REPOSITORY-FIRST"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-AUTHORITY", "status": "DRAFT"})
+        APPLICATIONS[app_id] = {"appId": app_id, "citizenId": "CITIZEN-AUTHORITY", "status": "STALE_LOCAL"}
+        first = Session(engine)
+        first.begin()
+        update_application_payload(app_id, {"fromRepository": True}, session=first)
+        errors = []
+        finished = threading.Event()
+
+        def snapshot():
+            try:
+                persist_state()
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=snapshot)
+        thread.start()
+        self.assertFalse(finished.wait(timeout=0.25))
+        first.commit()
+        thread.join(timeout=5)
+        first.close()
+        self.assertFalse(errors)
+        self.assertTrue(finished.is_set())
+        with Session(engine) as session:
+            self.assertTrue(session.get(ApplicationRow, app_id).payload["fromRepository"])
+
+    def test_repository_write_after_snapshot_style_lock_serializes_then_succeeds(self):
+        app_id = "APP-AUTHORITY-RACE-SNAPSHOT-FIRST"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-AUTHORITY", "status": "DRAFT"})
+        snapshot_session = Session(engine)
+        snapshot_session.begin()
+        snapshot_session.execute(select(ApplicationRow).where(ApplicationRow.app_id == app_id).with_for_update()).scalar_one()
+        errors = []
+        finished = threading.Event()
+
+        def repository_write():
+            try:
+                update_application_payload(app_id, {"afterSnapshot": True})
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=repository_write)
+        thread.start()
+        self.assertFalse(finished.wait(timeout=0.25))
+        snapshot_session.commit()
+        snapshot_session.close()
+        thread.join(timeout=5)
+        self.assertFalse(errors)
+        self.assertTrue(finished.is_set())
+        self.assertTrue(get_application(app_id)["afterSnapshot"])
 
     def test_application_repository_update_preserves_unpatched_payload_and_expected_version(self):
         app_id = "APP-REPOSITORY-WRITE-001"
