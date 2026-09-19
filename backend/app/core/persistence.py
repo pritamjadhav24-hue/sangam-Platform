@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0004_provider_jobs"
+MIGRATION_HEAD = "0005_operational_observability"
 
 
 class Base(DeclarativeBase):
@@ -171,6 +171,17 @@ class ProviderJobRow(Base):
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
+class WorkerHeartbeatRow(Base):
+    __tablename__ = "worker_heartbeats"
+    worker_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    status: Mapped[str] = mapped_column(String(40))
+    last_seen: Mapped[str] = mapped_column(String(64), index=True)
+    current_job_id: Mapped[Optional[str]] = mapped_column(String(180), nullable=True)
+    redis_status: Mapped[str] = mapped_column(String(40))
+    postgres_status: Mapped[str] = mapped_column(String(40))
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
 class DepartmentRow(Base):
     __tablename__ = "departments"
     department_id: Mapped[str] = mapped_column(String(120), primary_key=True)
@@ -254,12 +265,13 @@ def persist_provider_job(job: dict) -> dict:
     with Session(engine) as session:
         row = session.get(ProviderJobRow, job["jobId"])
         error = job.get("error") or {}
+        from app.core.job_queue import safe_error_message
         values = {"job_type": job["jobType"], "status": job["status"], "correlation_id": job["correlationId"],
                   "application_id": job.get("applicationId"), "dependency_id": job.get("dependencyId"),
                   "provider_id": job.get("providerId"), "attempt": job.get("attempt", 0),
                   "max_attempts": job.get("maxAttempts", 3), "created_at": job["createdAt"],
                   "started_at": job.get("startedAt"), "completed_at": job.get("completedAt"),
-                  "error_category": error.get("category"), "error_message": str(error.get("message", ""))[:500] or None,
+                  "error_category": error.get("category"), "error_message": safe_error_message(error.get("message", "")) or None,
                   "payload": job.get("payload") or {}}
         if row is None:
             session.add(ProviderJobRow(job_id=job["jobId"], **values))
@@ -293,7 +305,8 @@ def update_provider_job(job: dict) -> dict:
         row.completed_at = job.get("completedAt")
         error = job.get("error") or {}
         row.error_category = error.get("category")
-        row.error_message = str(error.get("message", ""))[:500] or None
+        from app.core.job_queue import safe_error_message
+        row.error_message = safe_error_message(error.get("message", "")) or None
         session.commit()
     return job
 
@@ -309,6 +322,119 @@ def recover_provider_jobs() -> list[dict]:
             recovered.append(_job_from_row(row))
         session.commit()
     return recovered
+
+
+def record_worker_heartbeat(worker_id: str, status: str, redis_status: str, current_job_id: str | None = None) -> dict:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with Session(engine) as session:
+        row = session.get(WorkerHeartbeatRow, worker_id)
+        values = {"status": status, "last_seen": timestamp, "current_job_id": current_job_id,
+                  "redis_status": redis_status, "postgres_status": "AVAILABLE", "payload": {"workerId": worker_id}}
+        if row is None:
+            session.add(WorkerHeartbeatRow(worker_id=worker_id, **values))
+        else:
+            for key, value in values.items(): setattr(row, key, value)
+        session.commit()
+    return {"workerId": worker_id, "status": status, "lastSeen": timestamp, "currentJobId": current_job_id, "redisStatus": redis_status, "postgresStatus": "AVAILABLE"}
+
+
+def worker_operational_status(stale_after_seconds: int = 15) -> list[dict]:
+    from datetime import timedelta
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)
+    with Session(engine) as session:
+        rows = session.query(WorkerHeartbeatRow).order_by(WorkerHeartbeatRow.last_seen.desc()).all()
+        result = []
+        for row in rows:
+            try:
+                last_seen = datetime.fromisoformat(row.last_seen)
+                if last_seen.tzinfo is None: last_seen = last_seen.replace(tzinfo=timezone.utc)
+                fresh = last_seen >= threshold
+            except ValueError:
+                fresh = False
+            result.append({"workerId": row.worker_id, "status": row.status if fresh else "STALE", "lastSeen": row.last_seen, "currentJobId": row.current_job_id, "redisStatus": row.redis_status, "postgresStatus": row.postgres_status})
+        return result
+
+
+def _safe_job_view(row: ProviderJobRow) -> dict:
+    error = {"category": row.error_category, "message": row.error_message} if row.error_category else None
+    return {"jobId": row.job_id, "type": row.job_type, "status": row.status, "correlationId": row.correlation_id,
+            "applicationId": row.application_id, "dependencyId": row.dependency_id, "providerId": row.provider_id,
+            "attempt": row.attempt, "maxAttempts": row.max_attempts, "retryCount": max(row.attempt - 1, 0),
+            "createdAt": row.created_at, "startedAt": row.started_at, "completedAt": row.completed_at, "error": error}
+
+
+def job_operational_summary() -> dict:
+    with Session(engine) as session:
+        rows = session.query(ProviderJobRow).all()
+        counts = {status: sum(1 for row in rows if row.status == status) for status in ("QUEUED", "RUNNING", "COMPLETED", "FAILED", "DEAD_LETTER")}
+        return {"counts": counts, "retryCount": sum(max(row.attempt - 1, 0) for row in rows), "total": len(rows)}
+
+
+def recent_provider_jobs(limit: int = 50, dead_letter_only: bool = False) -> list[dict]:
+    limit = max(1, min(limit, 100))
+    with Session(engine) as session:
+        query = session.query(ProviderJobRow).order_by(ProviderJobRow.created_at.desc()).limit(limit)
+        if dead_letter_only: query = query.filter(ProviderJobRow.status == "DEAD_LETTER")
+        return [_safe_job_view(row) for row in query.all()]
+
+
+def provider_job_detail(job_id: str) -> dict | None:
+    with Session(engine) as session:
+        row = session.get(ProviderJobRow, job_id)
+        return _safe_job_view(row) if row else None
+
+
+def provider_operational_summary() -> list[dict]:
+    with Session(engine) as session:
+        jobs = session.query(ProviderJobRow).all()
+        health = {row.system: row.payload for row in session.query(IntegrationStateRow).all()}
+        providers = session.query(ProviderRow).all()
+        result = []
+        for provider in providers:
+            related = [row for row in jobs if row.provider_id in {provider.provider_id, provider.name}]
+            runtime = health.get(provider.name, {}).get("runtimeHealth", {})
+            provider_health = next((item for item in __import__("app.engine.adapters", fromlist=["integration_health"]).integration_health() if item["system"] == provider.name), {"status": "UNKNOWN"})
+            safe_health = {key: provider_health.get(key) for key in ("status", "lastCheckedAt", "lastSuccessAt", "lastFailureAt", "errorCategory")}
+            result.append({"providerId": provider.provider_id, "name": provider.name, "enabled": provider.active,
+                           "adapterType": provider.adapter_type, "configured": bool(provider.payload),
+                           "health": safe_health,
+                           "lastSuccessAt": runtime.get("lastSuccessAt"), "lastFailureAt": runtime.get("lastFailureAt"),
+                           "errorCategory": runtime.get("errorCategory"),
+                           "successCount": sum(1 for row in related if row.status == "COMPLETED"),
+                           "failureCount": sum(1 for row in related if row.status in {"FAILED", "DEAD_LETTER"})})
+        return result
+
+
+def replay_dead_letter_job(job_id: str, redis_service) -> dict:
+    """Reset and enqueue a dead-letter job, rolling back if Redis cannot accept it."""
+    from app.core.observability import structured_log
+    from app.core.event_bus import event_bus
+    from app.core.audit_bus import audit_bus
+    if not redis_service.enabled:
+        raise RuntimeError("Redis is required for dead-letter replay")
+    redis_service.health_check()
+    with Session(engine) as session:
+        row = session.execute(select(ProviderJobRow).where(ProviderJobRow.job_id == job_id).with_for_update()).scalar_one_or_none()
+        if row is None: raise KeyError(job_id)
+        if row.status != "DEAD_LETTER": raise ValueError("Only DEAD_LETTER jobs can be replayed")
+        dependency = session.get(DependencyRow, row.dependency_id) if row.dependency_id else None
+        if dependency and dependency.payload.get("status") == "COMPLETED": raise ValueError("Dependency is already completed")
+        row.status, row.attempt, row.started_at, row.completed_at = "QUEUED", 0, None, None
+        row.error_category, row.error_message = None, None
+        if dependency:
+            dependency.status = "WAITING_FOR_DEPENDENCY"
+            dependency.payload = {**dependency.payload, "jobStatus": "QUEUED", "lastError": None, "errorCategory": None}
+        replay_payload = {"jobId": row.job_id, "jobType": row.job_type, "correlationId": row.correlation_id, "applicationId": row.application_id, "dependencyId": row.dependency_id, "providerId": row.provider_id, "attempt": 0, "maxAttempts": row.max_attempts, "status": "QUEUED", "createdAt": row.created_at, "startedAt": None, "completedAt": None, "error": None, "payload": row.payload or {}}
+        redis_service.enqueue("sangam:jobs", replay_payload)
+        replay_result = {"jobId": row.job_id, "type": row.job_type, "status": row.status, "correlationId": row.correlation_id,
+                         "applicationId": row.application_id, "dependencyId": row.dependency_id, "providerId": row.provider_id,
+                         "attempt": row.attempt, "maxAttempts": row.max_attempts, "retryCount": 0,
+                         "createdAt": row.created_at, "startedAt": row.started_at, "completedAt": row.completed_at, "error": None}
+        session.commit()
+    event = event_bus.publish("PROVIDER_JOB_REPLAYED", {"appId": replay_result["applicationId"], "dependencyId": replay_result["dependencyId"], "jobId": replay_result["jobId"], "correlationId": replay_result["correlationId"]})
+    audit_bus.append("SYSTEM", "PROVIDER_JOB", "Administrator replayed dead-letter provider job", replay_result["providerId"] or "CONFIGURED_PROVIDER", "REPLAY", correlation_id=replay_result["correlationId"], payload={"jobId": replay_result["jobId"], "dependencyId": replay_result["dependencyId"], "eventId": event["eventId"]})
+    structured_log("provider_job_replayed", correlation_id=replay_result["correlationId"], application_id=replay_result["applicationId"], dependency_id=replay_result["dependencyId"], job_id=replay_result["jobId"], provider_id=replay_result["providerId"], outcome="QUEUED")
+    return replay_result
 
 
 def catalog_seeded() -> bool:

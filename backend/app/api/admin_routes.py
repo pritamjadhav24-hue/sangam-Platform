@@ -10,6 +10,9 @@ from app.engine.adapters import integration_health, set_integration_availability
 from app.engine.registry import dependency_registry
 from app.core.demo_state import reset_demo_state
 from app.mocks.education_dept import set_income_conflict
+from app.core.persistence import (job_operational_summary, recent_provider_jobs, provider_job_detail,
+                                  provider_operational_summary, replay_dead_letter_job, worker_operational_status)
+from app.core.redis_service import RedisService, RedisUnavailable
 
 router = APIRouter(prefix="/api/admin", tags=["Administration"])
 @router.get("/audit-trail")
@@ -57,3 +60,51 @@ def simulate_conflict(body: ConflictSimulation, user: dict = Depends(require_rol
 def reset_demo(user: dict = Depends(require_roles("ADMIN"))):
     reset_demo_state()
     return {"success": True, "message": "In-memory demo state reset to deterministic defaults.", "sessionReset": True}
+
+
+@router.get("/operations/providers")
+def provider_operations(user: dict = Depends(require_roles("ADMIN"))):
+    return {"providers": provider_operational_summary()}
+
+
+@router.get("/operations/worker")
+def worker_operations(user: dict = Depends(require_roles("ADMIN"))):
+    try:
+        return {"workers": worker_operational_status()}
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="Worker operational state is unavailable.") from error
+
+
+@router.get("/operations/jobs/summary")
+def job_summary(user: dict = Depends(require_roles("ADMIN"))):
+    return job_operational_summary()
+
+
+@router.get("/operations/jobs/dead-letter")
+def dead_letter_jobs(limit: int = 50, user: dict = Depends(require_roles("ADMIN"))):
+    return {"jobs": recent_provider_jobs(limit, dead_letter_only=True)}
+
+
+@router.get("/operations/jobs/recent")
+def recent_jobs(limit: int = 50, user: dict = Depends(require_roles("ADMIN"))):
+    return {"jobs": recent_provider_jobs(limit)}
+
+
+@router.get("/operations/jobs/{job_id}")
+def job_detail(job_id: str, user: dict = Depends(require_roles("ADMIN"))):
+    job = provider_job_detail(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job
+
+
+@router.post("/operations/jobs/{job_id}/replay")
+def replay_job(job_id: str, user: dict = Depends(require_roles("ADMIN"))):
+    try:
+        return replay_dead_letter_job(job_id, RedisService())
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Job not found.") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (RedisUnavailable, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail="Provider job replay is unavailable.") from error
