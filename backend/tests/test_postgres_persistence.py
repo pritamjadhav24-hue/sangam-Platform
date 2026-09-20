@@ -21,7 +21,7 @@ from app.core.persistence import (ApplicationAuthorityError, ApplicationConcurre
                                   get_application, get_dependency, hydrate_state, initialize,
                                   list_applications_for_citizen, list_dependencies_for_application,
                                   mark_application_write_authoritative, persist_state, persist_transition,
-                                  transition_application_status, update_application_payload)
+                                  mutate_application, transition_application_status, update_application_payload)
 from app.engine.dependency_orchestrator import ensure_dependency, initiate_domicile
 from app.engine.workflow_engine import APPLICATIONS, DEPENDENCIES, officer_action, transition_application
 
@@ -223,6 +223,96 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
             self.assertEqual(row.payload["requirements"], original["requirements"])
         with self.assertRaises(ApplicationConcurrencyError):
             update_application_payload(app_id, {"eligibility": {"eligible": False}}, expected_version=version)
+
+    def test_application_mutation_gateway_is_database_only_and_caller_controls_commit(self):
+        app_id = "APP-MUTATION-GATEWAY-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-GATEWAY", "status": "DRAFT", "payloadValue": "old"})
+        with Session(engine) as session:
+            version = session.get(ApplicationRow, app_id).version
+        APPLICATIONS[app_id] = {"appId": app_id, "citizenId": "CITIZEN-GATEWAY", "status": "STALE_LOCAL", "payloadValue": "stale"}
+        with Session(engine) as session:
+            session.begin()
+            result = mutate_application(app_id, {"payloadValue": "fresh"}, expected_version=version, session=session)
+            self.assertTrue(session.in_transaction())
+            self.assertEqual(result["payloadValue"], "fresh")
+            self.assertEqual(APPLICATIONS[app_id]["payloadValue"], "stale")
+            with Session(engine) as other:
+                self.assertEqual(other.get(ApplicationRow, app_id).payload["payloadValue"], "old")
+            session.commit()
+        self.assertEqual(get_application(app_id)["payloadValue"], "fresh")
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertIsNotNone(row.authoritative_at)
+            self.assertEqual(row.payload["updatedAt"], row.updated_at.astimezone(timezone.utc).isoformat())
+
+    def test_application_mutation_gateway_rolls_back_without_establishing_authority(self):
+        app_id = "APP-MUTATION-GATEWAY-ROLLBACK-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-GATEWAY", "status": "DRAFT", "payloadValue": "old"})
+        with Session(engine) as session:
+            session.begin()
+            before = session.get(ApplicationRow, app_id)
+            before_version = before.version
+            before_authority = before.authoritative_at
+            before_updated = before.updated_at
+            mutate_application(app_id, {"payloadValue": "rolled-back"}, expected_version=before_version, session=session)
+            session.rollback()
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertEqual(row.payload["payloadValue"], "old")
+            self.assertEqual(row.version, before_version)
+            self.assertEqual(row.authoritative_at, before_authority)
+            self.assertEqual(row.updated_at, before_updated)
+
+    def test_application_mutation_gateway_rejects_reserved_fields(self):
+        app_id = "APP-MUTATION-GATEWAY-RESERVED-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-GATEWAY", "status": "DRAFT"})
+        with self.assertRaises(ValueError):
+            mutate_application(app_id, {"status": "COMPLETED"})
+        with self.assertRaises(ValueError):
+            mutate_application(app_id, {"authoritative_at": "forged"})
+
+    def test_application_mutation_gateway_same_version_writers_serialize(self):
+        app_id = "APP-MUTATION-GATEWAY-RACE-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-GATEWAY", "status": "DRAFT"})
+        with Session(engine) as session:
+            version = session.get(ApplicationRow, app_id).version
+        first = Session(engine)
+        finished = threading.Event()
+        errors = []
+        try:
+            first.begin()
+            mutate_application(app_id, {"writer": "first"}, expected_version=version, session=first)
+
+            def second_writer():
+                with Session(engine) as second:
+                    try:
+                        mutate_application(app_id, {"writer": "second"}, expected_version=version, session=second)
+                    except Exception as error:
+                        errors.append(error)
+                    finally:
+                        second.rollback()
+                        finished.set()
+
+            thread = threading.Thread(target=second_writer)
+            thread.start()
+            self.assertFalse(finished.wait(timeout=0.25))
+            first.commit()
+            thread.join(timeout=5)
+            self.assertTrue(finished.is_set())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], ApplicationConcurrencyError)
+        finally:
+            first.close()
+
+    def test_application_mutation_gateway_survives_snapshot_and_legacy_writes(self):
+        app_id = "APP-MUTATION-GATEWAY-FENCE-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-GATEWAY", "status": "DRAFT", "payloadValue": "old"})
+        mutate_application(app_id, {"payloadValue": "authoritative"})
+        APPLICATIONS[app_id] = {"appId": app_id, "citizenId": "CITIZEN-GATEWAY", "status": "STALE_LOCAL", "payloadValue": "stale"}
+        persist_state()
+        with self.assertRaises(ApplicationAuthorityError):
+            persist_transition({"appId": app_id, "citizenId": "CITIZEN-GATEWAY", "status": "IN_PROGRESS", "payloadValue": "legacy"}, {"status": "IN_PROGRESS", "at": "2026-01-01T00:00:00+00:00"})
+        self.assertEqual(get_application(app_id)["payloadValue"], "authoritative")
 
     def test_application_repository_transition_updates_status_json_and_history_in_one_transaction(self):
         app_id = "APP-REPOSITORY-TRANSITION-001"

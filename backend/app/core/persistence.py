@@ -389,8 +389,26 @@ def create_application(application: Mapping, session: Session | None = None) -> 
     return _run_application_owned(create)
 
 
-def update_application_payload(app_id: str, patch: Mapping, expected_version: int | None = None, session: Session | None = None) -> dict:
-    """Apply a narrow JSONB patch to the locked PostgreSQL application row."""
+_APPLICATION_MUTATION_RESERVED_FIELDS = frozenset({
+    "appId", "citizenId", "status", "version", "createdAt", "updatedAt", "authoritativeAt",
+    "app_id", "citizen_id", "created_at", "updated_at", "authoritative_at",
+})
+
+
+def mutate_application(app_id: str, patch: Mapping, expected_version: int | None = None, session: Session | None = None) -> dict:
+    """Mutate application JSONB payload fields in a caller-owned transaction.
+
+    This is a database-only authority boundary. It deliberately does not touch
+    process-local workflow dictionaries or invoke any legacy persistence or
+    side-effect mechanism. A caller-owned session controls commit/rollback and
+    therefore the lifetime of the row lock and the authority marker.
+    """
+    if not isinstance(patch, Mapping):
+        raise TypeError("Application mutation patch must be a mapping")
+    forbidden = _APPLICATION_MUTATION_RESERVED_FIELDS.intersection(patch)
+    if forbidden:
+        raise ValueError(f"Application mutation cannot update {', '.join(sorted(forbidden))}")
+
     def update(db_session: Session) -> dict:
         row = db_session.execute(
             select(ApplicationRow).where(ApplicationRow.app_id == app_id).with_for_update()
@@ -399,9 +417,6 @@ def update_application_payload(app_id: str, patch: Mapping, expected_version: in
             raise KeyError(app_id)
         if expected_version is not None and row.version != expected_version:
             raise ApplicationConcurrencyError(f"Application {app_id} has version {row.version}, expected {expected_version}")
-        forbidden = {"appId", "citizenId", "status", "version", "createdAt"}.intersection(patch)
-        if forbidden:
-            raise ValueError(f"Application patch cannot update {', '.join(sorted(forbidden))}")
         payload = dict(row.payload or {})
         payload.update(dict(patch))
         now = datetime.now(timezone.utc)
@@ -420,6 +435,11 @@ def update_application_payload(app_id: str, patch: Mapping, expected_version: in
     if session is not None:
         return update(session)
     return _run_application_owned(update)
+
+
+def update_application_payload(app_id: str, patch: Mapping, expected_version: int | None = None, session: Session | None = None) -> dict:
+    """Compatibility name for the PostgreSQL-authoritative mutation gateway."""
+    return mutate_application(app_id, patch, expected_version=expected_version, session=session)
 
 
 def transition_application_status(app_id: str, status: str, actor: str = "SYSTEM", source: str = "workflow_engine", expected_version: int | None = None, session: Session | None = None) -> dict:
