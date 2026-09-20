@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.audit_bus import audit_bus
 from app.core.demo_state import reset_demo_state
 from app.core.notification_manager import notification_manager
+from app.api.citizen_routes import get_citizen_application, list_citizen_applications
 from app.core.persistence import (ApplicationConcurrencyError, ApplicationRow, AuditEntryRow, ConsentRow,
                                   ConflictReviewRow, CounterRow, DependencyRow, EntityReviewRow, EventRow,
                                   NotificationRow, WorkflowHistoryRow, allocate_application_id, create_application, engine,
@@ -408,6 +409,85 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
         APPLICATIONS[app_id] = {**persisted, "status": "STALE_LOCAL_VALUE"}
         self.assertEqual(get_application(app_id)["status"], "WAITING_FOR_DEPENDENCY")
         self.assertEqual([item["appId"] for item in list_applications_for_citizen("CITIZEN-REPOSITORY")], [app_id])
+
+    def test_citizen_application_list_reads_postgresql_and_database_dependencies(self):
+        app_id = "APP-CITIZEN-LIST-001"
+        dependency_id = "DEP-CITIZEN-LIST-001"
+        with Session(engine) as session:
+            create_application({
+                "appId": app_id, "citizenId": "CITIZEN-API", "status": "WAITING_FOR_DEPENDENCY",
+                "dependencies": [{"status": "STALE_LOCAL", "providerId": "INTERNAL"}],
+            }, session=session)
+            session.add(DependencyRow(
+                dependency_id=dependency_id, app_id=app_id, status="COMPLETED",
+                attempts=2, max_attempts=3,
+                payload={"dependencyId": dependency_id, "appId": app_id, "requiredService": "Income verification", "status": "COMPLETED", "attempts": 2, "maxAttempts": 3, "providerId": "PROVIDER-INTERNAL", "adapter": "internal"},
+            ))
+            session.commit()
+        APPLICATIONS[app_id] = {"appId": app_id, "citizenId": "CITIZEN-API", "status": "STALE_LOCAL", "dependencies": [{"status": "STALE_LOCAL"}]}
+
+        response = list_citizen_applications({"role": "CITIZEN", "citizenId": "CITIZEN-API"})
+
+        self.assertEqual(len(response["applications"]), 1)
+        application = response["applications"][0]
+        self.assertEqual(application["status"], "WAITING_FOR_DEPENDENCY")
+        self.assertEqual(application["dependencies"], [{"requiredService": "Income verification", "status": "COMPLETED", "attempts": 2, "maxAttempts": 3}])
+        self.assertNotIn("providerId", str(application))
+        self.assertNotIn("adapter", str(application))
+
+    def test_citizen_application_detail_reads_postgresql_and_enforces_database_ownership(self):
+        app_id = "APP-CITIZEN-DETAIL-001"
+        with Session(engine) as session:
+            create_application({"appId": app_id, "citizenId": "CITIZEN-API", "status": "DRAFT", "requirements": [{"code": "INCOME_PROOF", "source": "internal", "recordId": "RAW-1"}]}, session=session)
+            session.commit()
+        APPLICATIONS[app_id] = {"appId": app_id, "citizenId": "CITIZEN-OTHER", "status": "STALE_LOCAL", "requirements": []}
+
+        response = get_citizen_application(app_id, {"role": "CITIZEN", "citizenId": "CITIZEN-API"})
+        self.assertEqual(response["status"], "DRAFT")
+        self.assertEqual(response["requirements"][0]["requirementCode"], "INCOME_PROOF")
+        self.assertNotIn("recordId", str(response))
+
+        with self.assertRaises(Exception) as error:
+            get_citizen_application(app_id, {"role": "CITIZEN", "citizenId": "CITIZEN-OTHER"})
+        self.assertEqual(getattr(error.exception, "status_code", None), 404)
+
+        with self.assertRaises(Exception) as error:
+            get_citizen_application("APP-CITIZEN-MISSING", {"role": "CITIZEN", "citizenId": "CITIZEN-API"})
+        self.assertEqual(getattr(error.exception, "status_code", None), 404)
+
+    def test_citizen_application_reads_have_no_local_fallback_on_database_failure(self):
+        APPLICATIONS["APP-CITIZEN-DB-FAILURE"] = {"appId": "APP-CITIZEN-DB-FAILURE", "citizenId": "CITIZEN-API", "status": "STALE_LOCAL"}
+        with patch("app.api.citizen_routes.list_applications_for_citizen", side_effect=RuntimeError("database unavailable")):
+            with self.assertRaises(RuntimeError):
+                list_citizen_applications({"role": "CITIZEN", "citizenId": "CITIZEN-API"})
+        with patch("app.api.citizen_routes.get_application", side_effect=RuntimeError("database unavailable")):
+            with self.assertRaises(RuntimeError):
+                get_citizen_application("APP-CITIZEN-DB-FAILURE", {"role": "CITIZEN", "citizenId": "CITIZEN-API"})
+
+    def test_citizen_application_detail_remains_postgresql_authoritative_after_snapshot_and_reload(self):
+        app_id = "APP-CITIZEN-RELOAD-001"
+        with Session(engine) as session:
+            create_application({"appId": app_id, "citizenId": "CITIZEN-API", "status": "DRAFT"}, session=session)
+            session.commit()
+        APPLICATIONS[app_id] = {"appId": app_id, "citizenId": "CITIZEN-API", "status": "STALE_LOCAL"}
+        persist_state()
+        APPLICATIONS.clear()
+        hydrate_state()
+        APPLICATIONS[app_id]["status"] = "STALE_AFTER_RELOAD"
+        self.assertEqual(get_citizen_application(app_id, {"role": "CITIZEN", "citizenId": "CITIZEN-API"})["status"], "DRAFT")
+
+    def test_citizen_application_read_sees_only_committed_repository_updates(self):
+        app_id = "APP-CITIZEN-CONCURRENT-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-API", "status": "DRAFT"})
+        first = Session(engine)
+        try:
+            first.begin()
+            update_application_payload(app_id, {"eligibility": {"eligible": True}}, session=first)
+            self.assertNotIn("eligibility", get_citizen_application(app_id, {"role": "CITIZEN", "citizenId": "CITIZEN-API"}))
+            first.commit()
+            self.assertEqual(get_citizen_application(app_id, {"role": "CITIZEN", "citizenId": "CITIZEN-API"})["eligibility"]["eligible"], True)
+        finally:
+            first.close()
 
     def test_dependency_repository_reads_postgresql_not_process_cache(self):
         app_id = "APP-REPOSITORY-002"

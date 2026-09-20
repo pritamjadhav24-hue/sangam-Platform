@@ -4,13 +4,16 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from app.core.audit_bus import audit_bus
 from app.core.auth import require_roles
 from app.core.event_bus import event_bus
 from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuthorizationError, authorize_access, create_consent, current, revoke_consent
 from app.engine.dependency_orchestrator import ensure_missing_dependencies, initiate_dependency
-from app.core.persistence import citizen_service_snapshot, catalog_snapshot
+from app.core.persistence import (citizen_service_snapshot, catalog_snapshot, engine,
+                                  get_application, list_applications_for_citizen,
+                                  list_dependencies_for_application)
 from app.engine.requirement_analyzer import discover
 from app.engine.rules_engine import evaluate
 from app.engine.workflow_engine import APPLICATIONS, create_application, find_active_application, transition_application
@@ -165,6 +168,15 @@ def _safe_application(app: dict) -> dict:
     return safe
 
 
+def _application_with_database_dependencies(app: dict, session: Session) -> dict:
+    """Build the response projection from the same PostgreSQL read session."""
+    application = dict(app)
+    dependencies = list_dependencies_for_application(application["appId"], session=session)
+    application["dependencies"] = dependencies
+    application["dependencyIds"] = [item["dependencyId"] for item in dependencies]
+    return application
+
+
 def _safe_consent(receipt: dict) -> dict:
     return {field: receipt.get(field) for field in ("consentId", "serviceId", "purpose", "allowed", "decision", "createdAt", "expiresAt", "revokedAt", "appId", "applicationStatus") if field in receipt}
 
@@ -217,17 +229,20 @@ def create_citizen_application(body: ApplicationCreate, user: dict = Depends(req
 
 @router.get("/applications")
 def list_citizen_applications(user: dict = Depends(require_roles("CITIZEN"))):
-    return {"applications": [_safe_application(app) for app in APPLICATIONS.values() if app.get("citizenId") == user.get("citizenId")]}
+    with Session(engine) as session:
+        applications = list_applications_for_citizen(user.get("citizenId"), session=session)
+        return {"applications": [_safe_application(_application_with_database_dependencies(app, session)) for app in applications]}
 
 
 @router.get("/applications/{application_id}")
 def get_citizen_application(application_id: str, user: dict = Depends(require_roles("CITIZEN"))):
-    app = APPLICATIONS.get(application_id)
-    if not app:
-        raise HTTPException(status_code=404, detail="Application not found")
-    if app.get("citizenId") != user.get("citizenId"):
-        raise HTTPException(status_code=404, detail="Application not found")
-    return _safe_application(app)
+    with Session(engine) as session:
+        app = get_application(application_id, session=session)
+        if not app:
+            raise HTTPException(status_code=404, detail="Application not found")
+        if app.get("citizenId") != user.get("citizenId"):
+            raise HTTPException(status_code=404, detail="Application not found")
+        return _safe_application(_application_with_database_dependencies(app, session))
 
 
 @router.post("/orchestrate-dependency")
