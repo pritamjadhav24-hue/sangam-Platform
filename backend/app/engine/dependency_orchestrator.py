@@ -25,6 +25,12 @@ def ensure_dependency(app: dict, requirement_code: str) -> dict:
     if existing:
         return existing
 
+    # Prevent a legacy dependency/application mutation from starting for an
+    # application already owned by PostgreSQL. The persistence fence remains
+    # the definitive check if authority changes after this advisory preflight.
+    from app.core.persistence import assert_legacy_application_writable
+    assert_legacy_application_writable(app["appId"])
+
     timestamp = _now()
     dependency_id = f"DEP-{app['appId']}-{next(_dependency_counter):03d}"
     provider_selection = select_dependency_provider(requirement_code, integration_health())

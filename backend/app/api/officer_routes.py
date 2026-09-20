@@ -4,6 +4,7 @@ from typing import Optional
 from app.core.audit_bus import audit_bus
 from app.core.auth import require_roles
 from app.core.event_bus import event_bus
+from app.core.persistence import ApplicationAuthorityError
 from app.engine.workflow_engine import APPLICATIONS, CONFLICT_REVIEWS, conflict_review_action, entity_review_action, officer_action
 from app.engine import semantic_mapper
 
@@ -38,6 +39,7 @@ def action(body: Action, user: dict = Depends(require_roles("OFFICER"))):
                 app, review = conflict_review_action(body.reviewId, body.action, body.officerId, body.remarks, body.selectedSource)
             else:
                 app, review = entity_review_action(body.reviewId, body.action, body.officerId, body.remarks)
+        except ApplicationAuthorityError as error: raise HTTPException(409, "Application changed concurrently; please reload and retry.") from error
         except ValueError as error: raise HTTPException(400, str(error))
         if not app: raise HTTPException(404, "Entity review not found")
         event_bus.publish("OFFICER_ENTITY_REVIEW_ACTION" if body.reviewId not in CONFLICT_REVIEWS else "OFFICER_CONFLICT_REVIEW_ACTION", {"citizenId": app["citizenId"], "appId": app["appId"], "reviewId": body.reviewId, "consentId": app.get("consentId"), "officerId": body.officerId, "decision": body.action, "selectedSource": body.selectedSource})
@@ -47,6 +49,7 @@ def action(body: Action, user: dict = Depends(require_roles("OFFICER"))):
             audit_bus.append(body.officerId, "ENTITY_RESOLUTION", "Officer decided a cross-system entity match", review["source"], body.action, app.get("consentId"), payload={"appId": app["appId"], "reviewId": body.reviewId, "requirementCode": review["requirementCode"], "confidenceLevel": review["confidenceLevel"], "actorRole": user["role"]}, correlation_id=app["appId"])
         return app
     try: app = officer_action(body.appId, body.action, body.remarks)
+    except ApplicationAuthorityError as error: raise HTTPException(409, "Application changed concurrently; please reload and retry.") from error
     except ValueError as error: raise HTTPException(400, str(error))
     if not app: raise HTTPException(404, "Application not found")
     event_bus.publish("OFFICER_ACTION", {"citizenId": app["citizenId"], "appId": body.appId, "consentId": app.get("consentId"), "officerId": body.officerId, "action": body.action})

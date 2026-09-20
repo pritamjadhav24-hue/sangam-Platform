@@ -275,6 +275,25 @@ class ApplicationConcurrencyError(RuntimeError):
     """Raised when an application write was based on a stale version."""
 
 
+class ApplicationAuthorityError(RuntimeError):
+    """Raised when a legacy writer targets a PostgreSQL-authoritative app."""
+
+
+def assert_legacy_application_writable(app_id: str) -> None:
+    """Advisory preflight for legacy callers; persist_transition is definitive."""
+    with Session(engine) as session:
+        try:
+            row = session.execute(
+                select(ApplicationRow).where(ApplicationRow.app_id == app_id).with_for_update()
+            ).scalar_one_or_none()
+            if row is not None and row.authoritative_at is not None:
+                raise ApplicationAuthorityError("Application changed concurrently; please reload and retry.")
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+
+
 def _application_timestamp(value: str | datetime | None, field_name: str) -> datetime | None:
     if value is None:
         return None
@@ -1154,15 +1173,23 @@ def persist_state() -> None:
 def persist_transition(app: dict, history_entry: dict) -> None:
     """Atomically store the current application snapshot and its new history row."""
     with Session(engine) as session:
-        row = session.get(ApplicationRow, app["appId"])
-        if row is None:
-            session.add(ApplicationRow(app_id=app["appId"], citizen_id=app["citizenId"], status=app["status"], payload=app))
-        else:
-            row.citizen_id = app["citizenId"]
-            row.status = app["status"]
-            row.payload = app
-        session.add(WorkflowHistoryRow(app_id=app["appId"], status=history_entry["status"], occurred_at=history_entry["at"], payload=history_entry))
-        session.commit()
+        try:
+            row = session.execute(
+                select(ApplicationRow).where(ApplicationRow.app_id == app["appId"]).with_for_update()
+            ).scalar_one_or_none()
+            if row is not None and row.authoritative_at is not None:
+                raise ApplicationAuthorityError("Application changed concurrently; please reload and retry.")
+            if row is None:
+                session.add(ApplicationRow(app_id=app["appId"], citizen_id=app["citizenId"], status=app["status"], payload=app))
+            else:
+                row.citizen_id = app["citizenId"]
+                row.status = app["status"]
+                row.payload = app
+            session.add(WorkflowHistoryRow(app_id=app["appId"], status=history_entry["status"], occurred_at=history_entry["at"], payload=history_entry))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
 
 
 def hydrate_state() -> None:

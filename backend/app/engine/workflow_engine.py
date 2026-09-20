@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+from copy import deepcopy
 from datetime import datetime, timezone
 
 from app.core.event_bus import event_bus
@@ -48,6 +49,8 @@ def transition_application(app: dict, status: str, actor: str = "SYSTEM", source
         return app
     if status not in VALID_TRANSITIONS.get(previous, set()):
         raise ValueError(f"Invalid application transition: {previous} -> {status}")
+    from app.core.persistence import assert_legacy_application_writable
+    assert_legacy_application_writable(app["appId"])
     timestamp = _now()
     history_entry = {"status": status, "at": timestamp, "actor": actor, "source": source}
     app["status"] = status
@@ -127,13 +130,22 @@ def entity_review_action(review_id: str, decision: str, officer_id: str, remarks
     requirement = next((item for item in app["requirements"] if item["code"] == review["requirementCode"]), None)
     if not requirement:
         return None, None
-    review.update({"status": "APPROVED" if decision == "MATCH" else "REJECTED", "decision": decision, "officerId": officer_id, "remarks": remarks, "updatedAt": _now()})
-    requirement.setdefault("resolution", {}).update({"status": "MATCH" if decision == "MATCH" else "MISMATCH", "decision": "HUMAN_ACCEPTED" if decision == "MATCH" else "HUMAN_REJECTED", "reviewId": review_id})
-    requirement["status"] = "FOUND" if decision == "MATCH" else "UNRESOLVED"
-    if decision == "REJECT":
-        transition_application(app, "VERIFICATION_FAILED")
-    elif not any(item["status"] == "WAITING_FOR_OFFICER" for item in app.get("entityReviews", [])) and not any(item["status"] in {"REVIEW_REQUIRED", "UNRESOLVED"} for item in app["requirements"]):
-        transition_application(app, "IN_PROGRESS")
+    from app.core.persistence import ApplicationAuthorityError, assert_legacy_application_writable
+    assert_legacy_application_writable(app["appId"])
+    review_before = deepcopy(review)
+    requirement_before = deepcopy(requirement)
+    try:
+        review.update({"status": "APPROVED" if decision == "MATCH" else "REJECTED", "decision": decision, "officerId": officer_id, "remarks": remarks, "updatedAt": _now()})
+        requirement.setdefault("resolution", {}).update({"status": "MATCH" if decision == "MATCH" else "MISMATCH", "decision": "HUMAN_ACCEPTED" if decision == "MATCH" else "HUMAN_REJECTED", "reviewId": review_id})
+        requirement["status"] = "FOUND" if decision == "MATCH" else "UNRESOLVED"
+        if decision == "REJECT":
+            transition_application(app, "VERIFICATION_FAILED")
+        elif not any(item["status"] == "WAITING_FOR_OFFICER" for item in app.get("entityReviews", [])) and not any(item["status"] in {"REVIEW_REQUIRED", "UNRESOLVED"} for item in app["requirements"]):
+            transition_application(app, "IN_PROGRESS")
+    except ApplicationAuthorityError:
+        review.clear(); review.update(review_before)
+        requirement.clear(); requirement.update(requirement_before)
+        raise
     event_bus.publish("ENTITY_MATCH_DECIDED", {"appId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "decision": decision, "officerId": officer_id})
     event_bus.publish("ENTITY_REVIEW_RESOLVED", {"appId": app["appId"], "correlationId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "decision": decision, "officerId": officer_id})
     return app, review
@@ -183,19 +195,31 @@ def conflict_review_action(review_id: str, decision: str, officer_id: str, remar
     requirement = next((item for item in app["requirements"] if item["code"] == review["requirementCode"]), None)
     if not requirement:
         return None, None
-    review.update({"status": "RESOLVED" if decision == "SELECT" else "REJECTED", "decision": decision, "selectedSource": selected_source, "selectedValue": selected.get("value") if selected else None, "officerId": officer_id, "remarks": remarks, "updatedAt": _now()})
+    from app.core.persistence import ApplicationAuthorityError, assert_legacy_application_writable
+    assert_legacy_application_writable(app["appId"])
+    review_before = deepcopy(review)
+    requirement_before = deepcopy(requirement)
     conflict = next((item for item in app.get("conflicts", []) if item.get("canonicalField") == review["canonicalField"]), None)
-    if conflict:
-        conflict.update({"status": review["status"], "resolvedAt": review["updatedAt"], "selectedSource": selected_source, "selectedValue": selected.get("value") if selected else None})
-    if decision == "SELECT":
-        requirement["status"] = "FOUND"
-        requirement.setdefault("canonical", {})[review["canonicalField"]] = selected["value"]
-        requirement["provenance"] = {"sourceSystem": selected["sourceSystem"], "sourceRecordId": selected.get("sourceRecordId"), "sourceField": selected.get("sourceField")}
-    else:
-        requirement["status"] = "UNRESOLVED"
-        transition_application(app, "VERIFICATION_FAILED")
-    if decision == "SELECT" and not any(item["status"] == "WAITING_FOR_OFFICER" for item in app.get("conflictReviews", []) + app.get("entityReviews", [])) and not any(item["status"] in {"REVIEW_REQUIRED", "UNRESOLVED", "CONFLICT_DETECTED"} for item in app["requirements"]):
-        transition_application(app, "IN_PROGRESS")
+    conflict_before = deepcopy(conflict) if conflict is not None else None
+    try:
+        review.update({"status": "RESOLVED" if decision == "SELECT" else "REJECTED", "decision": decision, "selectedSource": selected_source, "selectedValue": selected.get("value") if selected else None, "officerId": officer_id, "remarks": remarks, "updatedAt": _now()})
+        if conflict:
+            conflict.update({"status": review["status"], "resolvedAt": review["updatedAt"], "selectedSource": selected_source, "selectedValue": selected.get("value") if selected else None})
+        if decision == "SELECT":
+            requirement["status"] = "FOUND"
+            requirement.setdefault("canonical", {})[review["canonicalField"]] = selected["value"]
+            requirement["provenance"] = {"sourceSystem": selected["sourceSystem"], "sourceRecordId": selected.get("sourceRecordId"), "sourceField": selected.get("sourceField")}
+        else:
+            requirement["status"] = "UNRESOLVED"
+            transition_application(app, "VERIFICATION_FAILED")
+        if decision == "SELECT" and not any(item["status"] == "WAITING_FOR_OFFICER" for item in app.get("conflictReviews", []) + app.get("entityReviews", [])) and not any(item["status"] in {"REVIEW_REQUIRED", "UNRESOLVED", "CONFLICT_DETECTED"} for item in app["requirements"]):
+            transition_application(app, "IN_PROGRESS")
+    except ApplicationAuthorityError:
+        review.clear(); review.update(review_before)
+        requirement.clear(); requirement.update(requirement_before)
+        if conflict is not None:
+            conflict.clear(); conflict.update(conflict_before)
+        raise
     event_bus.publish("CONFLICT_RESOLVED", {"citizenId": app["citizenId"], "appId": app["appId"], "conflictId": review_id, "canonicalField": review["canonicalField"], "decision": decision, "selectedSource": selected_source, "officerId": officer_id})
     return app, review
 
@@ -252,20 +276,31 @@ def officer_action(app_id: str, action: str, remarks: str):
         return app
     if app["status"] in {"COMPLETED", "REJECTED", "CANCELLED"}:
         raise ValueError(f"Application is already {app['status']} and cannot accept {action}.")
+    from app.core.persistence import ApplicationAuthorityError, assert_legacy_application_writable
+    assert_legacy_application_writable(app_id)
+    previous_remarks = app.get("officerRemarks")
+    had_previous_remarks = "officerRemarks" in app
     app["officerRemarks"] = remarks
-    if action == "APPROVE":
-        if any(review["status"] == "WAITING_FOR_OFFICER" for review in app.get("entityReviews", []) + app.get("conflictReviews", [])):
-            raise ValueError("All entity and conflict reviews must be decided before application approval.")
-        if any(requirement["status"] in {"REVIEW_REQUIRED", "UNRESOLVED", "CONFLICT_DETECTED"} for requirement in app["requirements"]):
-            raise ValueError("Application contains unresolved verification conflicts.")
-        transition_application(app, "APPROVED")
-        transition_application(app, "COMPLETED")
-        event_bus.publish("APPLICATION_COMPLETED", {"citizenId": app["citizenId"], "appId": app["appId"], "status": app["status"]})
-    elif action == "REJECT":
-        transition_application(app, "REJECTED")
-        event_bus.publish("APPLICATION_REJECTED", {"citizenId": app["citizenId"], "appId": app["appId"], "status": app["status"]})
-    else:
-        transition_application(app, "WAITING_FOR_USER")
+    try:
+        if action == "APPROVE":
+            if any(review["status"] == "WAITING_FOR_OFFICER" for review in app.get("entityReviews", []) + app.get("conflictReviews", [])):
+                raise ValueError("All entity and conflict reviews must be decided before application approval.")
+            if any(requirement["status"] in {"REVIEW_REQUIRED", "UNRESOLVED", "CONFLICT_DETECTED"} for requirement in app["requirements"]):
+                raise ValueError("Application contains unresolved verification conflicts.")
+            transition_application(app, "APPROVED")
+            transition_application(app, "COMPLETED")
+            event_bus.publish("APPLICATION_COMPLETED", {"citizenId": app["citizenId"], "appId": app["appId"], "status": app["status"]})
+        elif action == "REJECT":
+            transition_application(app, "REJECTED")
+            event_bus.publish("APPLICATION_REJECTED", {"citizenId": app["citizenId"], "appId": app["appId"], "status": app["status"]})
+        else:
+            transition_application(app, "WAITING_FOR_USER")
+    except ApplicationAuthorityError:
+        if had_previous_remarks:
+            app["officerRemarks"] = previous_remarks
+        else:
+            app.pop("officerRemarks", None)
+        raise
     for item in app["timeline"]:
         if item["stage"] == "Officer Review": item["state"] = "COMPLETED" if action == "APPROVE" else "EXCEPTION"
         if item["stage"] == "Completed" and action == "APPROVE": item["state"], item["at"] = "COMPLETED", _now()

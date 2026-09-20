@@ -15,14 +15,14 @@ from app.core.audit_bus import audit_bus
 from app.core.demo_state import reset_demo_state
 from app.core.notification_manager import notification_manager
 from app.api.citizen_routes import get_citizen_application, list_citizen_applications
-from app.core.persistence import (ApplicationConcurrencyError, ApplicationRow, AuditEntryRow, ConsentRow,
+from app.core.persistence import (ApplicationAuthorityError, ApplicationConcurrencyError, ApplicationRow, AuditEntryRow, ConsentRow,
                                   ConflictReviewRow, CounterRow, DependencyRow, EntityReviewRow, EventRow,
                                   NotificationRow, WorkflowHistoryRow, allocate_application_id, create_application, engine,
                                   get_application, get_dependency, hydrate_state, initialize,
                                   list_applications_for_citizen, list_dependencies_for_application,
-                                  mark_application_write_authoritative, persist_state,
+                                  mark_application_write_authoritative, persist_state, persist_transition,
                                   transition_application_status, update_application_payload)
-from app.engine.dependency_orchestrator import initiate_domicile
+from app.engine.dependency_orchestrator import ensure_dependency, initiate_domicile
 from app.engine.workflow_engine import APPLICATIONS, DEPENDENCIES, officer_action, transition_application
 
 
@@ -241,6 +241,122 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
             self.assertEqual(row.status, "DRAFT")
             self.assertEqual(row.version, 1)
             self.assertEqual(session.query(WorkflowHistoryRow).filter_by(app_id=app_id).count(), 0)
+
+    def test_legacy_persist_transition_still_updates_legacy_application(self):
+        app_id = "APP-LEGACY-FENCE-001"
+        with Session(engine) as session:
+            session.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-FENCE", status="DRAFT", payload={"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "DRAFT"}))
+            session.commit()
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertIsNone(row.authoritative_at)
+            history = {"status": "IN_PROGRESS", "at": "2026-01-01T00:00:00+00:00", "source": "test"}
+        persist_transition({"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "IN_PROGRESS", "updatedAt": history["at"]}, history)
+        with Session(engine) as session:
+            self.assertEqual(session.get(ApplicationRow, app_id).status, "IN_PROGRESS")
+            self.assertEqual(session.query(WorkflowHistoryRow).filter_by(app_id=app_id).count(), 1)
+
+    def test_legacy_persist_transition_rejects_authoritative_application_without_mutation(self):
+        app_id = "APP-AUTHORITY-FENCE-001"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "DRAFT", "payloadValue": "authoritative"})
+        with Session(engine) as session:
+            before = session.get(ApplicationRow, app_id)
+            before_version = before.version
+            before_payload = dict(before.payload)
+            before_status = before.status
+            before_history = session.query(WorkflowHistoryRow).filter_by(app_id=app_id).count()
+        with self.assertRaises(ApplicationAuthorityError):
+            persist_transition({"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "IN_PROGRESS", "payloadValue": "stale"}, {"status": "IN_PROGRESS", "at": "2026-01-01T00:00:00+00:00"})
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertEqual(row.status, before_status)
+            self.assertEqual(row.version, before_version)
+            self.assertEqual(row.payload, before_payload)
+            self.assertEqual(session.query(WorkflowHistoryRow).filter_by(app_id=app_id).count(), before_history)
+
+    def test_stale_legacy_persist_transition_is_rejected_after_authoritative_repository_update(self):
+        app_id = "APP-AUTHORITY-FENCE-002"
+        create_application({"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "DRAFT", "payloadValue": "old"})
+        stale = {"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "DRAFT", "payloadValue": "old"}
+        update_application_payload(app_id, {"payloadValue": "fresh"})
+        with self.assertRaises(ApplicationAuthorityError):
+            persist_transition({**stale, "status": "IN_PROGRESS"}, {"status": "IN_PROGRESS", "at": "2026-01-01T00:00:00+00:00"})
+        self.assertEqual(get_application(app_id)["payloadValue"], "fresh")
+
+    def test_real_two_session_authority_race_blocks_then_rejects_legacy_writer(self):
+        app_id = "APP-AUTHORITY-FENCE-RACE-001"
+        with Session(engine) as setup:
+            setup.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-FENCE", status="DRAFT", payload={"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "DRAFT", "payloadValue": "old"}))
+            setup.commit()
+        first = Session(engine)
+        first.begin()
+        update_application_payload(app_id, {"payloadValue": "fresh"}, session=first)
+        errors = []
+        finished = threading.Event()
+
+        def legacy_writer():
+            try:
+                persist_transition({"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "IN_PROGRESS", "payloadValue": "stale"}, {"status": "IN_PROGRESS", "at": "2026-01-01T00:00:00+00:00"})
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=legacy_writer)
+        thread.start()
+        self.assertFalse(finished.wait(timeout=0.25))
+        first.commit()
+        first.close()
+        thread.join(timeout=5)
+        self.assertTrue(finished.is_set())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ApplicationAuthorityError)
+        self.assertEqual(get_application(app_id)["payloadValue"], "fresh")
+
+    def test_legacy_writer_first_then_authoritative_repository_write_remains_consistent(self):
+        app_id = "APP-AUTHORITY-FENCE-RACE-002"
+        with Session(engine) as session:
+            session.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-FENCE", status="DRAFT", payload={"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "DRAFT"}))
+            session.commit()
+        persist_transition({"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "IN_PROGRESS"}, {"status": "IN_PROGRESS", "at": "2026-01-01T00:00:00+00:00"})
+        update_application_payload(app_id, {"payloadValue": "authoritative"})
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertIsNotNone(row.authoritative_at)
+            self.assertEqual(row.status, "IN_PROGRESS")
+            self.assertEqual(row.payload["payloadValue"], "authoritative")
+
+    def test_transition_application_authority_rejection_leaves_local_state_unchanged(self):
+        app_id = "APP-AUTHORITY-FENCE-ROLLBACK-001"
+        authoritative = create_application({"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "DRAFT"})
+        local = {**authoritative, "statusHistory": [{"status": "DRAFT", "at": authoritative["createdAt"]}]}
+        APPLICATIONS[app_id] = local
+        with self.assertRaises(ApplicationAuthorityError):
+            transition_application(local, "IN_PROGRESS")
+        self.assertEqual(local["status"], "DRAFT")
+        self.assertEqual(local["statusHistory"], [{"status": "DRAFT", "at": authoritative["createdAt"]}])
+        self.assertEqual(local["updatedAt"], authoritative["updatedAt"])
+
+    def test_officer_authority_rejection_does_not_leave_officer_remarks(self):
+        app_id = "APP-AUTHORITY-FENCE-OFFICER-001"
+        authoritative = create_application({"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "WAITING_FOR_OFFICER"})
+        local = {**authoritative, "requirements": [], "entityReviews": [], "conflictReviews": [], "timeline": [], "officerRemarks": None}
+        APPLICATIONS[app_id] = local
+        with self.assertRaises(ApplicationAuthorityError):
+            officer_action(app_id, "REQUEST_INFO", "should not persist")
+        self.assertIsNone(local["officerRemarks"])
+        self.assertEqual(local["status"], "WAITING_FOR_OFFICER")
+
+    def test_dependency_creation_preflight_rejects_authoritative_application_before_local_mutation(self):
+        app_id = "APP-AUTHORITY-FENCE-DEPENDENCY-001"
+        authoritative = create_application({"appId": app_id, "citizenId": "CITIZEN-FENCE", "status": "IN_PROGRESS"})
+        local = {**authoritative, "dependencyIds": [], "dependencies": []}
+        APPLICATIONS[app_id] = local
+        with self.assertRaises(ApplicationAuthorityError):
+            ensure_dependency(local, "DOMICILE_PROOF")
+        self.assertEqual(local["dependencyIds"], [])
+        self.assertEqual(local["dependencies"], [])
+        self.assertFalse(any(dependency.get("appId") == app_id for dependency in DEPENDENCIES.values()))
 
     def test_application_repository_row_lock_serializes_mutations(self):
         app_id = "APP-REPOSITORY-LOCK-WRITE-001"
