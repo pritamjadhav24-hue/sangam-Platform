@@ -43,15 +43,17 @@ class AsyncProviderWorkerTests(unittest.TestCase):
 
     def test_provider_operation_is_durable_queued_claimed_and_completed(self):
         citizen_id = "CITIZEN_001"
-        create_consent(citizen_id, True)
+        receipt = create_consent(citizen_id, True)
         persist_state()
         result = discover(CITIZENS[citizen_id])
         app = create_application(citizen_id, result, evaluate(result["requirements"]))
+        app["consentId"] = receipt["consentId"]
         dependency = ensure_domicile_dependency(app)
         queued = initiate_domicile(citizen_id, app)
         self.assertTrue(queued["queued"])
         self.assertEqual(dependency["jobStatus"], "QUEUED")
         self.assertNotIn("citizenId", json.loads(self.memory.lists["sangam:jobs"][0])["payload"])
+        self.assertEqual(json.loads(self.memory.lists["sangam:jobs"][0])["payload"]["consentId"], receipt["consentId"])
         completed = run_once(JobQueue(self.redis), {})
         self.assertEqual(completed["status"], "COMPLETED")
         self.assertEqual(dependency["status"], "COMPLETED")

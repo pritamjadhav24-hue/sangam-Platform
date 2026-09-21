@@ -2,6 +2,7 @@ import unittest
 import importlib.util
 import asyncio
 import threading
+import uuid
 from types import SimpleNamespace
 from datetime import timezone
 from pathlib import Path
@@ -15,14 +16,17 @@ from app.core.audit_bus import audit_bus
 from app.core.demo_state import reset_demo_state
 from app.core.notification_manager import notification_manager
 from app.api.citizen_routes import get_citizen_application, list_citizen_applications
-from app.core.persistence import (ApplicationAuthorityError, ApplicationConcurrencyError, ApplicationRow, AuditEntryRow, ConsentRow,
+from app.core.persistence import (ApplicationAuthorityError, ApplicationConcurrencyError, ConsentConcurrencyError, ApplicationRow, AuditEntryRow, ConsentRow,
                                   ConflictReviewRow, CounterRow, DependencyRow, EntityReviewRow, EventRow,
                                   NotificationRow, WorkflowHistoryRow, allocate_application_id, create_application, engine,
                                   get_application, get_dependency, hydrate_state, initialize,
                                   list_applications_for_citizen, list_dependencies_for_application,
-                                  mark_application_write_authoritative, persist_state, persist_transition,
+                                  mark_application_write_authoritative, persist_consent, persist_state, persist_transition,
+                                  revoke_persisted_consent,
                                   mutate_application, transition_application_status, update_application_payload)
 from app.engine.dependency_orchestrator import ensure_dependency, initiate_domicile
+from app.engine import consent_manager
+from app.engine.consent_manager import create_consent
 from app.engine.workflow_engine import APPLICATIONS, DEPENDENCIES, officer_action, transition_application
 
 
@@ -65,6 +69,127 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
     def test_connection_and_required_schema(self):
         tables = set(inspect(engine).get_table_names())
         self.assertTrue({"applications", "dependencies", "consents", "workflow_history", "audit_entries", "notifications", "user_accounts"}.issubset(tables))
+
+    def test_consent_version_starts_at_one_and_direct_mutations_increment_once(self):
+        citizen_id = f"CITIZEN-CONSENT-VERSION-{uuid.uuid4().hex}"
+        receipt = create_consent(citizen_id, True)
+        consent_id = receipt["consentId"]
+        with Session(engine) as session:
+            self.assertEqual(session.get(ConsentRow, consent_id).version, 1)
+        receipt["allowed"] = ["Income status"]
+        persist_consent(receipt)
+        with Session(engine) as session:
+            self.assertEqual(session.get(ConsentRow, consent_id).version, 2)
+        revoke_persisted_consent(citizen_id, consent_id)
+        with Session(engine) as session:
+            self.assertEqual(session.get(ConsentRow, consent_id).version, 3)
+
+    def test_hydration_retains_source_versions_for_multiple_historical_rows(self):
+        citizen_id = f"CITIZEN-CONSENT-HISTORY-{uuid.uuid4().hex}"
+        first = f"CONSENT-HISTORY-A-{uuid.uuid4().hex}"
+        second = f"CONSENT-HISTORY-B-{uuid.uuid4().hex}"
+        with Session(engine) as session:
+            session.add(ConsentRow(consent_id=first, citizen_id=citizen_id, version=4, payload={"consentId": first, "citizenId": citizen_id}))
+            session.add(ConsentRow(consent_id=second, citizen_id=citizen_id, version=7, payload={"consentId": second, "citizenId": citizen_id}))
+            session.commit()
+        hydrate_state()
+        self.assertEqual(consent_manager.CONSENT_SOURCE_VERSIONS[first], 4)
+        self.assertEqual(consent_manager.CONSENT_SOURCE_VERSIONS[second], 7)
+        self.assertEqual(consent_manager.CONSENTS_BY_ID[first]["_source_version"], 4)
+        self.assertEqual(consent_manager.CONSENTS_BY_ID[second]["_source_version"], 7)
+        self.assertIsNone(consent_manager.current(citizen_id))
+
+    def test_snapshot_updates_matching_version_without_double_increment(self):
+        citizen_id = f"CITIZEN-CONSENT-SNAPSHOT-{uuid.uuid4().hex}"
+        receipt = create_consent(citizen_id, True)
+        consent_id = receipt["consentId"]
+        persist_state()
+        with Session(engine) as session:
+            self.assertEqual(session.get(ConsentRow, consent_id).version, 1)
+        receipt["marker"] = "snapshot"
+        persist_state()
+        with Session(engine) as session:
+            row = session.get(ConsentRow, consent_id)
+            self.assertEqual(row.version, 2)
+            self.assertEqual(row.payload["marker"], "snapshot")
+        persist_state()
+        with Session(engine) as session:
+            self.assertEqual(session.get(ConsentRow, consent_id).version, 2)
+
+    def test_stale_snapshot_is_rejected_without_overwriting_newer_database_row(self):
+        citizen_id = f"CITIZEN-CONSENT-STALE-{uuid.uuid4().hex}"
+        receipt = create_consent(citizen_id, True)
+        consent_id = receipt["consentId"]
+        stale = dict(receipt)
+        revoke_persisted_consent(citizen_id, consent_id)
+        consent_manager.CONSENTS[citizen_id] = stale
+        with self.assertRaises(ConsentConcurrencyError):
+            persist_state()
+        with Session(engine) as session:
+            row = session.get(ConsentRow, consent_id)
+            self.assertEqual(row.version, 2)
+            self.assertEqual(row.payload["decision"], "REVOKED")
+
+    def test_concurrent_mutation_wins_over_stale_snapshot(self):
+        citizen_id = f"CITIZEN-CONSENT-RACE-{uuid.uuid4().hex}"
+        receipt = create_consent(citizen_id, True)
+        consent_id = receipt["consentId"]
+        stale = dict(receipt)
+        first = Session(engine)
+        first.begin()
+        row = first.get(ConsentRow, consent_id, with_for_update=True)
+        row.payload = {**row.payload, "marker": "transaction-a"}
+        row.version = 2
+        finished = threading.Event()
+        errors = []
+
+        def snapshot():
+            consent_manager.CONSENTS[citizen_id] = stale
+            try:
+                persist_state()
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=snapshot)
+        thread.start()
+        self.assertFalse(finished.wait(timeout=0.25))
+        first.commit()
+        first.close()
+        thread.join(timeout=5)
+        self.assertTrue(finished.is_set())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ConsentConcurrencyError)
+        with Session(engine) as session:
+            row = session.get(ConsentRow, consent_id)
+            self.assertEqual(row.version, 2)
+            self.assertEqual(row.payload["marker"], "transaction-a")
+
+    def test_snapshot_rollback_does_not_advance_version_or_local_source(self):
+        citizen_id = f"CITIZEN-CONSENT-ROLLBACK-{uuid.uuid4().hex}"
+        receipt = create_consent(citizen_id, True)
+        consent_id = receipt["consentId"]
+        receipt["marker"] = "rollback-candidate"
+        with patch("app.core.persistence.Session.commit", side_effect=RuntimeError("forced snapshot failure")):
+            with self.assertRaises(RuntimeError):
+                persist_state()
+        with Session(engine) as session:
+            row = session.get(ConsentRow, consent_id)
+            self.assertEqual(row.version, 1)
+            self.assertNotIn("marker", row.payload)
+        self.assertEqual(receipt["_source_version"], 1)
+
+    def test_missing_local_consent_does_not_delete_database_row(self):
+        citizen_id = f"CITIZEN-CONSENT-MISSING-{uuid.uuid4().hex}"
+        consent_id = f"CONSENT-MISSING-{uuid.uuid4().hex}"
+        with Session(engine) as session:
+            session.add(ConsentRow(consent_id=consent_id, citizen_id=citizen_id, version=2, payload={"consentId": consent_id, "citizenId": citizen_id}))
+            session.commit()
+        consent_manager.CONSENTS.pop(citizen_id, None)
+        persist_state()
+        with Session(engine) as session:
+            self.assertIsNotNone(session.get(ConsentRow, consent_id))
 
     def test_application_repository_creation_and_database_id_allocation(self):
         with Session(engine) as session:

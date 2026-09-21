@@ -22,6 +22,8 @@ def reset_demo_state() -> None:
 
     dependency_orchestrator._dependency_counter = itertools.count(1)
     consent_manager.CONSENTS.clear()
+    consent_manager.CONSENTS_BY_ID.clear()
+    consent_manager.CONSENT_SOURCE_VERSIONS.clear()
     notification_manager.notifications.clear()
     notification_manager._processed_event_ids.clear()
     notification_manager._counter = itertools.count(1)

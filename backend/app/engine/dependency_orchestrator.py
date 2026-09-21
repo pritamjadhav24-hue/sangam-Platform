@@ -92,6 +92,7 @@ def ensure_missing_dependencies(app: dict) -> list[dict]:
 
 def initiate_dependency(citizen_id: str, app: dict, requirement_code: str, async_override: bool = False, authorized_adapter_result=None) -> dict:
     dependency = ensure_dependency(app, requirement_code)
+    operation_consent_id = app.get("consentId")
     service_id = dependency.get("providerService") or dependency.get("serviceId")
     if dependency["status"] == "COMPLETED":
         return {"success": True, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "dependencyStatus": dependency["status"], "applicationStatus": app["status"], "service": service_id, "message": "The required service result is already linked to the application.", "recordId": dependency["resultReference"], "attempts": dependency["attempts"]}
@@ -106,7 +107,8 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str, async
             "provider.dependency.retrieve", app["appId"], app["appId"], dependency["dependencyId"],
             {"serviceId": service_id, "requirementCode": requirement_code,
              "providerId": dependency.get("providerId"), "idempotencyKey": dependency["dependencyId"],
-             "requestedAttributes": app.get("consentAttributes", []), "maxAttempts": dependency["maxAttempts"]},
+             "requestedAttributes": app.get("consentAttributes", []), "consentId": operation_consent_id,
+             "maxAttempts": dependency["maxAttempts"]},
         )
         dependency.update({"jobId": job["jobId"], "jobStatus": "QUEUED", "updatedAt": _now()})
         event_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "correlationId": app["appId"], "jobId": job["jobId"], "service": service_id}
@@ -120,7 +122,7 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str, async
     if adapter_result is None and service_id:
         adapter_result = execute_with_persisted_authorization(
             citizen_id, CONSUMER, None, requested_attributes=app.get("consentAttributes", []), service_id=app.get("serviceId"),
-            application_id=app.get("appId"), consent_id=app.get("consentId"),
+            application_id=app.get("appId"), consent_id=operation_consent_id,
             operation=lambda: request_registered_service(service_id, citizen_id, requirement_code=requirement_code, correlation_id=app["appId"], idempotency_key=dependency["dependencyId"]),
         )
     record = adapter_result.record if adapter_result else None
@@ -190,7 +192,7 @@ def execute_provider_job(job: dict) -> dict:
     try:
         adapter_result = execute_with_persisted_authorization(
             app["citizenId"], CONSUMER, None, requested_attributes=payload.get("requestedAttributes", app.get("consentAttributes", [])), service_id=app.get("serviceId"),
-            application_id=app.get("appId"), consent_id=app.get("consentId"),
+            application_id=app.get("appId"), consent_id=payload.get("consentId") or app.get("consentId"),
             operation=lambda: request_registered_service(dependency.get("providerService"), app["citizenId"], requirement_code=requirement_code, correlation_id=app["appId"], idempotency_key=dependency["dependencyId"]),
         )
     except ConsentAuthorizationError as error:

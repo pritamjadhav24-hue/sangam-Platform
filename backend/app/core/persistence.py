@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0011_app_authority"
+MIGRATION_HEAD = "0012_consent_version"
 
 
 class Base(DeclarativeBase):
@@ -81,6 +81,7 @@ class ConsentRow(Base):
     consent_id: Mapped[str] = mapped_column(String(120), primary_key=True)
     citizen_id: Mapped[str] = mapped_column(String(120), index=True)
     app_id: Mapped[Optional[str]] = mapped_column(ForeignKey("applications.app_id", ondelete="SET NULL"), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
@@ -277,6 +278,10 @@ class ApplicationConcurrencyError(RuntimeError):
 
 class ApplicationAuthorityError(RuntimeError):
     """Raised when a legacy writer targets a PostgreSQL-authoritative app."""
+
+
+class ConsentConcurrencyError(RuntimeError):
+    """Raised when a consent snapshot is based on a stale PostgreSQL version."""
 
 
 def assert_legacy_application_writable(app_id: str) -> None:
@@ -755,12 +760,19 @@ def persist_consent(receipt: dict) -> dict:
         if app_id and session.get(ApplicationRow, app_id) is None:
             app_id = None
         if row is None:
-            session.add(ConsentRow(consent_id=receipt["consentId"], citizen_id=receipt["citizenId"], app_id=app_id, payload=receipt))
+            row = ConsentRow(consent_id=receipt["consentId"], citizen_id=receipt["citizenId"], app_id=app_id, version=1, payload={key: value for key, value in receipt.items() if key != "_source_version"})
+            session.add(row)
+            new_version = 1
         else:
             row.citizen_id = receipt["citizenId"]
             row.app_id = app_id
-            row.payload = receipt
+            row.payload = {key: value for key, value in receipt.items() if key != "_source_version"}
+            row.version += 1
+            new_version = row.version
         session.commit()
+    receipt["_source_version"] = new_version
+    from app.engine import consent_manager
+    consent_manager.CONSENT_SOURCE_VERSIONS[receipt["consentId"]] = new_version
     return receipt
 
 
@@ -775,8 +787,13 @@ def revoke_persisted_consent(citizen_id: str, consent_id: str) -> dict:
         receipt["decision"] = "REVOKED"
         receipt["allowed"] = []
         receipt["revokedAt"] = datetime.now(timezone.utc).isoformat()
-        row.payload = receipt
+        row.payload = {key: value for key, value in receipt.items() if key != "_source_version"}
+        row.version += 1
+        new_version = row.version
         session.commit()
+        receipt["_source_version"] = new_version
+        from app.engine import consent_manager
+        consent_manager.CONSENT_SOURCE_VERSIONS[consent_id] = new_version
         return receipt
 
 
@@ -1104,7 +1121,7 @@ def persist_state() -> None:
         delete_unprotected(DependencyRow, DependencyRow.app_id)
         delete_unprotected(EntityReviewRow, EntityReviewRow.app_id)
         delete_unprotected(ConflictReviewRow, ConflictReviewRow.app_id)
-        for model, column in ((ConsentRow, ConsentRow.app_id), (NotificationRow, NotificationRow.app_id)):
+        for model, column in ((NotificationRow, NotificationRow.app_id),):
             if not protected_app_ids:
                 session.execute(delete(model))
             else:
@@ -1131,11 +1148,38 @@ def persist_state() -> None:
             if dependency["appId"] in protected_app_ids:
                 continue
             session.add(DependencyRow(dependency_id=dep_id, app_id=dependency["appId"], status=dependency["status"], payload=dependency))
+        consent_version_updates = []
+        # Keep the legacy citizen-keyed view compatible with direct callers,
+        # while persisting every consent independently by consent ID.
         for citizen_id, receipt in consent_manager.CONSENTS.items():
+            consent_id = receipt.get("consentId") if isinstance(receipt, dict) else None
+            if consent_id:
+                consent_manager.CONSENTS_BY_ID[consent_id] = receipt
+        for consent_id, receipt in consent_manager.CONSENTS_BY_ID.items():
+            citizen_id = receipt["citizenId"]
             app = next((candidate for candidate in workflow_engine.APPLICATIONS.values() if candidate.get("consentId") == receipt.get("consentId")), None) or workflow_engine.find_active_application(citizen_id)
             if app and app["appId"] in protected_app_ids:
                 continue
-            session.add(ConsentRow(consent_id=receipt["consentId"], citizen_id=citizen_id, app_id=app["appId"] if app else None, payload=receipt))
+            source_version = receipt.get("_source_version")
+            if not isinstance(source_version, int) or isinstance(source_version, bool):
+                continue
+            row = session.execute(
+                select(ConsentRow).where(ConsentRow.consent_id == receipt["consentId"]).with_for_update()
+            ).scalar_one_or_none()
+            if row is None:
+                continue
+            payload = {key: value for key, value in receipt.items() if key != "_source_version"}
+            expected_app_id = app["appId"] if app else None
+            if row.payload == payload and row.citizen_id == citizen_id and row.app_id == expected_app_id:
+                consent_version_updates.append((receipt, row.version))
+                continue
+            if row.version != source_version:
+                raise ConsentConcurrencyError(f"Consent {receipt['consentId']} has version {row.version}, expected {source_version}")
+            row.citizen_id = citizen_id
+            row.app_id = expected_app_id
+            row.payload = payload
+            row.version = source_version + 1
+            consent_version_updates.append((receipt, row.version))
         for review_id, review in workflow_engine.ENTITY_REVIEWS.items():
             if review["appId"] in protected_app_ids:
                 continue
@@ -1188,6 +1232,9 @@ def persist_state() -> None:
                 else:
                     counter.next_value = value
         session.commit()
+        for receipt, version in consent_version_updates:
+            receipt["_source_version"] = version
+            consent_manager.CONSENT_SOURCE_VERSIONS[receipt["consentId"]] = version
 
 
 def persist_transition(app: dict, history_entry: dict) -> None:
@@ -1225,7 +1272,23 @@ def hydrate_state() -> None:
         workflow_engine.APPLICATIONS.clear(); workflow_engine.DEPENDENCIES.clear(); workflow_engine.ENTITY_REVIEWS.clear(); workflow_engine.CONFLICT_REVIEWS.clear(); consent_manager.CONSENTS.clear(); notification_manager.notifications.clear(); notification_manager._processed_event_ids.clear(); event_bus.reset(); audit_bus.reset(); SESSIONS.clear(); adapters._availability.clear(); adapters._last_health.clear(); adapters._runtime_health.clear()
         for row in applications: workflow_engine.APPLICATIONS[row.app_id] = row.payload
         for row in session.query(DependencyRow).all(): workflow_engine.DEPENDENCIES[row.dependency_id] = row.payload
-        for row in session.query(ConsentRow).all(): consent_manager.CONSENTS[row.citizen_id] = row.payload
+        consent_manager.CONSENTS_BY_ID.clear()
+        consent_manager.CONSENT_SOURCE_VERSIONS.clear()
+        for row in session.query(ConsentRow).order_by(ConsentRow.consent_id).all():
+            consent_manager.CONSENT_SOURCE_VERSIONS[row.consent_id] = row.version
+            receipt = dict(row.payload or {})
+            receipt["_source_version"] = row.version
+            consent_manager.CONSENTS_BY_ID[row.consent_id] = receipt
+        by_citizen = {}
+        for receipt in consent_manager.CONSENTS_BY_ID.values():
+            citizen_id = receipt.get("citizenId")
+            if citizen_id in by_citizen:
+                by_citizen[citizen_id] = None
+            elif citizen_id:
+                by_citizen[citizen_id] = receipt
+        for citizen_id, receipt in by_citizen.items():
+            if receipt is not None:
+                consent_manager.CONSENTS[citizen_id] = receipt
         for row in session.query(EntityReviewRow).all(): workflow_engine.ENTITY_REVIEWS[row.review_id] = row.payload
         for row in session.query(ConflictReviewRow).all(): workflow_engine.CONFLICT_REVIEWS[row.review_id] = row.payload
         for app in workflow_engine.APPLICATIONS.values():

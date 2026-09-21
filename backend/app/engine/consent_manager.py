@@ -5,6 +5,12 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 CONSENTS: dict[str, dict] = {}
+# Legacy citizen-keyed compatibility view.  The authoritative local
+# representation is keyed by consent ID so historical rows remain distinct.
+CONSENTS_BY_ID: dict[str, dict] = {}
+# Internal PostgreSQL source versions for every hydrated consent ID.  The
+# citizen-keyed CONSENTS cache remains the legacy public/runtime shape.
+CONSENT_SOURCE_VERSIONS: dict[str, int] = {}
 PERMITTED = ["Income status", "Caste category", "Qualifying academic marks"]
 EXCLUDED = ["Land records", "Individual bank transactions", "Biometrics"]
 CONSUMER = "Higher Education Department"
@@ -15,6 +21,20 @@ class ConsentAuthorizationError(ValueError):
     pass
 
 
+def _select_persisted_consent_row(session, citizen_id: str, consumer: str | None = None,
+                                  purpose: str | None = None, service_id: str | None = None,
+                                  application_id: str | None = None, consent_id: str | None = None,
+                                  for_update: bool = False):
+    from app.core.persistence import ConsentRow
+
+    if not consent_id:
+        return None
+    query = session.query(ConsentRow).filter(ConsentRow.citizen_id == citizen_id)
+    if consent_id:
+        query = query.filter(ConsentRow.consent_id == consent_id)
+        return (query.with_for_update() if for_update else query).first()
+
+
 def create_consent(citizen_id: str, allow: bool, attributes: list[str] | None = None, service_id: str | None = None, application_id: str | None = None, purpose: str | None = None) -> dict:
     receipt_id = f"CR-{secrets.token_hex(3).upper()}"
     allowed = attributes or PERMITTED
@@ -23,13 +43,18 @@ def create_consent(citizen_id: str, allow: bool, attributes: list[str] | None = 
         raise ValueError(f"Unsupported consent attributes: {', '.join(unknown)}")
     receipt = {"consentId": receipt_id, "citizenId": citizen_id, "serviceId": service_id, "applicationId": application_id, "consumer": CONSUMER, "purpose": purpose or PURPOSE, "allowed": allowed if allow else [], "excluded": EXCLUDED, "decision": "ALLOW" if allow else "DENY", "createdAt": datetime.now(timezone.utc).isoformat(), "expiresAt": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()}
     receipt["signature"] = hashlib.sha256(f"{receipt_id}{citizen_id}{receipt['expiresAt']}".encode()).hexdigest()
+    CONSENTS_BY_ID[receipt_id] = receipt
     CONSENTS[citizen_id] = receipt
     from app.core.persistence import persist_consent
     persist_consent(receipt)
     return receipt
 
 
-def current(citizen_id: str): return CONSENTS.get(citizen_id)
+def current(citizen_id: str):
+    candidates = [receipt for receipt in CONSENTS_BY_ID.values() if receipt.get("citizenId") == citizen_id]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
 
 
 def authorize_access(citizen_id: str, consumer: str, purpose: str, requested_attributes: list[str] | None = None, service_id: str | None = None, application_id: str | None = None) -> dict:
@@ -73,10 +98,7 @@ def authorize_persisted_access(citizen_id: str, consumer: str, purpose: str | No
         from sqlalchemy.orm import Session
         from app.core.persistence import ConsentRow, engine
         with Session(engine) as session:
-            query = session.query(ConsentRow).filter(ConsentRow.citizen_id == citizen_id)
-            if consent_id:
-                query = query.filter(ConsentRow.consent_id == consent_id)
-            row = query.order_by(ConsentRow.consent_id.desc()).first()
+            row = _select_persisted_consent_row(session, citizen_id, consumer, purpose, service_id, application_id, consent_id)
             receipt = row.payload if row else None
     except Exception as error:
         raise ConsentAuthorizationError("Persisted consent could not be validated.") from error
@@ -111,6 +133,7 @@ def revoke_consent(citizen_id: str, consent_id: str) -> dict:
         receipt = revoke_persisted_consent(citizen_id, consent_id)
     except KeyError as error:
         raise ConsentAuthorizationError("Consent is not persisted and cannot be revoked safely.") from error
+    CONSENTS_BY_ID[consent_id] = receipt
     CONSENTS[citizen_id] = receipt
     return receipt
 
@@ -126,10 +149,7 @@ def execute_with_persisted_authorization(citizen_id: str, consumer: str, purpose
     from app.core.persistence import ConsentRow, engine
     try:
         with Session(engine) as session:
-            query = session.query(ConsentRow).filter(ConsentRow.citizen_id == citizen_id)
-            if consent_id:
-                query = query.filter(ConsentRow.consent_id == consent_id)
-            row = query.order_by(ConsentRow.consent_id.desc()).with_for_update().first()
+            row = _select_persisted_consent_row(session, citizen_id, consumer, purpose, service_id, application_id, consent_id, for_update=True)
             receipt = row.payload if row else None
             if not receipt:
                 raise ConsentAuthorizationError("Persisted consent is missing.")

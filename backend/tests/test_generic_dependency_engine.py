@@ -38,7 +38,8 @@ class GenericDependencyEngineTests(unittest.TestCase):
 
         domicile_app = self._app("GENERIC-DOMICILE", "DOMICILE_PROOF")
         academic_app = self._app("GENERIC-ACADEMIC", "ACADEMIC_RECORD")
-        create_consent("CITIZEN_001", True)
+        receipt = create_consent("CITIZEN_001", True)
+        academic_app["consentId"] = receipt["consentId"]
         self.assertEqual(ensure_dependency(domicile_app, "DOMICILE_PROOF")["providerService"], "REV-MAHA-101")
         self.assertEqual(ensure_dependency(academic_app, "ACADEMIC_RECORD")["providerService"], "EDU-ACA-201")
         self.assertTrue(initiate_dependency("CITIZEN_001", academic_app, "ACADEMIC_RECORD")["success"])
