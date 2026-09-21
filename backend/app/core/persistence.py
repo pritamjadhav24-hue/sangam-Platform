@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0012_consent_version"
+MIGRATION_HEAD = "0013_citizens_req_schema"
 
 
 class Base(DeclarativeBase):
@@ -261,6 +261,64 @@ class SchemeRequirementRow(Base):
     requirement_code: Mapped[str] = mapped_column(String(120), index=True)
     label: Mapped[str] = mapped_column(String(200))
     mandatory: Mapped[bool] = mapped_column(Boolean, default=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class CitizenRow(Base):
+    """Platform-level citizen/identity master record.
+
+    This is SANGAM's own minimal identity index (name, DOB, phone, district) used
+    to seed a consistent synthetic citizen across independently simulated
+    department sandboxes. It is not a copy of any department's records.
+    """
+    __tablename__ = "citizens"
+    citizen_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(200))
+    date_of_birth: Mapped[str] = mapped_column(String(20))
+    gender: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)
+    district: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    persona: Mapped[Optional[str]] = mapped_column(String(60), nullable=True, index=True)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class RequirementCatalogRow(Base):
+    """Canonical requirement catalog. requirement_code values used by
+    ServiceCatalogRow/SchemeRequirementRow reference this table by convention.
+    """
+    __tablename__ = "requirements"
+    requirement_code: Mapped[str] = mapped_column(String(120), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    data_type: Mapped[str] = mapped_column(String(40), default="DOCUMENT")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class SchemaMappingRow(Base):
+    """Department field -> SANGAM canonical field mapping for one provider/service.
+
+    Department systems are never forced onto SANGAM's schema; this row records
+    how a specific provider's field names translate to canonical requirement
+    attributes so adapters can normalize responses.
+    """
+    __tablename__ = "schema_mappings"
+    mapping_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(ForeignKey("providers.provider_id", ondelete="CASCADE"), index=True)
+    service_id: Mapped[Optional[str]] = mapped_column(ForeignKey("service_catalog.service_id", ondelete="CASCADE"), nullable=True, index=True)
+    department_field: Mapped[str] = mapped_column(String(200))
+    canonical_field: Mapped[str] = mapped_column(String(200), index=True)
+    data_type: Mapped[str] = mapped_column(String(40), default="string")
+    transform: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
@@ -827,8 +885,10 @@ def validate_production_configuration() -> None:
     mode = os.getenv("SANGAM_ENV", "development").strip().lower()
     if mode not in {"production", "prod"}:
         return
-    if os.getenv("SANGAM_SEED_CATALOG", "false").lower() in {"1", "true", "yes"} or os.getenv("SANGAM_SEED_DEMO_USERS", "false").lower() in {"1", "true", "yes"}:
-        raise RuntimeError("Demo catalog/user seeding must be disabled in production.")
+    if (os.getenv("SANGAM_SEED_CATALOG", "false").lower() in {"1", "true", "yes"}
+            or os.getenv("SANGAM_SEED_DEMO_USERS", "false").lower() in {"1", "true", "yes"}
+            or os.getenv("SANGAM_SEED_SYNTHETIC_DATA", "false").lower() in {"1", "true", "yes"}):
+        raise RuntimeError("Demo catalog/user seeding (including synthetic data) must be disabled in production.")
     origins = [item.strip().lower() for item in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if item.strip()]
     if not origins or "*" in origins or any("localhost" in item or "127.0.0.1" in item for item in origins):
         raise RuntimeError("Production requires explicit non-local CORS_ALLOWED_ORIGINS.")
@@ -1200,6 +1260,129 @@ def seed_catalog() -> None:
         session.commit()
     from app.core.redis_service import RedisService
     RedisService().delete("sangam:cache:catalog:v1")
+
+
+REQUIREMENT_CATALOG = [
+    {"code": "IDENTITY", "name": "Identity", "category": "IDENTITY", "dataType": "ATTRIBUTE", "description": "Citizen identity as held by the federated identity source."},
+    {"code": "INCOME_PROOF", "name": "Income proof", "category": "REVENUE", "dataType": "CERTIFICATE", "description": "Annual family income as certified by the Revenue Department."},
+    {"code": "DOMICILE_PROOF", "name": "Maharashtra domicile", "category": "REVENUE", "dataType": "CERTIFICATE", "description": "Domicile/residency certificate issued by the Revenue Department."},
+    {"code": "LAND_HOLDING", "name": "Land holding record", "category": "REVENUE", "dataType": "RECORD", "description": "7/12 extract style land holding record."},
+    {"code": "CASTE_PROOF", "name": "Caste proof", "category": "SOCIAL_WELFARE", "dataType": "CERTIFICATE", "description": "Caste certificate as verified by the Social Welfare Department."},
+    {"code": "BANK_DETAILS", "name": "DBT bank status", "category": "SOCIAL_WELFARE", "dataType": "RECORD", "description": "Direct benefit transfer bank-linkage status."},
+    {"code": "SCHEME_ENROLLMENT_STATUS", "name": "Welfare scheme enrollment", "category": "SOCIAL_WELFARE", "dataType": "RECORD", "description": "Enrollment status in a Social Welfare Department scheme."},
+    {"code": "ACADEMIC_RECORD", "name": "Academic record", "category": "EDUCATION", "dataType": "RECORD", "description": "Academic/enrollment record from the Education Department."},
+    {"code": "SCHOLARSHIP_ELIGIBILITY", "name": "Scholarship eligibility", "category": "EDUCATION", "dataType": "RECORD", "description": "Scholarship eligibility assessment from the Education Department."},
+    {"code": "FARMER_REGISTRATION", "name": "Farmer registration", "category": "AGRICULTURE", "dataType": "RECORD", "description": "Registered farmer identity with the Agriculture Department."},
+    {"code": "CROP_LOAN_STATUS", "name": "Crop loan status", "category": "AGRICULTURE", "dataType": "RECORD", "description": "Outstanding/settled crop loan status."},
+    {"code": "VEHICLE_REGISTRATION", "name": "Vehicle registration", "category": "TRANSPORT", "dataType": "RECORD", "description": "RTO vehicle registration record."},
+    {"code": "DRIVING_LICENCE", "name": "Driving licence", "category": "TRANSPORT", "dataType": "CERTIFICATE", "description": "Driving licence issued by the RTO."},
+    {"code": "WORKER_REGISTRATION", "name": "Worker registration", "category": "LABOUR", "dataType": "RECORD", "description": "Registered construction/unorganized worker record."},
+    {"code": "WELFARE_BOARD_MEMBERSHIP", "name": "Welfare board membership", "category": "LABOUR", "dataType": "RECORD", "description": "Labour welfare board membership status."},
+    {"code": "RATION_CARD", "name": "Ration card", "category": "FOOD_CIVIL_SUPPLIES", "dataType": "CERTIFICATE", "description": "Public distribution system ration card."},
+    {"code": "HOUSING_ALLOTMENT", "name": "Housing allotment", "category": "HOUSING", "dataType": "RECORD", "description": "Public housing scheme allotment/waitlist status."},
+    {"code": "SKILL_CERTIFICATION", "name": "Skill certification", "category": "SKILL_EMPLOYMENT", "dataType": "CERTIFICATE", "description": "Skill development certification record."},
+    {"code": "EMPLOYMENT_REGISTRATION", "name": "Employment exchange registration", "category": "SKILL_EMPLOYMENT", "dataType": "RECORD", "description": "Jobseeker registration with the employment exchange."},
+    {"code": "BIRTH_CERTIFICATE", "name": "Birth certificate", "category": "MUNICIPAL_HEALTH", "dataType": "CERTIFICATE", "description": "Municipal birth registration certificate."},
+    {"code": "IMMUNIZATION_RECORD", "name": "Immunization record", "category": "MUNICIPAL_HEALTH", "dataType": "RECORD", "description": "Public health immunization record."},
+]
+
+
+def requirement_catalog_seeded() -> bool:
+    with Session(engine) as session:
+        return session.query(RequirementCatalogRow).count() > 0
+
+
+def seed_requirement_catalog() -> None:
+    """Bootstrap the canonical requirement vocabulary once; DB-owned afterwards.
+
+    This is reference/vocabulary data only. It does not create providers,
+    services, or capabilities for the department sandboxes -- wiring a
+    department sandbox into SANGAM's dynamic provider/capability model is
+    deliberately out of scope for the database foundation phase.
+    """
+    if os.getenv("SANGAM_SEED_CATALOG", "false").lower() not in {"1", "true", "yes"}:
+        return
+    with Session(engine) as session:
+        for requirement in REQUIREMENT_CATALOG:
+            if session.get(RequirementCatalogRow, requirement["code"]) is not None:
+                continue
+            session.add(RequirementCatalogRow(
+                requirement_code=requirement["code"],
+                name=requirement["name"],
+                description=requirement.get("description"),
+                category=requirement.get("category"),
+                data_type=requirement.get("dataType", "DOCUMENT"),
+                payload=requirement,
+            ))
+        session.commit()
+
+
+def seed_schema_mappings() -> None:
+    """Bootstrap department-field -> canonical-field mappings for existing providers.
+
+    Scoped to providers already registered in the SANGAM catalog (seeded by
+    ``seed_catalog``); simulated department sandboxes are not yet registered as
+    providers, so they have no mappings until a future integration phase.
+    """
+    if os.getenv("SANGAM_SEED_CATALOG", "false").lower() not in {"1", "true", "yes"}:
+        return
+    mappings = [
+        {"provider": "REVENUE-DEPARTMENT", "service": "REV-INCOME-102", "field": "annual_income", "canonical": "annualIncome", "type": "number"},
+        {"provider": "REVENUE-DEPARTMENT", "service": "REV-MAHA-101", "field": "state", "canonical": "domicileState", "type": "string"},
+        {"provider": "REVENUE-DEPARTMENT", "service": "REV-MAHA-101", "field": "recordId", "canonical": "certificateReference", "type": "string"},
+        {"provider": "SOCIAL-WELFARE-DEPARTMENT", "service": "SW-CASTE-301", "field": "caste", "canonical": "casteCategory", "type": "string"},
+        {"provider": "EDUCATION-DEPARTMENT", "service": "EDU-ACA-201", "field": "studentId", "canonical": "academicRecordReference", "type": "string"},
+        {"provider": "AUTHORIZED-DBT", "service": "DBT-BANK-401", "field": "accountStatus", "canonical": "bankLinkageStatus", "type": "string"},
+    ]
+    with Session(engine) as session:
+        for mapping in mappings:
+            provider_id = mapping["provider"]
+            if session.get(ProviderRow, provider_id) is None:
+                continue
+            mapping_id = f"{provider_id}:{mapping['field']}"
+            if session.get(SchemaMappingRow, mapping_id) is not None:
+                continue
+            session.add(SchemaMappingRow(
+                mapping_id=mapping_id,
+                provider_id=provider_id,
+                service_id=mapping["service"] if session.get(ServiceCatalogRow, mapping["service"]) is not None else None,
+                department_field=mapping["field"],
+                canonical_field=mapping["canonical"],
+                data_type=mapping.get("type", "string"),
+                payload=mapping,
+            ))
+        session.commit()
+
+
+def citizens_seeded() -> bool:
+    with Session(engine) as session:
+        return session.query(CitizenRow).count() > 0
+
+
+def seed_platform_citizens() -> None:
+    """Bootstrap the synthetic platform citizen pool used across department sandboxes."""
+    if os.getenv("SANGAM_SEED_SYNTHETIC_DATA", "false").lower() not in {"1", "true", "yes"}:
+        return
+    with Session(engine) as session:
+        if session.query(CitizenRow).count() > 0:
+            return
+        from app.seeds.synthetic_identity_pool import generate_citizen_pool
+        now = datetime.now(timezone.utc)
+        for citizen in generate_citizen_pool():
+            session.add(CitizenRow(
+                citizen_id=citizen["citizenId"],
+                full_name=citizen["name"],
+                date_of_birth=citizen["dob"],
+                gender=citizen.get("gender"),
+                phone=citizen.get("phone"),
+                district=citizen.get("district"),
+                persona=citizen.get("persona"),
+                is_synthetic=True,
+                created_at=now,
+                updated_at=now,
+                payload=citizen,
+            ))
+        session.commit()
 
 
 def catalog_snapshot() -> dict:

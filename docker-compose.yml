@@ -42,6 +42,10 @@ services:
       REDIS_ENABLED: ${REDIS_ENABLED:-true}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       ASYNC_PROVIDER_JOBS: ${ASYNC_PROVIDER_JOBS:-true}
+      SANGAM_SEED_SYNTHETIC_DATA: ${SANGAM_SEED_SYNTHETIC_DATA:-false}
+      SANDBOX_DATA_DIR: /app/data/sandboxes
+    volumes:
+      - sangam-sandbox-data:/app/data/sandboxes
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,6 +101,7 @@ services:
 
 volumes:
   sangam-postgres-data:
+  sangam-sandbox-data:
 
 networks:
   sangam-network:
