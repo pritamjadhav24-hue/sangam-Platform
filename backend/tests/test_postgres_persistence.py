@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.audit_bus import audit_bus
 from app.core.demo_state import reset_demo_state
+from app.core.event_bus import event_bus
 from app.core.notification_manager import notification_manager
 from app.api.citizen_routes import get_citizen_application, list_citizen_applications
 from app.core.persistence import (ApplicationAuthorityError, ApplicationConcurrencyError, ConsentConcurrencyError, ApplicationRow, AuditEntryRow, ConsentRow,
@@ -23,11 +24,12 @@ from app.core.persistence import (ApplicationAuthorityError, ApplicationConcurre
                                   list_applications_for_citizen, list_dependencies_for_application,
                                   mark_application_write_authoritative, persist_consent, persist_state, persist_transition,
                                   revoke_persisted_consent,
-                                  mutate_application, transition_application_status, update_application_payload)
+                                  mutate_application, mutate_workflow_aggregate, refresh_workflow_aggregate,
+                                  transition_application_status, update_application_payload)
 from app.engine.dependency_orchestrator import ensure_dependency, initiate_domicile
 from app.engine import consent_manager
 from app.engine.consent_manager import create_consent
-from app.engine.workflow_engine import APPLICATIONS, DEPENDENCIES, officer_action, transition_application
+from app.engine.workflow_engine import APPLICATIONS, DEPENDENCIES, ENTITY_REVIEWS, entity_review_action, officer_action, transition_application
 
 
 MIGRATION_0010_PATH = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0010_workflow_concurrency_metadata.py"
@@ -896,6 +898,228 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
                 get_application("APP-DB-FAILURE")
             with self.assertRaises(RuntimeError):
                 get_dependency("DEP-DB-FAILURE")
+
+    def test_workflow_boundary_requires_caller_transaction_and_does_not_commit(self):
+        app_id = "APP-WORKFLOW-BOUNDARY-TRANSACTION"
+        with Session(engine) as setup:
+            setup.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-BOUNDARY", status="DRAFT", version=1,
+                                     payload={"appId": app_id, "citizenId": "CITIZEN-BOUNDARY", "status": "DRAFT"}))
+            setup.commit()
+        with Session(engine) as session:
+            with self.assertRaises(RuntimeError):
+                mutate_workflow_aggregate(app_id, expected_version=1, session=session, status="IN_PROGRESS")
+            session.begin()
+            result = mutate_workflow_aggregate(app_id, expected_version=1, session=session, status="IN_PROGRESS")
+            self.assertTrue(session.in_transaction())
+            session.rollback()
+        self.assertEqual(get_application(app_id)["status"], "DRAFT")
+
+    def test_workflow_boundary_updates_application_once_with_history_and_refresh(self):
+        app_id = "APP-WORKFLOW-BOUNDARY-STATUS"
+        with Session(engine) as setup:
+            setup.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-BOUNDARY", status="DRAFT", version=1,
+                                     payload={"appId": app_id, "citizenId": "CITIZEN-BOUNDARY", "status": "DRAFT", "statusHistory": []}))
+            setup.commit()
+        APPLICATIONS[app_id] = {"appId": app_id, "citizenId": "CITIZEN-BOUNDARY", "status": "STALE_LOCAL"}
+        with Session(engine) as session:
+            session.begin()
+            result = mutate_workflow_aggregate(app_id, expected_version=1, session=session, status="IN_PROGRESS", actor="TEST")
+            self.assertEqual(result["application"]["status"], "IN_PROGRESS")
+            self.assertEqual(result["application_version"], 2)
+            session.commit()
+        refreshed = refresh_workflow_aggregate(app_id)
+        self.assertEqual(refreshed["application"]["status"], "IN_PROGRESS")
+        self.assertEqual(refreshed["application_version"], 2)
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            history = session.query(WorkflowHistoryRow).filter_by(app_id=app_id).all()
+            self.assertEqual(row.version, 2)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(row.payload["statusHistory"][-1]["status"], "IN_PROGRESS")
+        self.assertEqual(APPLICATIONS[app_id]["status"], "STALE_LOCAL")
+
+    def test_workflow_boundary_locks_application_before_child_and_mutates_child(self):
+        app_id = "APP-WORKFLOW-BOUNDARY-CHILD"
+        review_id = "REVIEW-WORKFLOW-BOUNDARY-CHILD"
+        with Session(engine) as setup:
+            setup.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-BOUNDARY", status="DRAFT", version=1,
+                                     payload={"appId": app_id, "citizenId": "CITIZEN-BOUNDARY", "status": "DRAFT"}))
+            setup.add(EntityReviewRow(review_id=review_id, app_id=app_id, payload={"reviewId": review_id, "appId": app_id, "decision": "PENDING"}))
+            setup.commit()
+        statements = []
+        def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+            if "FOR UPDATE" in statement.upper():
+                statements.append(statement.lower())
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            with Session(engine) as session:
+                session.begin()
+                result = mutate_workflow_aggregate(app_id, expected_version=1, session=session,
+                                                   child_kind="entity_review", child_id=review_id,
+                                                   child_patch={"decision": "APPROVED"})
+                session.commit()
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        self.assertEqual(result["child"]["decision"], "APPROVED")
+        self.assertGreaterEqual(len(statements), 2)
+        self.assertIn("applications", statements[0])
+        self.assertIn("entity_reviews", statements[1])
+        self.assertEqual(get_application(app_id)["status"], "DRAFT")
+
+    def test_workflow_boundary_expected_version_race_allows_one_writer(self):
+        app_id = "APP-WORKFLOW-BOUNDARY-RACE"
+        with Session(engine) as setup:
+            setup.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-BOUNDARY", status="DRAFT", version=1,
+                                     payload={"appId": app_id, "citizenId": "CITIZEN-BOUNDARY", "status": "DRAFT"}))
+            setup.commit()
+        first = Session(engine)
+        second = Session(engine)
+        first.begin()
+        second.begin()
+        try:
+            first_result = mutate_workflow_aggregate(app_id, expected_version=1, session=first, status="IN_PROGRESS")
+            first.commit()
+            with self.assertRaises(ApplicationConcurrencyError):
+                mutate_workflow_aggregate(app_id, expected_version=1, session=second, status="CANCELLED")
+            second.rollback()
+        finally:
+            first.close()
+            second.close()
+        self.assertEqual(first_result["application"]["status"], "IN_PROGRESS")
+        self.assertEqual(get_application(app_id)["status"], "IN_PROGRESS")
+
+    def test_workflow_boundary_rollback_leaves_no_version_or_history_phantom(self):
+        app_id = "APP-WORKFLOW-BOUNDARY-ROLLBACK"
+        with Session(engine) as setup:
+            setup.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-BOUNDARY", status="DRAFT", version=1,
+                                     payload={"appId": app_id, "citizenId": "CITIZEN-BOUNDARY", "status": "DRAFT"}))
+            setup.commit()
+        with Session(engine) as session:
+            session.begin()
+            mutate_workflow_aggregate(app_id, expected_version=1, session=session, application_patch={"remarks": "temporary"})
+            session.rollback()
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            self.assertEqual(row.version, 1)
+            self.assertNotIn("remarks", row.payload)
+            self.assertEqual(session.query(WorkflowHistoryRow).filter_by(app_id=app_id).count(), 0)
+
+    def test_workflow_boundary_duplicate_status_retry_is_idempotent(self):
+        app_id = "APP-WORKFLOW-BOUNDARY-IDEMPOTENT"
+        with Session(engine) as setup:
+            setup.add(ApplicationRow(app_id=app_id, citizen_id="CITIZEN-BOUNDARY", status="DRAFT", version=1,
+                                     payload={"appId": app_id, "citizenId": "CITIZEN-BOUNDARY", "status": "DRAFT", "statusHistory": []}))
+            setup.commit()
+        with Session(engine) as session:
+            session.begin()
+            mutate_workflow_aggregate(app_id, expected_version=1, session=session, status="IN_PROGRESS")
+            session.commit()
+        with Session(engine) as session:
+            session.begin()
+            result = mutate_workflow_aggregate(app_id, expected_version=2, session=session, status="IN_PROGRESS")
+            session.commit()
+        self.assertEqual(result["application"]["status"], "IN_PROGRESS")
+        with Session(engine) as session:
+            self.assertEqual(session.get(ApplicationRow, app_id).version, 2)
+            self.assertEqual(session.query(WorkflowHistoryRow).filter_by(app_id=app_id).count(), 1)
+
+    def _seed_entity_review_for_migration(self, suffix):
+        app_id = f"APP-ENTITY-MIGRATION-{suffix}"
+        review_id = f"ER-ENTITY-MIGRATION-{suffix}"
+        review = {
+            "reviewId": review_id, "appId": app_id, "requirementCode": "IDENTITY",
+            "source": "Education Department", "status": "WAITING_FOR_OFFICER", "decision": None,
+            "sourceRecordId": "EDU-1", "confidenceScore": 0.78, "confidenceLevel": "MEDIUM",
+            "provenance": {"sourceSystem": "Education Department", "sourceRecordId": "EDU-1"},
+            "createdAt": "2026-01-01T00:00:00+00:00", "updatedAt": "2026-01-01T00:00:00+00:00",
+        }
+        app = {
+            "appId": app_id, "citizenId": "CITIZEN-ENTITY-MIGRATION", "status": "WAITING_FOR_OFFICER",
+            "statusHistory": [], "requirements": [{"code": "IDENTITY", "status": "REVIEW_REQUIRED", "resolution": {}}],
+            "entityReviews": [review], "conflictReviews": [], "eligibility": {},
+        }
+        with Session(engine) as session:
+            session.add(ApplicationRow(app_id=app_id, citizen_id=app["citizenId"], status=app["status"], version=1, payload=app))
+            session.add(EntityReviewRow(review_id=review_id, app_id=app_id, payload=review))
+            session.commit()
+        APPLICATIONS[app_id] = dict(app)
+        ENTITY_REVIEWS[review_id] = dict(review)
+        return app_id, review_id
+
+    def test_entity_review_action_is_postgres_authoritative_and_consistent(self):
+        app_id, review_id = self._seed_entity_review_for_migration("SUCCESS")
+        event_seen = []
+        def observe(event):
+            event_seen.append(get_application(app_id)["status"])
+        event_bus.subscribe("ENTITY_MATCH_DECIDED", observe)
+        try:
+            app, review = entity_review_action(review_id, "MATCH", "OFFICER-1", "Confirmed identity")
+        finally:
+            event_bus._subscribers["ENTITY_MATCH_DECIDED"].remove(observe)
+        self.assertEqual(app["status"], "IN_PROGRESS")
+        self.assertEqual(review["status"], "APPROVED")
+        self.assertEqual(review["decision"], "MATCH")
+        self.assertEqual(APPLICATIONS[app_id]["status"], "IN_PROGRESS")
+        self.assertEqual(ENTITY_REVIEWS[review_id]["decision"], "MATCH")
+        self.assertEqual(event_seen, ["IN_PROGRESS"])
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            persisted_review = session.get(EntityReviewRow, review_id)
+            histories = session.query(WorkflowHistoryRow).filter_by(app_id=app_id).all()
+            self.assertEqual(row.version, 2)
+            self.assertEqual(row.status, "IN_PROGRESS")
+            self.assertEqual(persisted_review.payload["decision"], "MATCH")
+            requirement = next(item for item in row.payload["requirements"] if item["code"] == "IDENTITY")
+            self.assertEqual(requirement["status"], "FOUND")
+            self.assertEqual(requirement["resolution"]["decision"], "HUMAN_ACCEPTED")
+            self.assertEqual(len(histories), 1)
+
+    def test_entity_review_action_does_not_allow_legacy_snapshot_overwrite(self):
+        app_id, review_id = self._seed_entity_review_for_migration("FENCE")
+        entity_review_action(review_id, "MATCH", "OFFICER-1", "Confirmed identity")
+        with self.assertRaises(ApplicationAuthorityError):
+            persist_transition({"appId": app_id, "citizenId": "CITIZEN-ENTITY-MIGRATION", "status": "DRAFT"}, {"status": "DRAFT", "at": "2026-01-01T00:00:00+00:00"})
+        APPLICATIONS[app_id]["status"] = "STALE_LOCAL"
+        ENTITY_REVIEWS[review_id]["decision"] = "STALE_LOCAL"
+        persist_state()
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            review = session.get(EntityReviewRow, review_id)
+            self.assertEqual(row.status, "IN_PROGRESS")
+            self.assertEqual(review.payload["decision"], "MATCH")
+
+    def test_entity_review_action_same_decision_is_idempotent_without_duplicate_history(self):
+        app_id, review_id = self._seed_entity_review_for_migration("IDEMPOTENT")
+        first_app, first_review = entity_review_action(review_id, "MATCH", "OFFICER-1", "Confirmed identity")
+        second_app, second_review = entity_review_action(review_id, "MATCH", "OFFICER-1", "Confirmed identity again")
+        self.assertEqual(first_app["status"], second_app["status"])
+        self.assertEqual(first_review["decision"], second_review["decision"])
+        with Session(engine) as session:
+            self.assertEqual(session.get(ApplicationRow, app_id).version, 2)
+            self.assertEqual(session.query(WorkflowHistoryRow).filter_by(app_id=app_id).count(), 1)
+
+    def test_concurrent_entity_review_decisions_serialize_on_application_and_review(self):
+        app_id, review_id = self._seed_entity_review_for_migration("RACE")
+        barrier = threading.Barrier(2)
+        outcomes = []
+        def decide(value):
+            barrier.wait()
+            try:
+                result = entity_review_action(review_id, value, "OFFICER-1", f"Decision {value}")
+                outcomes.append((value, "ok", result[1]["decision"]))
+            except Exception as error:
+                outcomes.append((value, type(error).__name__, str(error)))
+        first = threading.Thread(target=decide, args=("MATCH",))
+        second = threading.Thread(target=decide, args=("REJECT",))
+        first.start(); second.start(); first.join(); second.join()
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(sum(item[1] == "ok" for item in outcomes), 1)
+        self.assertEqual(sum(item[1] == "ValueError" for item in outcomes), 1)
+        with Session(engine) as session:
+            row = session.get(ApplicationRow, app_id)
+            review = session.get(EntityReviewRow, review_id)
+            self.assertEqual(row.version, 2)
+            self.assertIn(review.payload["decision"], {"MATCH", "REJECT"})
 
     def test_application_dependency_relationship_survives_roundtrip(self):
         app_id = "SCH-MH-2026-00142"

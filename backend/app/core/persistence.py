@@ -489,6 +489,255 @@ def transition_application_status(app_id: str, status: str, actor: str = "SYSTEM
     return _run_application_owned(transition)
 
 
+_WORKFLOW_CHILD_MODELS = {
+    "dependency": DependencyRow,
+    "entity_review": EntityReviewRow,
+    "conflict_review": ConflictReviewRow,
+}
+_WORKFLOW_CHILD_ID_FIELDS = {
+    "dependency": DependencyRow.dependency_id,
+    "entity_review": EntityReviewRow.review_id,
+    "conflict_review": ConflictReviewRow.review_id,
+}
+_WORKFLOW_CHILD_RESERVED_FIELDS = frozenset({
+    "appId", "app_id", "dependencyId", "dependency_id", "reviewId", "review_id",
+    "version", "createdAt", "created_at",
+})
+_DEPENDENCY_TYPED_FIELDS = {
+    "status": "status",
+    "requiredData": "required_data",
+    "required_data": "required_data",
+    "jobId": "job_id",
+    "job_id": "job_id",
+    "jobStatus": "job_status",
+    "job_status": "job_status",
+    "resultReference": "result_reference",
+    "result_reference": "result_reference",
+    "attempts": "attempts",
+    "maxAttempts": "max_attempts",
+    "max_attempts": "max_attempts",
+}
+
+
+def _workflow_child_result(row) -> dict:
+    if isinstance(row, DependencyRow):
+        return _dependency_payload(row)
+    payload = dict(row.payload or {})
+    payload["reviewId"] = row.review_id
+    payload["appId"] = row.app_id
+    return payload
+
+
+def _workflow_child_query(db_session: Session, child_kind: str, child_id: str, for_update: bool):
+    model = _WORKFLOW_CHILD_MODELS[child_kind]
+    query = select(model).where(_WORKFLOW_CHILD_ID_FIELDS[child_kind] == child_id)
+    if for_update:
+        query = query.with_for_update()
+    return db_session.execute(query).scalar_one_or_none()
+
+
+def _workflow_aggregate_result(app_row: ApplicationRow, child_row=None) -> dict:
+    """Return domain payloads plus internal concurrency metadata."""
+    return {
+        "application": _application_result(app_row),
+        "application_version": app_row.version,
+        "child": _workflow_child_result(child_row) if child_row else None,
+    }
+
+
+def load_workflow_aggregate(
+    app_id: str | None,
+    *,
+    session: Session,
+    child_kind: str | None = None,
+    child_id: str | None = None,
+    for_update: bool = False,
+) -> dict | None:
+    """Load an application aggregate and optional child from PostgreSQL.
+
+    When requested, locks are acquired in the same application-first order as
+    ``mutate_workflow_aggregate``.  The caller owns the transaction.
+    """
+    if app_id is None:
+        if child_kind not in _WORKFLOW_CHILD_MODELS or not child_id:
+            raise ValueError("app_id or a valid child selector is required")
+        child_model = _WORKFLOW_CHILD_MODELS[child_kind]
+        app_id = session.execute(
+            select(child_model.app_id).where(_WORKFLOW_CHILD_ID_FIELDS[child_kind] == child_id)
+        ).scalar_one_or_none()
+        if app_id is None:
+            return None
+    app_query = select(ApplicationRow).where(ApplicationRow.app_id == app_id)
+    if for_update:
+        app_query = app_query.with_for_update()
+    app_row = session.execute(app_query).scalar_one_or_none()
+    if app_row is None:
+        return None
+    child_row = None
+    if child_kind is not None:
+        if child_kind not in _WORKFLOW_CHILD_MODELS or not child_id:
+            raise ValueError("A valid child_kind and child_id are required")
+        child_row = _workflow_child_query(session, child_kind, child_id, for_update)
+        if child_row is None or child_row.app_id != app_id:
+            return None
+    return _workflow_aggregate_result(app_row, child_row)
+
+
+def mutate_workflow_aggregate(
+    app_id: str,
+    *,
+    expected_version: int,
+    session: Session,
+    application_patch: Mapping | None = None,
+    status: str | None = None,
+    actor: str = "SYSTEM",
+    source: str = "workflow_boundary",
+    child_kind: str | None = None,
+    child_id: str | None = None,
+    child_patch: Mapping | None = None,
+) -> dict:
+    """Mutate one application aggregate in a caller-owned transaction.
+
+    The application row is always locked first, followed by at most one child
+    row.  This function only flushes; the caller owns commit/rollback and may
+    therefore keep all locks until the aggregate mutation is durable.  It does
+    not touch workflow dictionaries or publish side effects.
+    """
+    if not session.in_transaction():
+        raise RuntimeError("Workflow aggregate mutation requires an active caller-owned transaction")
+    if not isinstance(expected_version, int):
+        raise TypeError("expected_version is required")
+    application_patch = dict(application_patch or {})
+    forbidden = _APPLICATION_MUTATION_RESERVED_FIELDS.union({"statusHistory", "status_history"}).intersection(application_patch)
+    if forbidden:
+        raise ValueError(f"Workflow mutation cannot update {', '.join(sorted(forbidden))}")
+    if child_kind is not None:
+        if child_kind not in _WORKFLOW_CHILD_MODELS:
+            raise ValueError(f"Unsupported workflow child kind: {child_kind}")
+        if not child_id:
+            raise ValueError("child_id is required when child_kind is supplied")
+    elif child_id is not None or child_patch is not None:
+        raise ValueError("child_kind is required for child mutations")
+    child_patch = dict(child_patch or {})
+    if _WORKFLOW_CHILD_RESERVED_FIELDS.intersection(child_patch):
+        raise ValueError("Workflow child identity/version fields are immutable")
+
+    from app.engine.workflow_engine import CANONICAL_STATUSES, VALID_TRANSITIONS
+
+    app_row = session.execute(
+        select(ApplicationRow).where(ApplicationRow.app_id == app_id).with_for_update()
+    ).scalar_one_or_none()
+    if app_row is None:
+        raise KeyError(app_id)
+    if app_row.version != expected_version:
+        raise ApplicationConcurrencyError(f"Application {app_id} has version {app_row.version}, expected {expected_version}")
+
+    child_row = None
+    if child_kind is not None:
+        child_row = _workflow_child_query(session, child_kind, child_id, True)
+        if child_row is None or child_row.app_id != app_id:
+            raise KeyError(child_id)
+
+    previous_status = app_row.status
+    if status is not None:
+        if status not in CANONICAL_STATUSES:
+            raise ValueError(f"Unsupported application status: {status}")
+        if previous_status != status and status not in VALID_TRANSITIONS.get(previous_status, set()):
+            raise ValueError(f"Invalid application transition: {previous_status} -> {status}")
+
+    now = datetime.now(timezone.utc)
+    timestamp_iso = _application_iso(now)
+    payload = dict(app_row.payload or {})
+    payload_changed = False
+    for key, value in application_patch.items():
+        if payload.get(key) != value:
+            payload[key] = value
+            payload_changed = True
+
+    status_changed = status is not None and status != previous_status
+    if status_changed:
+        payload["status"] = status
+        history_entry = {"status": status, "at": timestamp_iso, "actor": actor, "source": source}
+        status_history = list(payload.get("statusHistory") or [])
+        status_history.append(history_entry)
+        payload["statusHistory"] = status_history
+        payload_changed = True
+
+    child_changed = False
+    if child_row is not None:
+        if isinstance(child_row, DependencyRow):
+            child_payload = dict(child_row.payload or {})
+            for key, value in child_patch.items():
+                if key in _DEPENDENCY_TYPED_FIELDS:
+                    field = _DEPENDENCY_TYPED_FIELDS[key]
+                    if getattr(child_row, field) != value:
+                        setattr(child_row, field, value)
+                        child_changed = True
+                    canonical_key = {
+                        "required_data": "requiredData", "job_id": "jobId", "job_status": "jobStatus",
+                        "result_reference": "resultReference", "max_attempts": "maxAttempts",
+                    }.get(field, field)
+                    child_payload[canonical_key] = value
+                elif child_payload.get(key) != value:
+                    child_payload[key] = value
+                    child_changed = True
+            if child_changed:
+                child_row.payload = child_payload
+                child_row.updated_at = now
+                child_row.version += 1
+        else:
+            child_payload = dict(child_row.payload or {})
+            for key, value in child_patch.items():
+                if child_payload.get(key) != value:
+                    child_payload[key] = value
+                    child_changed = True
+            if child_changed:
+                child_row.payload = child_payload
+
+    aggregate_changed = payload_changed or child_changed
+    if not aggregate_changed:
+        result = _workflow_aggregate_result(app_row, child_row)
+        result["post_commit_refresh"] = (app_id, child_kind, child_id)
+        return result
+
+    payload["appId"] = app_row.app_id
+    payload["citizenId"] = app_row.citizen_id
+    payload["status"] = status if status is not None else app_row.status
+    payload["createdAt"] = _application_iso(app_row.created_at) if app_row.created_at else payload.get("createdAt", timestamp_iso)
+    payload["updatedAt"] = timestamp_iso
+    app_row.status = status if status is not None else app_row.status
+    app_row.payload = payload
+    app_row.updated_at = now
+    app_row.authoritative_at = app_row.authoritative_at or now
+    app_row.version += 1
+    if status_changed:
+        session.add(WorkflowHistoryRow(app_id=app_id, status=status, occurred_at=timestamp_iso, payload=history_entry))
+    session.flush()
+    result = _workflow_aggregate_result(app_row, child_row)
+    result["post_commit_refresh"] = (app_id, child_kind, child_id)
+    return result
+
+
+def refresh_workflow_aggregate(app_id: str, child_kind: str | None = None, child_id: str | None = None, session: Session | None = None) -> dict:
+    """Read the committed aggregate for use after the caller commits."""
+    def read(db_session: Session) -> dict:
+        app_row = db_session.execute(select(ApplicationRow).where(ApplicationRow.app_id == app_id)).scalar_one_or_none()
+        if app_row is None:
+            return {"application": None, "child": None}
+        child_row = None
+        if child_kind is not None:
+            if child_kind not in _WORKFLOW_CHILD_MODELS or not child_id:
+                raise ValueError("A valid child_kind and child_id are required")
+            child_row = _workflow_child_query(db_session, child_kind, child_id, False)
+            if child_row is None or child_row.app_id != app_id:
+                return {"application": _application_result(app_row), "application_version": app_row.version, "child": None}
+        return _workflow_aggregate_result(app_row, child_row)
+    if session is not None:
+        return read(session)
+    with Session(engine) as owned_session:
+        return read(owned_session)
+
+
 def mark_application_write_authoritative(request) -> None:
     """Mark only this request to bypass destructive legacy snapshot persistence."""
     request.state.application_write_authoritative = True

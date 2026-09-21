@@ -112,40 +112,102 @@ def create_entity_reviews(app: dict) -> list[dict]:
 
 
 def entity_review_action(review_id: str, decision: str, officer_id: str, remarks: str):
-    review = ENTITY_REVIEWS.get(review_id)
-    if not review:
-        return None, None
     if decision not in {"MATCH", "REJECT"} or not remarks.strip():
         raise ValueError("Entity review requires MATCH or REJECT and mandatory remarks.")
-    if review["status"] != "WAITING_FOR_OFFICER":
-        if review.get("decision") == decision:
-            app = APPLICATIONS.get(review["appId"])
-            if app and decision == "MATCH" and app.get("status") == "WAITING_FOR_OFFICER":
-                transition_application(app, "IN_PROGRESS")
-            return app, review
-        raise ValueError("Entity review has already been decided.")
-    app = APPLICATIONS.get(review["appId"])
-    if not app:
-        return None, None
-    requirement = next((item for item in app["requirements"] if item["code"] == review["requirementCode"]), None)
-    if not requirement:
-        return None, None
-    from app.core.persistence import ApplicationAuthorityError, assert_legacy_application_writable
-    assert_legacy_application_writable(app["appId"])
-    review_before = deepcopy(review)
-    requirement_before = deepcopy(requirement)
-    try:
-        review.update({"status": "APPROVED" if decision == "MATCH" else "REJECTED", "decision": decision, "officerId": officer_id, "remarks": remarks, "updatedAt": _now()})
-        requirement.setdefault("resolution", {}).update({"status": "MATCH" if decision == "MATCH" else "MISMATCH", "decision": "HUMAN_ACCEPTED" if decision == "MATCH" else "HUMAN_REJECTED", "reviewId": review_id})
-        requirement["status"] = "FOUND" if decision == "MATCH" else "UNRESOLVED"
+    from sqlalchemy.orm import Session
+    from app.core.persistence import (
+        engine,
+        load_workflow_aggregate,
+        mutate_workflow_aggregate,
+        refresh_workflow_aggregate,
+    )
+
+    with Session(engine) as session:
+        session.begin()
+        aggregate = load_workflow_aggregate(
+            None,
+            session=session,
+            child_kind="entity_review",
+            child_id=review_id,
+            for_update=True,
+        )
+        if aggregate is None:
+            session.rollback()
+            return None, None
+        app_id = aggregate["application"]["appId"]
+        review = aggregate["child"]
+        app = aggregate["application"]
+        if review.get("status") != "WAITING_FOR_OFFICER":
+            if review.get("decision") != decision:
+                session.rollback()
+                raise ValueError("Entity review has already been decided.")
+            session.commit()
+            refreshed = refresh_workflow_aggregate(app_id, "entity_review", review_id)
+            APPLICATIONS[app_id] = refreshed["application"]
+            ENTITY_REVIEWS[review_id] = refreshed["child"]
+            return refreshed["application"], refreshed["child"]
+
+        requirement = next((item for item in app.get("requirements", []) if item.get("code") == review.get("requirementCode")), None)
+        if requirement is None:
+            session.rollback()
+            return None, None
+
+        review_after = dict(review)
+        review_after.update({
+            "status": "APPROVED" if decision == "MATCH" else "REJECTED",
+            "decision": decision,
+            "officerId": officer_id,
+            "remarks": remarks,
+            "updatedAt": _now(),
+        })
+        requirements_after = deepcopy(app.get("requirements", []))
+        requirement_after = next(item for item in requirements_after if item.get("code") == review.get("requirementCode"))
+        requirement_after.setdefault("resolution", {}).update({
+            "status": "MATCH" if decision == "MATCH" else "MISMATCH",
+            "decision": "HUMAN_ACCEPTED" if decision == "MATCH" else "HUMAN_REJECTED",
+            "reviewId": review_id,
+        })
+        requirement_after["status"] = "FOUND" if decision == "MATCH" else "UNRESOLVED"
+
+        reviews_after = deepcopy(app.get("entityReviews", []))
+        review_projection = next((item for item in reviews_after if item.get("reviewId") == review_id), None)
+        if review_projection is None:
+            reviews_after.append(review_after)
+        else:
+            review_projection.clear()
+            review_projection.update(review_after)
+
+        next_status = None
         if decision == "REJECT":
-            transition_application(app, "VERIFICATION_FAILED")
-        elif not any(item["status"] == "WAITING_FOR_OFFICER" for item in app.get("entityReviews", [])) and not any(item["status"] in {"REVIEW_REQUIRED", "UNRESOLVED"} for item in app["requirements"]):
-            transition_application(app, "IN_PROGRESS")
-    except ApplicationAuthorityError:
-        review.clear(); review.update(review_before)
-        requirement.clear(); requirement.update(requirement_before)
-        raise
+            next_status = "VERIFICATION_FAILED"
+        elif not any(item.get("status") == "WAITING_FOR_OFFICER" for item in reviews_after) and not any(item.get("status") in {"REVIEW_REQUIRED", "UNRESOLVED"} for item in requirements_after):
+            next_status = "IN_PROGRESS"
+
+        mutate_workflow_aggregate(
+            app_id,
+            expected_version=aggregate["application_version"],
+            session=session,
+            application_patch={"requirements": requirements_after, "entityReviews": reviews_after},
+            status=next_status,
+            actor=officer_id,
+            source="workflow_engine.entity_review_action",
+            child_kind="entity_review",
+            child_id=review_id,
+            child_patch={
+                "status": review_after["status"],
+                "decision": decision,
+                "officerId": officer_id,
+                "remarks": remarks,
+                "updatedAt": review_after["updatedAt"],
+            },
+        )
+        session.commit()
+
+    refreshed = refresh_workflow_aggregate(app_id, "entity_review", review_id)
+    app = refreshed["application"]
+    review = refreshed["child"]
+    APPLICATIONS[app["appId"]] = app
+    ENTITY_REVIEWS[review_id] = review
     event_bus.publish("ENTITY_MATCH_DECIDED", {"appId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "decision": decision, "officerId": officer_id})
     event_bus.publish("ENTITY_REVIEW_RESOLVED", {"appId": app["appId"], "correlationId": app["appId"], "reviewId": review_id, "requirementCode": requirement["code"], "decision": decision, "officerId": officer_id})
     return app, review
