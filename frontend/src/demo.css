@@ -29,3 +29,39 @@
  .tricolor{height:28px!important;background:#102f52!important;position:relative}.tricolor:after{content:'🇮🇳  Government Digital Services    ·    Maharashtra · SIH 2026 Prototype';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#dce8f2;font-size:11px;letter-spacing:.02em}
  .citizen-welcome{display:flex;justify-content:space-between;align-items:flex-end;padding:22px 0 30px}.citizen-welcome h1{margin-bottom:8px}.welcome-mark{font-size:24px;font-weight:700;letter-spacing:.14em;color:#12345b;text-align:right}.welcome-mark span{display:block;font-size:11px;letter-spacing:.02em;font-weight:400;color:#718397;margin-top:5px}.citizen-actions{display:grid;grid-template-columns:1fr 1.35fr;gap:18px;margin-bottom:22px}.search-service,.track-box{background:#fff;border:1px solid #d8e2e9;padding:18px 20px;border-radius:8px}.search-service label,.track-box label{display:block;color:#506275;font-size:13px;font-weight:700;margin-bottom:7px}.search-service input,.track-input input{margin:0;width:100%;padding:12px 13px;border:1px solid #bdcbd3;border-radius:5px;font:inherit}.track-box{border-top:3px solid #d97721}.track-box .eyebrow{margin-bottom:5px}.track-input{display:flex;gap:8px}.track-input input{flex:1;min-width:0}.current-application{display:flex;justify-content:space-between;align-items:center;gap:20px;border-left:4px solid #1669a8;margin-bottom:34px}.current-application h2{margin-bottom:5px}.application-state{display:flex;align-items:center;gap:12px;white-space:nowrap}.services-section{padding-bottom:22px}.domain-layout{display:grid;grid-template-columns:235px 1fr;gap:22px}.domain-list{display:flex;flex-direction:column;gap:4px}.domain-list button{display:flex;align-items:center;gap:11px;text-align:left;border:1px solid transparent;border-radius:5px;background:transparent;color:#405a72;padding:13px 14px;font:inherit;cursor:pointer}.domain-list button span{display:grid;place-items:center;width:25px;height:25px;border-radius:50%;background:#e7f0f5;color:#1669a8}.domain-list button:hover,.domain-list button.selected{background:#fff;border-color:#d8e2e9;color:#12345b;box-shadow:0 3px 12px #173d6710}.domain-list button.selected{border-left:3px solid #d97721}.service-results{background:#fff;border:1px solid #d8e2e9;border-radius:8px;padding:20px}.service-results-heading{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #e6edf1;padding-bottom:12px;margin-bottom:2px}.service-results-heading h3{color:#12345b}.service-results-heading span{font-size:12px;color:#708090}.service-result{display:flex;justify-content:space-between;align-items:center;gap:18px;border-bottom:1px solid #edf1f2;padding:17px 2px}.service-result:last-child{border-bottom:0}.service-result h3{margin:0 0 4px;color:#173d67}.service-result p{margin:0 0 6px}.available-label,.future-label{font-size:12px;color:#14785e}.future-label{color:#a96115}.future-pill{font-size:12px;color:#a96115;background:#fff5e5;border-radius:14px;padding:6px 10px;white-space:nowrap}@media(max-width:760px){.citizen-welcome,.current-application{align-items:flex-start;flex-direction:column}.welcome-mark{text-align:left}.citizen-actions,.domain-layout{grid-template-columns:1fr}.track-input{flex-direction:column}.domain-list{display:grid;grid-template-columns:1fr 1fr}.application-state{white-space:normal}.service-result{align-items:flex-start;flex-direction:column}}
  .sangam-mark{flex:0 0 auto}.footer-brand{display:flex;align-items:center;gap:10px}.application-dependency{display:grid;grid-template-columns:1fr 35px 1fr;align-items:center;gap:10px;margin:25px 0;padding:18px;background:#f6f9fb;border:1px solid #d8e2e9;border-radius:7px}.application-dependency div:not(.dependency-arrow){display:grid;gap:6px}.application-dependency small{color:#607387}.application-dependency b{color:#12345b}.dependency-arrow{text-align:center;font-size:22px;color:#d97721}.status.pending{background:#eef4fb;color:#1669a8}@media(max-width:560px){.application-dependency{grid-template-columns:1fr}.dependency-arrow{transform:rotate(90deg)}}
+
+/* Scheme catalogue (Phase 6A) */
+.scheme-catalogue-controls { display: flex; flex-direction: column; gap: 16px; margin-bottom: 26px; }
+.category-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { border: 1px solid var(--line); background: #fff; color: #405a72; border-radius: 20px; padding: 7px 14px; font: inherit; font-size: 13px; cursor: pointer; }
+.chip.selected { background: var(--navy); border-color: var(--navy); color: #fff; font-weight: 600; }
+.scheme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 18px; }
+.scheme-card { display: flex; flex-direction: column; gap: 8px; }
+.scheme-card-heading { display: flex; gap: 8px; flex-wrap: wrap; }
+.demo-tag { background: #fff0df; color: var(--amber); }
+.scheme-card h3 { margin: 2px 0 0; }
+.scheme-card p { flex: 1; margin: 0; }
+.scheme-card-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; border-top: 1px solid #edf1f2; padding-top: 12px; margin-top: 4px; }
+.scheme-card-footer small { color: var(--muted); }
+.loading-state { padding: 40px 8px; text-align: center; color: var(--muted); }
+.scheme-detail-section { margin-bottom: 18px; }
+.scheme-detail-section h2 { color: var(--navy); }
+.scheme-detail-actions { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 20px; background: #fff; border: 1px solid var(--line); border-top: 3px solid var(--green); border-radius: 8px; }
+.back-link { margin-bottom: 20px; }
+.browse-cta { display: flex; flex-direction: column; gap: 10px; }
+.browse-cta label { margin: 0; }
+.apply-entry .notice { margin: 20px 0; }
+@media(max-width:760px){ .scheme-detail-actions{flex-direction:column;align-items:stretch}.scheme-detail-actions button{width:100%} }
+
+/* Dynamic application form (Phase 6B) */
+.form-section { margin-bottom: 22px; }
+.form-section h2 { color: var(--navy); }
+.requirement-list { display: grid; gap: 14px; }
+.requirement-card { display: flex; flex-direction: column; gap: 12px; }
+.requirement-card-heading h3 { margin: 0 0 4px; }
+.requirement-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.status.pending { background: #eef4fb; color: var(--blue); }
+.upload-form { display: grid; gap: 8px; padding: 14px; background: #f6f9fb; border: 1px solid var(--line); border-radius: 6px; }
+.upload-form label { font-size: 13px; font-weight: 600; color: #46576a; }
+.upload-form input, .upload-form textarea { font: inherit; width: 100%; padding: 10px; border: 1px solid #bdcbd3; border-radius: 3px; }
+.upload-form .actions { margin-top: 4px; }

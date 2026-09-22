@@ -5,7 +5,7 @@ import SangamMark from './SangamMark';
 
 export default function Navbar({ page, setPage, citizen, language = 'en', onLanguageChange, onLogout, onNotificationSelect }) {
   const [notifications, setNotifications] = useState([]); const [open, setOpen] = useState(false); const role = citizen?.role; const t = languageText(language);
-  const links = role === 'CITIZEN' ? [['dashboard', t.dashboard], ['discovery', t.services], ['tracking', t.tracking]] : role === 'OFFICER' ? [['officer', 'Officer Desk']] : role === 'ADMIN' ? [['health', 'Integration Health'], ['audit', 'Audit Lineage']] : [];
+  const links = role === 'CITIZEN' ? [['dashboard', t.homeNav], ['schemes', t.schemesNav], ['myApplications', t.myApplicationsNav], ['notificationsPage', t.notificationsNav], ['profile', t.profileNav]] : role === 'OFFICER' ? [['officer', 'Officer Desk']] : role === 'ADMIN' ? [['health', 'Integration Health'], ['audit', 'Audit Lineage']] : [];
   useEffect(() => { if (!citizen?.role) { setNotifications([]); return undefined; } let active = true; const load = () => api.notifications(citizen.role).then(result => { if (active) setNotifications(result.notifications || []); }).catch(() => {}); load(); const timer = setInterval(load, 4000); return () => { active = false; clearInterval(timer); }; }, [citizen?.role, citizen?.userId]);
   async function selectNotification(notification) { try { await api.markNotificationRead(notification.notificationId); setNotifications(items => items.map(item => item.notificationId === notification.notificationId ? { ...item, read: true } : item)); } catch { /* backend remains authoritative */ } setOpen(false); onNotificationSelect?.(notification); }
   const unread = notifications.filter(item => !item.read).length;

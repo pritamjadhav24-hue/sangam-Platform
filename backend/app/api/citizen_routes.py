@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import List, Optional
+import hashlib
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -13,7 +16,11 @@ from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuth
 from app.engine.dependency_orchestrator import ensure_missing_dependencies, initiate_dependency
 from app.core.persistence import (citizen_service_snapshot, catalog_snapshot, engine,
                                   get_application, list_applications_for_citizen,
-                                  list_dependencies_for_application)
+                                  list_dependencies_for_application,
+                                  create_application as create_application_authoritative,
+                                  mark_application_write_authoritative, mutate_application, upsert_document)
+from app.engine.artifact_retrieval import requirement_data_type, validate_upload_metadata
+from app.engine import requirement_fulfillment
 from app.engine.requirement_analyzer import discover
 from app.engine.rules_engine import evaluate
 from app.engine.workflow_engine import APPLICATIONS, create_application, find_active_application, transition_application
@@ -47,11 +54,38 @@ class RevokeConsent(BaseModel):
     consentId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
 
 
+class DocumentUpload(BaseModel):
+    citizenId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    appId: Optional[str] = Field(default=None, max_length=160, pattern=r"^[A-Za-z0-9_-]+$")
+    requirementCode: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    title: str = Field(min_length=1, max_length=200)
+    contentType: str = Field(default="text/plain", max_length=60)
+    content: str = Field(min_length=1, max_length=200_000)
+
+
 class ApplicationCreate(BaseModel):
     citizenId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
     serviceId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
     purpose: Optional[str] = Field(default=None, max_length=240)
     attributes: Optional[List[str]] = None
+
+
+class ApplySchemeRequest(BaseModel):
+    """Note: deliberately has NO citizenId field -- the applicant is always the
+    authenticated JWT subject, never a value supplied by the client."""
+    schemeId: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class RequirementUpload(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    contentType: str = Field(default="text/plain", max_length=60)
+    content: str = Field(min_length=1, max_length=200_000)
+
+
+class AutoFillDecision(BaseModel):
+    """The citizen's response to the Auto-Fill consent dialog. Defaults to
+    ACCEPT so the existing Phase 6B call shape (no body) keeps working."""
+    decision: Literal["ACCEPT", "REJECT"] = "ACCEPT"
 
 
 def _record_discovery(citizen_id: str, result: dict, app_id: Optional[str] = None) -> None:
@@ -140,6 +174,16 @@ def _safe_discovery(result: dict) -> dict:
     }
 
 
+_REQUIREMENT_USER_ACTION = {
+    "FOUND": "No action required", "VALIDATED": "No action required", "RETRIEVED": "No action required",
+    "NOT_PROVIDED": "Use Auto-Fill or Manual Upload to provide this.",
+    "REJECTED": "Automatic retrieval was not allowed. You can provide this manually.",
+    "WAITING": "Retrieval is in progress. You can try again shortly.",
+    "ACTION_REQUIRED": "Automatic retrieval could not complete. You can provide this manually.",
+    "FAILED": "Automatic retrieval could not complete. You can provide this manually.",
+}
+
+
 def _safe_application(app: dict) -> dict:
     safe_requirements = []
     for requirement in app.get("requirements", []):
@@ -147,14 +191,20 @@ def _safe_application(app: dict) -> dict:
             "requirementCode": requirement.get("code"),
             "displayLabel": requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title(),
             "status": requirement.get("status"),
-            "userAction": requirement.get("action") or ("No action required" if requirement.get("status") == "FOUND" else "Retry verification or request help"),
+            "userAction": requirement.get("action") or _REQUIREMENT_USER_ACTION.get(requirement.get("status"), "Retry verification or request help"),
             **({"verifiedOn": requirement.get("verifiedOn")} if requirement.get("verifiedOn") else {}),
+            # Phase 6B dynamic form fields -- present only on applications created
+            # through the new /apply boundary; never exposes provider/department/
+            # document-source information, only the requirement's own shape/state.
+            **({"mandatory": requirement.get("mandatory")} if "mandatory" in requirement else {}),
+            **({"dataType": requirement.get("dataType")} if "dataType" in requirement else {}),
+            **({"documentId": requirement.get("documentId")} if requirement.get("documentId") else {}),
         })
     safe_conflicts = [{"status": item.get("status"), "field": item.get("canonicalField"), "message": "Additional review is required."} for item in app.get("conflicts", [])]
     safe_dependencies = []
     for dependency_item in app.get("dependencies", []):
         safe_dependencies.append({field: dependency_item.get(field) for field in ("requiredService", "serviceName", "status", "attempts", "maxAttempts") if field in dependency_item})
-    safe = {field: app.get(field) for field in ("appId", "serviceId", "schemeId", "status", "consentId", "createdAt", "updatedAt") if field in app}
+    safe = {field: app.get(field) for field in ("appId", "serviceId", "schemeId", "schemeName", "status", "consentId", "createdAt", "updatedAt") if field in app}
     safe["citizenId"] = None
     safe["requirements"] = safe_requirements
     safe["conflicts"] = safe_conflicts
@@ -245,6 +295,194 @@ def get_citizen_application(application_id: str, user: dict = Depends(require_ro
         return _safe_application(_application_with_database_dependencies(app, session))
 
 
+def _load_owned_application(application_id: str, citizen_id: str) -> dict:
+    """PostgreSQL-authoritative read + ownership check, shared by the Phase 6B
+    form endpoints (mirrors get_citizen_application's own check)."""
+    app = get_application(application_id)
+    if not app or app.get("citizenId") != citizen_id:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return app
+
+
+@router.post("/apply")
+def apply_to_scheme(body: ApplySchemeRequest, request: Request, user: dict = Depends(require_roles("CITIZEN"))):
+    """Dynamic application-form entry point (Phase 6B).
+
+    Creates a PostgreSQL-authoritative application (never trusting a
+    client-supplied citizen id -- the applicant is always the authenticated
+    JWT subject) whose requirement list is built entirely from the selected
+    scheme's own catalog requirements, not from any per-scheme frontend code.
+    Idempotent: re-applying to a scheme with an already-open application
+    returns that same application rather than creating a duplicate.
+    """
+    citizen_id = user["citizenId"]
+    enforce("apply", citizen_id, limit=10, window_seconds=60)
+    scheme = citizen_service_snapshot(body.schemeId)
+    if not scheme or scheme.get("enabled") is False:
+        raise HTTPException(status_code=404, detail="Configured scheme not found or disabled")
+
+    terminal = {"COMPLETED", "REJECTED", "CANCELLED"}
+    with Session(engine) as session:
+        existing = [
+            app for app in list_applications_for_citizen(citizen_id, session=session)
+            if app.get("serviceId") == body.schemeId and app.get("status") not in terminal
+        ]
+        if existing:
+            application = existing[0]
+            created = False
+        else:
+            requirements = [
+                {
+                    "code": item["code"],
+                    "label": item.get("label") or str(item["code"]).replace("_", " ").title(),
+                    "mandatory": item.get("mandatory", True),
+                    "status": "NOT_PROVIDED",
+                    "dataType": requirement_data_type(item["code"]),
+                }
+                for item in scheme.get("requirements", [])
+            ]
+            application = create_application_authoritative(
+                {
+                    "citizenId": citizen_id,
+                    "serviceId": body.schemeId,
+                    "status": "IN_PROGRESS",
+                    "schemeName": scheme.get("name"),
+                    "requirements": requirements,
+                },
+                session=session,
+            )
+            mark_application_write_authoritative(request)
+            created = True
+        session.commit()
+
+    audit_bus.append(
+        citizen_id, "APPLICATION", "Citizen opened a scheme application form", "GovOrchestrator",
+        "CREATE" if created else "RESUME", payload={"appId": application["appId"], "schemeId": body.schemeId, "actorRole": user["role"]},
+        correlation_id=application["appId"],
+    )
+    return _safe_application(application)
+
+
+@router.post("/applications/{application_id}/requirements/{requirement_code}/auto-fill")
+def auto_fill_requirement(application_id: str, requirement_code: str, body: AutoFillDecision = AutoFillDecision(), user: dict = Depends(require_roles("CITIZEN"))):
+    """Per-requirement Auto-Fill action boundary (Phase 6B boundary, Phase 6C
+    real execution).
+
+    Establishes the exact application + requirement the action applies to,
+    never trusting any provider/department selection from the caller. The
+    citizen's consent decision (Accept/Reject, from a dialog the frontend
+    shows before calling this) drives two completely different paths:
+
+    - REJECT: no consent is created, no provider is ever called -- see
+      requirement_fulfillment.reject_auto_fill.
+    - ACCEPT: a fresh, requirement-scoped consent receipt is recorded (the
+      existing versioned consent implementation, unmodified), then
+      requirement_fulfillment.fulfill_requirement runs the real pipeline --
+      dynamic provider discovery -> adapter -> schema mapping -> validation
+      -- and persists the outcome through the PostgreSQL-authoritative
+      mutation gateway (mutate_application), the same gateway the Phase 6B
+      manual-upload endpoint already uses, since this application's
+      authoritative_at is set from creation and the legacy dependency path
+      (ensure_dependency/initiate_dependency) cannot write to it.
+
+    Each request here is independent per (application_id, requirement_code):
+    concurrent Auto-Fill calls for different requirements on the same
+    application run on separate threads (FastAPI/Starlette's threadpool for
+    synchronous route handlers) and only serialize briefly at the final
+    application-row write, never for the duration of the provider call
+    itself -- so one requirement's retrieval never blocks or is cancelled by
+    another's.
+    """
+    citizen_id = user["citizenId"]
+    enforce("auto_fill", citizen_id, limit=20, window_seconds=60)
+    app = _load_owned_application(application_id, citizen_id)
+    requirement = requirement_fulfillment.find_requirement(app, requirement_code)
+    if requirement is None:
+        raise HTTPException(status_code=404, detail="Requirement not found on this application")
+
+    if body.decision == "REJECT":
+        application = requirement_fulfillment.reject_auto_fill(app, requirement_code, citizen_id)
+        audit_bus.append(
+            citizen_id, requirement_code, "Citizen declined automatic retrieval for a requirement", "GovOrchestrator",
+            "AUTO_FILL_REJECTED", payload={"appId": application_id, "requirementCode": requirement_code, "actorRole": user["role"]},
+            correlation_id=application_id,
+        )
+        return _safe_application(application)
+
+    if requirement.get("status") in requirement_fulfillment.SUCCESS_STATUSES:
+        return _safe_application(app)
+
+    receipt = create_consent(
+        citizen_id, True, attributes=[], service_id=app.get("serviceId"), application_id=application_id,
+        purpose=requirement_fulfillment.auto_fill_purpose(requirement_code),
+    )
+    audit_bus.append(
+        citizen_id, requirement_code, "Citizen granted consent for Auto-Fill", "GovOrchestrator",
+        "CONSENT_GRANTED", receipt["consentId"], payload={"appId": application_id, "requirementCode": requirement_code, "actorRole": user["role"]},
+        correlation_id=application_id,
+    )
+
+    try:
+        application = requirement_fulfillment.fulfill_requirement(app, requirement_code, citizen_id, receipt["consentId"], correlation_id=application_id)
+    except ConsentAuthorizationError as error:
+        raise HTTPException(status_code=403, detail=f"Protected access denied: {error}")
+
+    updated_requirement = requirement_fulfillment.find_requirement(application, requirement_code)
+    audit_bus.append(
+        citizen_id, requirement_code, "Auto-Fill retrieval attempt completed", "GovOrchestrator",
+        (updated_requirement or {}).get("status", "UNKNOWN"), receipt["consentId"],
+        payload={"appId": application_id, "requirementCode": requirement_code, "status": (updated_requirement or {}).get("status"), "actorRole": user["role"]},
+        correlation_id=application_id,
+    )
+    return _safe_application(application)
+
+
+@router.post("/applications/{application_id}/requirements/{requirement_code}/upload")
+def upload_requirement_document(application_id: str, requirement_code: str, body: RequirementUpload, user: dict = Depends(require_roles("CITIZEN"))):
+    """Per-requirement manual upload (Phase 6B).
+
+    Reuses Phase 4's artifact-integrity validation and document reference
+    model (validate_upload_metadata, upsert_document) but persists the
+    requirement-state change through the PostgreSQL-authoritative mutation
+    gateway (mutate_application) rather than the legacy in-memory dependency
+    path, since this application is authoritative from creation.
+    """
+    citizen_id = user["citizenId"]
+    enforce("requirement_upload", citizen_id, limit=10, window_seconds=60)
+    app = _load_owned_application(application_id, citizen_id)
+    requirements = deepcopy(app.get("requirements", []))
+    requirement = next((item for item in requirements if item.get("code") == requirement_code), None)
+    if requirement is None:
+        raise HTTPException(status_code=404, detail="Requirement not found on this application")
+    if requirement.get("dataType") not in {"DOCUMENT", "CERTIFICATE"}:
+        raise HTTPException(status_code=400, detail="This requirement does not accept a manual document upload")
+
+    artifact = {"title": body.title, "contentType": body.contentType, "content": body.content}
+    integrity = validate_upload_metadata(artifact)
+    if not integrity["valid"]:
+        raise HTTPException(status_code=422, detail={"reasons": integrity["reasons"]})
+
+    checksum = hashlib.sha256(body.content.encode("utf-8")).hexdigest()
+    document_id = f"DOC-{application_id}-{requirement_code}"
+    canonical = {"title": body.title, "contentType": body.contentType, "checksum": checksum}
+    requirement.update({"status": "VALIDATED", "documentId": document_id})
+    application = mutate_application(application_id, {"requirements": requirements})
+    upsert_document({
+        "documentId": document_id, "appId": application_id, "dependencyId": None,
+        "requirementCode": requirement_code, "citizenId": citizen_id, "sourceType": "CITIZEN_UPLOAD",
+        "providerId": None, "documentType": requirement_code, "status": "VALIDATED",
+        "checksum": checksum, "isSynthetic": True, "referenceUri": None,
+        "validation": {"valid": True, "reasons": []}, "canonical": canonical,
+        "title": body.title, "contentType": body.contentType, "contentPreview": body.content[:2000],
+    })
+    audit_bus.append(
+        citizen_id, requirement_code, "Citizen uploaded a document manually", "Citizen Upload", "UPLOAD",
+        payload={"appId": application_id, "requirementCode": requirement_code, "documentId": document_id, "actorRole": user["role"]},
+        correlation_id=application_id,
+    )
+    return _safe_application(application)
+
+
 @router.post("/orchestrate-dependency")
 def dependency(body: Dependency, user: dict = Depends(require_roles("CITIZEN"))):
     _assert_own_citizen(user, body.citizenId)
@@ -260,6 +498,31 @@ def dependency(body: Dependency, user: dict = Depends(require_roles("CITIZEN")))
         audit_bus.append(body.citizenId, requirement_code, "Configured service dependency completed", "Configured provider", "ISSUE", consent_receipt["consentId"], payload={**result, "actorRole": user["role"]}, correlation_id=app["appId"])
     else:
         audit_bus.append(body.citizenId, requirement_code, "Configured service dependency failed; retry remains available", "Configured provider", "FAIL", consent_receipt["consentId"], payload={"dependencyId": result.get("dependencyId"), "attempts": result.get("attempts"), "status": result.get("dependencyStatus"), "actorRole": user["role"]}, correlation_id=app["appId"])
+    return result
+
+
+@router.post("/document-upload")
+def document_upload(body: DocumentUpload, user: dict = Depends(require_roles("CITIZEN"))):
+    """Backend/API boundary for a future citizen upload UI. Validates the
+    artifact, then updates the requirement's dependency through the existing
+    dependency mutation architecture (never a second state machine)."""
+    _assert_own_citizen(user, body.citizenId)
+    enforce("document_upload", body.citizenId, limit=10, window_seconds=60)
+    app = APPLICATIONS.get(body.appId) if body.appId else find_active_application(body.citizenId)
+    if not app or app["citizenId"] != body.citizenId:
+        raise HTTPException(404, "Application journey not found")
+    from app.engine.artifact_retrieval import submit_citizen_upload
+    try:
+        result = submit_citizen_upload(
+            app, body.requirementCode, body.citizenId,
+            {"title": body.title, "contentType": body.contentType, "content": body.content},
+        )
+    except ConsentAuthorizationError as error:
+        raise HTTPException(status_code=403, detail=f"Protected access denied: {error}")
+    audit_bus.append(body.citizenId, body.requirementCode, "Citizen document upload processed", "Citizen Upload",
+                      result["status"], app.get("consentId"),
+                      payload={"requirementCode": body.requirementCode, "status": result["status"], "actorRole": user["role"]},
+                      correlation_id=app["appId"])
     return result
 
 

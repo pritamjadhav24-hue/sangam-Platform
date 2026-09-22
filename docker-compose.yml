@@ -43,7 +43,11 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       ASYNC_PROVIDER_JOBS: ${ASYNC_PROVIDER_JOBS:-true}
       SANGAM_SEED_SYNTHETIC_DATA: ${SANGAM_SEED_SYNTHETIC_DATA:-false}
+      SANGAM_SEED_DEPARTMENT_PROVIDERS: ${SANGAM_SEED_DEPARTMENT_PROVIDERS:-false}
       SANDBOX_DATA_DIR: /app/data/sandboxes
+      DEPARTMENT_API_BASE_URL: http://department-api:8000
+      PROVIDER_TRANSPORT_SANDBOX_VEHICLE_API_KEY: ${DEPARTMENT_API_KEY_TRANSPORT:-}
+      PROVIDER_TRANSPORT_SANDBOX_LICENCE_API_KEY: ${DEPARTMENT_API_KEY_TRANSPORT:-}
     volumes:
       - sangam-sandbox-data:/app/data/sandboxes
     depends_on:
@@ -51,12 +55,34 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      department-api:
+        condition: service_healthy
     ports:
       - "${BACKEND_PORT:-8001}:8000"
     networks:
       - sangam-network
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://backend:8000/health/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  department-api:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    environment:
+      SANGAM_ENV: ${SANGAM_ENV:-development}
+      DEPARTMENT_API_KEY_TRANSPORT: ${DEPARTMENT_API_KEY_TRANSPORT:-}
+      SANDBOX_DATA_DIR: /app/data/sandboxes
+    volumes:
+      - sangam-sandbox-data:/app/data/sandboxes
+    command: ["python", "-m", "uvicorn", "app.department_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    networks:
+      - sangam-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://department-api:8000/health')"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -72,6 +98,9 @@ services:
       REDIS_ENABLED: ${REDIS_ENABLED:-true}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       ASYNC_PROVIDER_JOBS: ${ASYNC_PROVIDER_JOBS:-true}
+      DEPARTMENT_API_BASE_URL: http://department-api:8000
+      PROVIDER_TRANSPORT_SANDBOX_VEHICLE_API_KEY: ${DEPARTMENT_API_KEY_TRANSPORT:-}
+      PROVIDER_TRANSPORT_SANDBOX_LICENCE_API_KEY: ${DEPARTMENT_API_KEY_TRANSPORT:-}
     command: ["python", "-m", "app.worker"]
     depends_on:
       postgres:

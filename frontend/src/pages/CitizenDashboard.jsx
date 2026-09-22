@@ -1,20 +1,73 @@
-import { useMemo, useState } from 'react';
 import { languageText } from '../i18n';
 
-const fallbackDomains = [
-  { key: 'health', icon: '＋', services: [{ name: 'Health assistance', mr: 'आरोग्य सहाय्य', available: false }] },
-  { key: 'agriculture', icon: '⌁', services: [{ name: 'Farmer assistance', mr: 'शेतकरी सहाय्य', available: false }] },
-  { key: 'welfare', icon: '♡', services: [{ name: 'Financial assistance', mr: 'आर्थिक सहाय्य', available: false }] },
-  { key: 'employment', icon: '↗', services: [{ name: 'Skill development', mr: 'कौशल्य विकास', available: false }] },
-  { key: 'other', icon: '⋯', services: [{ name: 'More government services', mr: 'इतर शासकीय सेवा', available: false }] },
-];
-
-export default function CitizenDashboard({ schemes, discovery, navigate, onSelectScheme, language = 'en' }) {
-  const t = languageText(language); const [selectedDomain, setSelectedDomain] = useState('education'); const [query, setQuery] = useState('');
-  const configuredServices = (schemes || []).map(service => ({ key: service.serviceId || service.schemeId || service.id, schemeId: service.serviceId || service.schemeId || service.id, name: service.name, mr: service.nameMr || service.name, description: service.description || `${service.department} service`, descriptionMr: service.description || `${service.department} सेवा`, available: service.enabled !== false }));
-  const domains = configuredServices.length ? [{ key: 'configured', icon: '▣', services: configuredServices }] : fallbackDomains;
-  const selected = domains.find(domain => domain.key === selectedDomain) || domains[0];
-  const services = useMemo(() => selected.services.filter(service => `${service.name} ${service.mr}`.toLowerCase().includes(query.toLowerCase())), [selected, query]);
+export default function CitizenDashboard({ schemes, discovery, navigate, onViewScheme, language = 'en' }) {
+  const t = languageText(language);
+  const available = (schemes || []).filter(service => service.enabled !== false);
+  const highlighted = available.slice(0, 3);
   const implemented = schemes?.[0];
-  return <main className="container citizen-home"><section className="citizen-welcome"><div><p className="eyebrow">{language === 'en' ? 'Your services' : 'आपल्या सेवा'}</p><h1>{t.welcome}</h1><p>{t.welcomeCopy}</p></div><div className="welcome-mark">SANGAM<span>Federated service platform</span></div></section><section className="citizen-actions"><div className="search-service"><label htmlFor="service-search">{language === 'en' ? 'Find a service' : 'सेवा शोधा'}</label><input id="service-search" value={query} onChange={event => setQuery(event.target.value)} placeholder={t.search} /></div><div className="track-box"><div><p className="eyebrow">{t.trackTitle}</p><label htmlFor="quick-track">{t.applicationId}</label></div><div className="track-input"><input id="quick-track" placeholder="Application ID" onKeyDown={event => { if (event.key === 'Enter' && event.currentTarget.value) navigate('tracking', event.currentTarget.value); }} /><button className="primary" onClick={() => { const value = document.getElementById('quick-track')?.value; if (value) navigate('tracking', value); }}>{t.track}</button></div></div></section><section className="current-application card"><div><p className="eyebrow">{t.current}</p><h2>{implemented?.name || 'No service selected'}</h2><p>{discovery ? t.plainPrivacy : (language === 'en' ? 'Choose a configured government service to begin.' : 'सुरू करण्यासाठी उपलब्ध सेवा निवडा.')}</p></div><div className="application-state"><span className="status found">{discovery ? (language === 'en' ? 'Information checked' : 'माहिती तपासली') : (language === 'en' ? 'Not started' : 'सुरू केलेले नाही')}</span>{discovery && <button className="outline" onClick={() => navigate('tracking')}>{t.track}</button>}</div></section><section className="services-section"><div className="section-heading"><div><p className="eyebrow">{t.explore}</p><h2>{t.applyQuestion}</h2></div></div><div className="domain-layout"><aside className="domain-list" aria-label="Service categories">{domains.map(domain => <button key={domain.key} className={selected.key === domain.key ? 'selected' : ''} onClick={() => setSelectedDomain(domain.key)}><span>{domain.icon}</span>{t[domain.key] || 'Available services'}</button>)}</aside><div className="service-results"><div className="service-results-heading"><h3>{t[selected.key] || 'Available services'}</h3><span>{services.length} {language === 'en' ? 'service' : 'सेवा'}</span></div>{services.length ? services.map(service => <article className="service-result" key={service.schemeId}><div><h3>{language === 'en' ? service.name : service.mr}</h3><p>{language === 'en' ? service.description : service.descriptionMr}</p><small className={service.available ? 'available-label' : 'future-label'}>{service.available ? t.available : t.future}</small></div>{service.available ? <button className="primary" onClick={() => onSelectScheme ? onSelectScheme(service.schemeId) : navigate('discovery')}>{t.apply}</button> : <span className="future-pill">{language === 'en' ? 'Coming soon' : 'लवकरच उपलब्ध'}</span>}</article>) : <p className="empty-state">{t.noResults}</p>}</div></div></section></main>;
+
+  return (
+    <main className="container citizen-home">
+      <section className="citizen-welcome">
+        <div>
+          <p className="eyebrow">{language === 'en' ? 'Your services' : 'आपल्या सेवा'}</p>
+          <h1>{t.welcome}</h1>
+          <p>{t.welcomeCopy}</p>
+        </div>
+        <div className="welcome-mark">SANGAM<span>Federated service platform</span></div>
+      </section>
+
+      <section className="citizen-actions">
+        <div className="search-service browse-cta">
+          <label>{language === 'en' ? 'Explore schemes' : 'योजना शोधा'}</label>
+          <p className="muted">{language === 'en' ? 'Search and filter every government scheme available through SANGAM.' : 'SANGAM द्वारे उपलब्ध सर्व शासकीय योजना शोधा व गाळा.'}</p>
+          <button className="primary" onClick={() => navigate('schemes')}>{language === 'en' ? 'Browse all schemes' : 'सर्व योजना पहा'}</button>
+        </div>
+        <div className="track-box">
+          <div><p className="eyebrow">{t.trackTitle}</p><label htmlFor="quick-track">{t.applicationId}</label></div>
+          <div className="track-input">
+            <input id="quick-track" placeholder="Application ID" onKeyDown={event => { if (event.key === 'Enter' && event.currentTarget.value) navigate('tracking', event.currentTarget.value); }} />
+            <button className="primary" onClick={() => { const value = document.getElementById('quick-track')?.value; if (value) navigate('tracking', value); }}>{t.track}</button>
+          </div>
+        </div>
+      </section>
+
+      <section className="current-application card">
+        <div>
+          <p className="eyebrow">{t.current}</p>
+          <h2>{implemented?.name || (language === 'en' ? 'No service selected' : 'कोणतीही सेवा निवडलेली नाही')}</h2>
+          <p>{discovery ? t.plainPrivacy : (language === 'en' ? 'Choose a scheme from the catalogue to begin.' : 'सुरू करण्यासाठी सूचीतून योजना निवडा.')}</p>
+        </div>
+        <div className="application-state">
+          <span className="status found">{discovery ? (language === 'en' ? 'Information checked' : 'माहिती तपासली') : (language === 'en' ? 'Not started' : 'सुरू केलेले नाही')}</span>
+          {discovery && <button className="outline" onClick={() => navigate('tracking')}>{t.track}</button>}
+        </div>
+      </section>
+
+      {highlighted.length > 0 && (
+        <section className="services-section">
+          <div className="section-heading">
+            <div><p className="eyebrow">{t.explore}</p><h2>{language === 'en' ? 'Recently added schemes' : 'नव्याने जोडलेल्या योजना'}</h2></div>
+            <button className="outline" onClick={() => navigate('schemes')}>{language === 'en' ? 'View all' : 'सर्व पहा'}</button>
+          </div>
+          <div className="scheme-grid">
+            {highlighted.map(scheme => {
+              const id = scheme.serviceId || scheme.schemeId;
+              return (
+                <article className="scheme-card card" key={id}>
+                  <div className="scheme-card-heading">{scheme.category && <span className="tag">{scheme.category}</span>}</div>
+                  <h3>{language === 'en' ? scheme.name : (scheme.nameMr || scheme.name)}</h3>
+                  <p>{scheme.description}</p>
+                  <div className="scheme-card-footer">
+                    <small>{language === 'en' ? scheme.department : (scheme.departmentMr || scheme.department)}</small>
+                    <button className="outline" onClick={() => onViewScheme(id)}>{language === 'en' ? 'View details' : 'तपशील पहा'}</button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      )}
+    </main>
+  );
 }

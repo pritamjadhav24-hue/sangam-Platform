@@ -9,6 +9,7 @@ from app.core.audit_bus import audit_bus
 from app.engine.adapters import integration_health, request_registered_service, service_available
 from app.engine.registry import select_dependency_provider
 from app.engine.semantic_mapper import map_record
+from app.engine.validation_engine import validate
 from app.engine.workflow_engine import DEPENDENCIES, transition_application
 from app.engine.consent_manager import CONSUMER, ConsentAuthorizationError, execute_with_persisted_authorization
 
@@ -153,7 +154,14 @@ def initiate_dependency(citizen_id: str, app: dict, requirement_code: str, async
     dependency["lastError"] = None
     domicile = next((item for item in app["requirements"] if item["code"] == requirement_code), None)
     if domicile:
-        domicile.update({"status": "FOUND", "recordId": result_reference, "canonical": map_record(requirement_code, record), "verifiedOn": record.get("validUntil"), "adapter": dependency["adapter"]})
+        # Prefer the adapter's own schema_mappings-derived canonical view when it
+        # provides one (see DepartmentSandboxAPIAdapter.normalize); this is how a
+        # department's own field names -- never assumed to equal canonical names --
+        # get translated. Providers that don't set "canonical" keep using the
+        # existing deterministic per-requirement rules unchanged.
+        canonical = record["canonical"] if isinstance(record, dict) and "canonical" in record else map_record(requirement_code, record)
+        validation = validate(requirement_code, canonical, record)
+        domicile.update({"status": "FOUND", "recordId": result_reference, "canonical": canonical, "validation": validation, "verifiedOn": record.get("validUntil"), "adapter": dependency["adapter"]})
     if not any(item.get("status") == "WAITING_FOR_OFFICER" for item in app.get("conflictReviews", []) + app.get("entityReviews", [])):
         transition_application(app, "IN_PROGRESS")
     event_payload = {"citizenId": citizen_id, "appId": app["appId"], "dependencyId": dependency["dependencyId"], "consentId": app.get("consentId"), "recordId": result_reference, "service": service_id, "requiredData": requirement_code}

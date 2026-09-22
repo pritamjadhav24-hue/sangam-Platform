@@ -40,7 +40,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0013_citizens_req_schema"
+MIGRATION_HEAD = "0014_documents"
 
 
 class Base(DeclarativeBase):
@@ -320,6 +320,88 @@ class SchemaMappingRow(Base):
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class DocumentRow(Base):
+    """A document/artifact reference -- metadata and lifecycle state for an
+    artifact retrieved from a provider or uploaded by a citizen. This is a
+    reference/metadata record, not a copy of a department's authoritative
+    document; app_id/dependency_id are deliberately unconstrained (see
+    migration 0014) because the workflow they describe may still be
+    in-flight, in-memory state at the moment this row is written.
+    """
+    __tablename__ = "documents"
+    document_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    app_id: Mapped[str] = mapped_column(String(120), index=True)
+    dependency_id: Mapped[Optional[str]] = mapped_column(String(160), nullable=True, index=True)
+    requirement_code: Mapped[str] = mapped_column(String(120), index=True)
+    citizen_id: Mapped[str] = mapped_column(String(120), index=True)
+    source_type: Mapped[str] = mapped_column(String(40), index=True)
+    provider_id: Mapped[Optional[str]] = mapped_column(ForeignKey("providers.provider_id", ondelete="SET NULL"), nullable=True, index=True)
+    document_type: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    checksum: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, default=True)
+    reference_uri: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    validation: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB)
+
+
+def _document_payload(row: DocumentRow) -> dict:
+    payload = dict(row.payload or {})
+    payload.update({
+        "documentId": row.document_id, "appId": row.app_id, "dependencyId": row.dependency_id,
+        "requirementCode": row.requirement_code, "citizenId": row.citizen_id, "sourceType": row.source_type,
+        "providerId": row.provider_id, "documentType": row.document_type, "status": row.status,
+        "checksum": row.checksum, "isSynthetic": row.is_synthetic, "referenceUri": row.reference_uri,
+        "validation": row.validation,
+    })
+    return payload
+
+
+def upsert_document(document: Mapping) -> dict:
+    """Create or update one document/reference row (get-or-create + update)."""
+    with Session(engine) as session:
+        row = session.get(DocumentRow, document["documentId"])
+        now = datetime.now(timezone.utc)
+        values = dict(
+            app_id=document["appId"], dependency_id=document.get("dependencyId"),
+            requirement_code=document["requirementCode"], citizen_id=document["citizenId"],
+            source_type=document["sourceType"], provider_id=document.get("providerId"),
+            document_type=document.get("documentType", document["requirementCode"]),
+            status=document["status"], checksum=document.get("checksum"),
+            is_synthetic=document.get("isSynthetic", True), reference_uri=document.get("referenceUri"),
+            validation=document.get("validation"), updated_at=now, payload=dict(document),
+        )
+        if row is None:
+            session.add(DocumentRow(document_id=document["documentId"], created_at=now, **values))
+        else:
+            for key, value in values.items():
+                setattr(row, key, value)
+        session.commit()
+    return document
+
+
+def get_document(document_id: str, session: Session | None = None) -> dict | None:
+    def read(db_session: Session) -> dict | None:
+        row = db_session.get(DocumentRow, document_id)
+        return _document_payload(row) if row else None
+    if session is not None:
+        return read(session)
+    with Session(engine) as owned_session:
+        return read(owned_session)
+
+
+def list_documents_for_application(app_id: str, session: Session | None = None) -> list[dict]:
+    def read(db_session: Session) -> list[dict]:
+        rows = db_session.query(DocumentRow).filter_by(app_id=app_id).order_by(DocumentRow.document_id.asc()).all()
+        return [_document_payload(row) for row in rows]
+    if session is not None:
+        return read(session)
+    with Session(engine) as owned_session:
+        return read(owned_session)
 
 
 def _application_payload(row: ApplicationRow) -> dict:
@@ -887,7 +969,8 @@ def validate_production_configuration() -> None:
         return
     if (os.getenv("SANGAM_SEED_CATALOG", "false").lower() in {"1", "true", "yes"}
             or os.getenv("SANGAM_SEED_DEMO_USERS", "false").lower() in {"1", "true", "yes"}
-            or os.getenv("SANGAM_SEED_SYNTHETIC_DATA", "false").lower() in {"1", "true", "yes"}):
+            or os.getenv("SANGAM_SEED_SYNTHETIC_DATA", "false").lower() in {"1", "true", "yes"}
+            or os.getenv("SANGAM_SEED_DEPARTMENT_PROVIDERS", "false").lower() in {"1", "true", "yes"}):
         raise RuntimeError("Demo catalog/user seeding (including synthetic data) must be disabled in production.")
     origins = [item.strip().lower() for item in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if item.strip()]
     if not origins or "*" in origins or any("localhost" in item or "127.0.0.1" in item for item in origins):
@@ -1235,10 +1318,13 @@ def seed_catalog() -> None:
             department = scheme["department"]
             department_id = department.upper().replace(" ", "-")
             departments[department_id] = {"departmentId": department_id, "name": department}
-            if session.get(SchemeCatalogRow, scheme["id"]) is None:
+            existing_scheme = session.get(SchemeCatalogRow, scheme["id"])
+            if existing_scheme is None:
                 session.add(SchemeCatalogRow(scheme_id=scheme["id"], name=scheme["name"], department=department, payload=scheme))
                 for requirement in scheme.get("requirements", []):
                     session.add(SchemeRequirementRow(scheme_id=scheme["id"], requirement_code=requirement["code"], label=requirement["label"], mandatory=requirement.get("mandatory", True), payload=requirement))
+            else:
+                existing_scheme.payload = {**(existing_scheme.payload or {}), **scheme}
         for department_id, department in departments.items():
             if session.get(DepartmentRow, department_id) is None:
                 session.add(DepartmentRow(department_id=department_id, name=department["name"], payload=department))
@@ -1385,6 +1471,90 @@ def seed_platform_citizens() -> None:
         session.commit()
 
 
+DEPARTMENT_SANDBOX_PROVIDERS = [
+    {"departmentId": "REVENUE-SANDBOX", "departmentName": "Revenue Sandbox", "providerId": "REVENUE-SANDBOX-LAND", "providerName": "Revenue Sandbox API - Land Records", "requirementCode": "LAND_HOLDING", "serviceId": "REV-SANDBOX-LAND-001", "serviceName": "Land Record Lookup", "httpPath": "/departments/revenue/land-records/{citizenRef}", "mapping": ("survey_number", "landSurveyNumber")},
+    {"departmentId": "EDUCATION-SANDBOX", "departmentName": "Education Sandbox", "providerId": "EDUCATION-SANDBOX-SCHOLARSHIP", "providerName": "Education Sandbox API - Scholarship Eligibility", "requirementCode": "SCHOLARSHIP_ELIGIBILITY", "serviceId": "EDU-SANDBOX-SCHOLARSHIP-001", "serviceName": "Scholarship Eligibility Lookup", "httpPath": "/departments/education/scholarship-eligibility/{citizenRef}", "mapping": ("eligible", "scholarshipEligible")},
+    {"departmentId": "SOCIAL-WELFARE-SANDBOX", "departmentName": "Social Welfare Sandbox", "providerId": "SOCIAL-WELFARE-SANDBOX-ENROLLMENT", "providerName": "Social Welfare Sandbox API - Scheme Enrollment", "requirementCode": "SCHEME_ENROLLMENT_STATUS", "serviceId": "SW-SANDBOX-ENROLL-001", "serviceName": "Scheme Enrollment Lookup", "httpPath": "/departments/social-welfare/scheme-enrollments/{citizenRef}", "mapping": ("scheme_name", "welfareSchemeName")},
+    {"departmentId": "AGRICULTURE-SANDBOX", "departmentName": "Agriculture Sandbox", "providerId": "AGRICULTURE-SANDBOX-FARMER", "providerName": "Agriculture Sandbox API - Farmer Registration", "requirementCode": "FARMER_REGISTRATION", "serviceId": "AGR-SANDBOX-FARMER-001", "serviceName": "Farmer Registration Lookup", "httpPath": "/departments/agriculture/farmers/{citizenRef}", "mapping": ("farmer_name", "name")},
+    {"departmentId": "AGRICULTURE-SANDBOX", "departmentName": "Agriculture Sandbox", "providerId": "AGRICULTURE-SANDBOX-LOAN", "providerName": "Agriculture Sandbox API - Crop Loan Status", "requirementCode": "CROP_LOAN_STATUS", "serviceId": "AGR-SANDBOX-LOAN-001", "serviceName": "Crop Loan Status Lookup", "httpPath": "/departments/agriculture/crop-loans/{citizenRef}", "mapping": ("loan_amount", "cropLoanAmount")},
+    {"departmentId": "TRANSPORT-SANDBOX", "departmentName": "Transport Sandbox", "providerId": "TRANSPORT-SANDBOX-VEHICLE", "providerName": "Transport Sandbox API - Vehicle Registration", "requirementCode": "VEHICLE_REGISTRATION", "serviceId": "TRN-SANDBOX-VEHICLE-001", "serviceName": "Vehicle Registration Lookup", "httpPath": "/departments/transport/vehicle-registrations/{citizenRef}", "authType": "API_KEY", "mapping": ("vehicle_number", "vehicleRegistrationNumber")},
+    {"departmentId": "TRANSPORT-SANDBOX", "departmentName": "Transport Sandbox", "providerId": "TRANSPORT-SANDBOX-LICENCE", "providerName": "Transport Sandbox API - Driving Licence", "requirementCode": "DRIVING_LICENCE", "serviceId": "TRN-SANDBOX-LICENCE-001", "serviceName": "Driving Licence Lookup", "httpPath": "/departments/transport/driving-licences/{citizenRef}", "authType": "API_KEY", "mapping": ("licence_class", "drivingLicenceClass")},
+    {"departmentId": "LABOUR-SANDBOX", "departmentName": "Labour Sandbox", "providerId": "LABOUR-SANDBOX-WORKER", "providerName": "Labour Sandbox API - Worker Registration", "requirementCode": "WORKER_REGISTRATION", "serviceId": "LAB-SANDBOX-WORKER-001", "serviceName": "Worker Registration Lookup", "httpPath": "/departments/labour/workers/{citizenRef}", "mapping": ("occupation", "workerOccupation")},
+    {"departmentId": "LABOUR-SANDBOX", "departmentName": "Labour Sandbox", "providerId": "LABOUR-SANDBOX-WELFARE", "providerName": "Labour Sandbox API - Welfare Board Membership", "requirementCode": "WELFARE_BOARD_MEMBERSHIP", "serviceId": "LAB-SANDBOX-WELFARE-001", "serviceName": "Welfare Board Membership Lookup", "httpPath": "/departments/labour/welfare-board-memberships/{citizenRef}", "mapping": ("membership_number", "welfareBoardMembershipNumber")},
+    {"departmentId": "FOOD-CIVIL-SUPPLIES-SANDBOX", "departmentName": "Food & Civil Supplies Sandbox", "providerId": "FOOD-CIVIL-SUPPLIES-SANDBOX-RATION", "providerName": "Food Civil Supplies Sandbox API - Ration Card", "requirementCode": "RATION_CARD", "serviceId": "FCS-SANDBOX-RATION-001", "serviceName": "Ration Card Lookup", "httpPath": "/departments/food-civil-supplies/ration-cards/{citizenRef}", "mapping": ("card_category", "rationCardCategory")},
+    {"departmentId": "HOUSING-SANDBOX", "departmentName": "Housing Sandbox", "providerId": "HOUSING-SANDBOX-ALLOTMENT", "providerName": "Housing Sandbox API - Allotment Status", "requirementCode": "HOUSING_ALLOTMENT", "serviceId": "HSG-SANDBOX-ALLOTMENT-001", "serviceName": "Housing Allotment Lookup", "httpPath": "/departments/housing/allotments/{citizenRef}", "mapping": ("unit_number", "housingUnitNumber")},
+    {"departmentId": "SKILL-EMPLOYMENT-SANDBOX", "departmentName": "Skill Development & Employment Sandbox", "providerId": "SKILL-EMPLOYMENT-SANDBOX-SKILL", "providerName": "Skill Employment Sandbox API - Skill Certification", "requirementCode": "SKILL_CERTIFICATION", "serviceId": "SKE-SANDBOX-SKILL-001", "serviceName": "Skill Certification Lookup", "httpPath": "/departments/skill-employment/skill-certifications/{citizenRef}", "mapping": ("trade", "certifiedTrade")},
+    {"departmentId": "SKILL-EMPLOYMENT-SANDBOX", "departmentName": "Skill Development & Employment Sandbox", "providerId": "SKILL-EMPLOYMENT-SANDBOX-EMPLOYMENT", "providerName": "Skill Employment Sandbox API - Employment Registration", "requirementCode": "EMPLOYMENT_REGISTRATION", "serviceId": "SKE-SANDBOX-EMPLOYMENT-001", "serviceName": "Employment Registration Lookup", "httpPath": "/departments/skill-employment/employment-registrations/{citizenRef}", "mapping": ("exchange_office", "employmentExchangeOffice")},
+    {"departmentId": "MUNICIPAL-HEALTH-SANDBOX", "departmentName": "Municipal Health Sandbox", "providerId": "MUNICIPAL-HEALTH-SANDBOX-BIRTH", "providerName": "Municipal Health Sandbox API - Birth Certificate", "requirementCode": "BIRTH_CERTIFICATE", "serviceId": "MUN-SANDBOX-BIRTH-001", "serviceName": "Birth Certificate Lookup", "httpPath": "/departments/municipal-health/birth-certificates/{citizenRef}", "mapping": ("registration_number", "birthRegistrationNumber")},
+    {"departmentId": "MUNICIPAL-HEALTH-SANDBOX", "departmentName": "Municipal Health Sandbox", "providerId": "MUNICIPAL-HEALTH-SANDBOX-IMMUNIZATION", "providerName": "Municipal Health Sandbox API - Immunization Record", "requirementCode": "IMMUNIZATION_RECORD", "serviceId": "MUN-SANDBOX-IMMUNIZATION-001", "serviceName": "Immunization Record Lookup", "httpPath": "/departments/municipal-health/immunization-records/{citizenRef}", "mapping": ("dob", "dateOfBirth")},
+]
+
+
+def department_sandbox_providers_seeded() -> bool:
+    with Session(engine) as session:
+        return session.query(ProviderRow).filter(ProviderRow.provider_id.in_([item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS])).count() > 0
+
+
+def seed_department_sandbox_providers() -> None:
+    """Register the 10 department sandboxes as PostgreSQL-owned providers.
+
+    Additive only: distinct department/provider/service ids from the existing
+    4 in-process demo providers, no scheme currently lists these requirement
+    codes, so this cannot change existing dependency selection or workflows.
+    Each provider uses the new "Department Sandbox API" adapter, which always
+    calls that department's REST API over HTTP (see app.department_api) --
+    never the sandbox database directly.
+    """
+    if os.getenv("SANGAM_SEED_DEPARTMENT_PROVIDERS", "false").lower() not in {"1", "true", "yes"}:
+        return
+    with Session(engine) as session:
+        for entry in DEPARTMENT_SANDBOX_PROVIDERS:
+            if session.get(DepartmentRow, entry["departmentId"]) is None:
+                session.add(DepartmentRow(department_id=entry["departmentId"], name=entry["departmentName"], payload={"departmentId": entry["departmentId"], "name": entry["departmentName"], "simulated": True}))
+        session.flush()
+        for entry in DEPARTMENT_SANDBOX_PROVIDERS:
+            provider_id = entry["providerId"]
+            if session.get(ProviderRow, provider_id) is None:
+                session.add(ProviderRow(
+                    provider_id=provider_id, department_id=entry["departmentId"], name=entry["providerName"],
+                    adapter_type="Department Sandbox API", contract_version="v1", environment="SANDBOX",
+                    auth_type=entry.get("authType", "NONE"), endpoint_ref="DEPARTMENT_API_BASE_URL",
+                    timeout_seconds=5, max_attempts=3,
+                    payload={"providerId": provider_id, "name": entry["providerName"], "httpPath": entry["httpPath"], "simulated": True},
+                ))
+            if session.get(ServiceCatalogRow, entry["serviceId"]) is None:
+                session.add(ServiceCatalogRow(service_id=entry["serviceId"], provider_id=provider_id, name=entry["serviceName"], requirement_code=entry["requirementCode"], payload={"serviceId": entry["serviceId"], "requirementCode": entry["requirementCode"], "requiredService": entry["serviceName"]}))
+            capability_id = f"{provider_id}:{entry['requirementCode']}"
+            if session.get(ProviderCapabilityRow, capability_id) is None:
+                session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=entry["requirementCode"], service_id=entry["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": entry["requirementCode"], "providerId": provider_id, "serviceId": entry["serviceId"]}))
+        session.commit()
+    from app.core.redis_service import RedisService
+    RedisService().delete("sangam:cache:catalog:v1")
+
+
+def seed_department_sandbox_schema_mappings() -> None:
+    """Seed one demonstrative department-field -> canonical-field mapping per
+    new sandbox provider. Gated with the sandbox providers themselves since a
+    mapping is meaningless without its provider."""
+    if os.getenv("SANGAM_SEED_DEPARTMENT_PROVIDERS", "false").lower() not in {"1", "true", "yes"}:
+        return
+    with Session(engine) as session:
+        for entry in DEPARTMENT_SANDBOX_PROVIDERS:
+            provider_id = entry["providerId"]
+            if session.get(ProviderRow, provider_id) is None:
+                continue
+            department_field, canonical_field = entry["mapping"]
+            mapping_id = f"{provider_id}:{department_field}"
+            if session.get(SchemaMappingRow, mapping_id) is not None:
+                continue
+            session.add(SchemaMappingRow(
+                mapping_id=mapping_id, provider_id=provider_id, service_id=entry["serviceId"],
+                department_field=department_field, canonical_field=canonical_field, data_type="string",
+                payload={"provider": provider_id, "departmentField": department_field, "canonicalField": canonical_field},
+            ))
+        session.commit()
+
+
 def catalog_snapshot() -> dict:
     from app.core.provider_config import provider_runtime_config
     from app.core.redis_service import RedisService
@@ -1479,8 +1649,13 @@ def citizen_service_snapshot(service_id: str | None = None) -> list[dict] | dict
                 "name": row.name,
                 "nameMr": metadata.get("nameMr", row.name),
                 "department": row.department,
+                "departmentMr": metadata.get("departmentMr"),
                 "description": metadata.get("description", "Configured government service"),
                 "category": metadata.get("category", "Government services"),
+                "benefits": metadata.get("benefits"),
+                "eligibility": metadata.get("eligibility"),
+                "applicationWindow": metadata.get("applicationWindow"),
+                "synthetic": metadata.get("synthetic", False),
                 "enabled": row.active,
                 "requirements": requirements,
             })

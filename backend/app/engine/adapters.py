@@ -153,7 +153,7 @@ def _load_sandbox_handlers() -> None:
 
 
 class AdapterFactory:
-    _types = {"REST": "RestAPIAdapter", "REST API": "RestAPIAdapter", "SOAP": "LegacySOAPAdapter", "LEGACY SOAP WRAPPER": "LegacySOAPAdapter", "CSV": "CSVFileAdapter", "CSV/FILE ADAPTER": "CSVFileAdapter"}
+    _types = {"REST": "RestAPIAdapter", "REST API": "RestAPIAdapter", "SOAP": "LegacySOAPAdapter", "LEGACY SOAP WRAPPER": "LegacySOAPAdapter", "CSV": "CSVFileAdapter", "CSV/FILE ADAPTER": "CSVFileAdapter", "DEPARTMENT SANDBOX API": "DepartmentSandboxAPIAdapter"}
 
     @classmethod
     def create(cls, adapter_type, provider_name, sandbox_handler=None, provider_id=None, config=None):
@@ -300,6 +300,115 @@ class CSVFileAdapter(SourceAdapter):
         except (OSError, UnicodeError, csv.Error): return self._failure(request.operation, "MALFORMED_RESPONSE", "Configured CSV could not be parsed", request.correlation_id, request.idempotency_key)
 
 
+class DepartmentSandboxAPIAdapter(SourceAdapter):
+    """Calls a simulated department's own REST API over HTTP.
+
+    Unlike ``RestAPIAdapter``, this adapter has no in-process "SANDBOX" fetcher
+    path: every call -- sandbox or otherwise -- is a real HTTP request to that
+    department's REST API (see ``app.department_api``), which is itself the
+    only thing allowed to read that department's sandbox database. There is no
+    live "PRODUCTION" Maharashtra government system behind this adapter; it
+    always talks to the simulated department service.
+    """
+    kind = "Department Sandbox API"
+
+    def health_check(self, correlation_id=None):
+        result = super().health_check(correlation_id)
+        if result["status"] == "HEALTHY" and not self.config.get("httpPath"):
+            result.update({"status": "MISCONFIGURED", "errorCategory": "CONFIGURATION_ERROR"})
+        return result
+
+    def _auth_headers(self):
+        auth_type, refs = str(self.config.get("authType", "NONE")).upper(), auth_references(self.provider_id, self.config)
+        if auth_type == "API_KEY":
+            return {self.config.get("apiKeyHeader", "X-API-Key"): os.environ[refs["apiKey"]]}
+        if auth_type == "BASIC":
+            return {"Authorization": "Basic " + base64.b64encode(f"{os.environ[refs['username']]}:{os.environ[refs['password']]}".encode()).decode()}
+        if auth_type == "OAUTH2_CLIENT_CREDENTIALS":
+            raise AdapterError("OAuth2 runtime exchange is not configured", "UNSUPPORTED_OPERATION")
+        return {}
+
+    def normalize(self, response, **context):
+        if not isinstance(response, dict):
+            return None
+        data = response.get("data")
+        if not isinstance(data, dict):
+            return None
+        from app.engine.schema_mapping import apply_schema_mapping
+        record_id = response.get("id")
+        if not record_id:
+            return None
+        return {
+            "id": record_id,
+            "status": response.get("status"),
+            "synthetic": response.get("synthetic", True),
+            "sourceSystem": response.get("sourceSystem"),
+            "raw": data,
+            "canonical": apply_schema_mapping(self.provider_id, data),
+        }
+
+    def _http_call(self, request):
+        invalid = self._validate_configuration()
+        if invalid:
+            invalid.operation, invalid.correlation_id, invalid.idempotency_key = request.operation, request.correlation_id, request.idempotency_key
+            return invalid
+        endpoint = os.getenv(self.config.get("endpointRef")) if self.config.get("endpointRef") else None
+        path_template = self.config.get("httpPath")
+        if not endpoint or not path_template:
+            return self._failure(request.operation, "CONFIGURATION_ERROR", "Department sandbox API path is not configured", request.correlation_id, request.idempotency_key)
+        citizen_ref = request.data.get("citizenId") or ""
+        if not citizen_ref:
+            return self._failure(request.operation, "VALIDATION_ERROR", "citizenId is required", request.correlation_id, request.idempotency_key)
+        try:
+            url = validate_endpoint(endpoint.rstrip("/") + "/" + path_template.format(citizenRef=citizen_ref).lstrip("/"), self.config.get("environment", "SANDBOX"))
+        except ValueError:
+            return self._failure(request.operation, "CONFIGURATION_ERROR", "Department sandbox API endpoint is invalid", request.correlation_id, request.idempotency_key)
+        headers = {"Accept": "application/json", "X-Correlation-ID": request.correlation_id or "", "Idempotency-Key": request.idempotency_key or ""}
+        try:
+            headers.update(self._auth_headers())
+        except AdapterError as error:
+            return self._failure(request.operation, error.category, "Department sandbox API authentication is not supported", request.correlation_id, request.idempotency_key)
+        started = time.perf_counter()
+        try:
+            with urlopen(Request(url, headers=headers, method="GET"), timeout=min(max(int(self.config.get("timeoutSeconds", 5)), 1), 120)) as response:
+                raw = response.read(1024 * 1024 + 1)
+                if len(raw) > 1024 * 1024:
+                    return self._failure(request.operation, "MALFORMED_RESPONSE", "Department sandbox API response exceeded the configured size limit", request.correlation_id, request.idempotency_key, response.status)
+                normalized = self.normalize(json.loads(raw.decode("utf-8")))
+                if normalized is None:
+                    return self._failure(request.operation, "MALFORMED_RESPONSE", "Department sandbox API response was not usable", request.correlation_id, request.idempotency_key, response.status)
+                elapsed = round((time.perf_counter() - started) * 1000, 2)
+                _runtime_health[self.source] = {"lastSuccessAt": _now(), "lastResponseMs": elapsed, "errorCategory": None}
+                return AdapterResult(normalized, provider=self.source, operation=request.operation, correlation_id=request.correlation_id, idempotency_key=request.idempotency_key, response_ms=elapsed, success=True, status_code=response.status, metadata={"providerId": self.provider_id})
+        except HTTPError as error:
+            category = "VALIDATION_ERROR" if error.code == 404 else "AUTHENTICATION_ERROR" if error.code == 401 else "AUTHORIZATION_ERROR" if error.code == 403 else "RATE_LIMITED" if error.code == 429 else "VALIDATION_ERROR" if 400 <= error.code < 500 else "UPSTREAM_ERROR"
+            message = "No department record found for this citizen" if error.code == 404 else "Department sandbox API returned an error"
+            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": category}
+            return self._failure(request.operation, category, message, request.correlation_id, request.idempotency_key, error.code)
+        except TimeoutError:
+            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": "TIMEOUT"}
+            return self._failure(request.operation, "TIMEOUT", "Department sandbox API timed out", request.correlation_id, request.idempotency_key)
+        except URLError:
+            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": "NETWORK_ERROR"}
+            return self._failure(request.operation, "NETWORK_ERROR", "Department sandbox API network call failed", request.correlation_id, request.idempotency_key)
+        except json.JSONDecodeError:
+            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": "MALFORMED_RESPONSE"}
+            return self._failure(request.operation, "MALFORMED_RESPONSE", "Department sandbox API returned malformed data", request.correlation_id, request.idempotency_key)
+        except Exception:
+            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": "INTERNAL_ERROR"}
+            return self._failure(request.operation, "INTERNAL_ERROR", "Department sandbox API operation failed safely", request.correlation_id, request.idempotency_key)
+
+    def _execute(self, request, simulate_timeout=False):
+        result = self._http_call(request)
+        for attempt in range(1, int(self.config.get("maxAttempts", 3)) + 1):
+            result.attempts = attempt
+            if result.success or not result.retryable or attempt >= int(self.config.get("maxAttempts", 3)):
+                return result
+            time.sleep(0.08 * attempt)
+            result = self._http_call(request)
+        return result
+
+
 def request_registered_service(service_id, citizen_id, requirement_code=None, correlation_id=None, idempotency_key=None):
     from sqlalchemy.orm import Session
     from app.core.persistence import ProviderCapabilityRow, ProviderRow, ServiceCatalogRow, engine
@@ -332,6 +441,22 @@ def request_registered_service(service_id, citizen_id, requirement_code=None, co
 
 def fetch_registered_service(service_id, citizen_id): return request_registered_service(service_id, citizen_id).record
 def service_available(provider): return is_integration_available(provider)
+
+
+def clear_runtime_health(source: str) -> None:
+    """Clear a recorded transient-failure marker for one integration.
+
+    integration_health() marks a provider DEGRADED once it has failed even
+    once, and nothing clears that marker except a later call to the same
+    provider succeeding -- but a DEGRADED provider is excluded from
+    selection (select_dependency_provider only accepts AVAILABLE/HEALTHY),
+    so nothing would ever call it again to clear it naturally. This lets a
+    caller that has independent reason to believe the underlying issue is
+    resolved (e.g. an operator/admin re-enabling the integration) let the
+    next health check reflect current configuration instead of a stale past
+    failure. Purely additive: nothing existing calls this automatically.
+    """
+    _runtime_health.pop(source, None)
 
 
 def set_integration_availability(source, available, error=None):

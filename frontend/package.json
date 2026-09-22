@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview"},
+  "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview", "test": "vitest run"},
   "dependencies": {"@vitejs/plugin-react": "latest", "vite": "latest", "react": "latest", "react-dom": "latest", "lucide-react": "latest", "clsx": "latest"},
-  "devDependencies": {"tailwindcss": "latest", "postcss": "latest", "autoprefixer": "latest"}
+  "devDependencies": {"tailwindcss": "latest", "postcss": "latest", "autoprefixer": "latest", "vitest": "latest", "@testing-library/react": "latest", "@testing-library/jest-dom": "latest", "@testing-library/user-event": "latest", "jsdom": "latest"}
 }
