@@ -2,12 +2,17 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { languageText } from '../i18n';
 
-export default function SchemesPage({ onViewScheme, language = 'en' }) {
+export default function SchemesPage({ applications, onViewScheme, language = 'en' }) {
   const t = languageText(language);
   const [schemes, setSchemes] = useState(null); // null while loading
   const [error, setError] = useState(null);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('ALL');
+  const appliedByScheme = useMemo(() => {
+    const map = new Map();
+    for (const application of applications || []) map.set(application.serviceId, application);
+    return map;
+  }, [applications]);
 
   useEffect(() => {
     let active = true;
@@ -70,11 +75,13 @@ export default function SchemesPage({ onViewScheme, language = 'en' }) {
           <div className="scheme-grid">
             {filtered.map(scheme => {
               const id = scheme.serviceId || scheme.schemeId;
+              const application = appliedByScheme.get(id);
               return (
                 <article className="scheme-card card" key={id}>
                   <div className="scheme-card-heading">
                     {scheme.category && <span className="tag">{scheme.category}</span>}
                     {scheme.synthetic && <span className="tag demo-tag">{language === 'en' ? 'Demo' : 'नमुना'}</span>}
+                    {application && <span className="tag applied-tag">{application.status === 'SUBMITTED' ? (language === 'en' ? 'Submitted' : 'सादर केले') : t.alreadyApplied}</span>}
                   </div>
                   <h3>{language === 'en' ? scheme.name : (scheme.nameMr || scheme.name)}</h3>
                   <p>{scheme.description}</p>

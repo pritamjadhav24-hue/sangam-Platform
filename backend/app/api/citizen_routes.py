@@ -18,7 +18,7 @@ from app.core.persistence import (citizen_service_snapshot, catalog_snapshot, en
                                   create_application as create_application_authoritative,
                                   mark_application_write_authoritative, upsert_document)
 from app.engine.artifact_retrieval import requirement_data_type, validate_upload_metadata
-from app.engine import requirement_fulfillment
+from app.engine import requirement_fulfillment, submission
 from app.engine.requirement_analyzer import discover
 from app.engine.rules_engine import evaluate
 from app.engine.workflow_engine import APPLICATIONS, create_application, find_active_application, transition_application
@@ -219,6 +219,17 @@ def _safe_application(app: dict) -> dict:
         safe["eligibility"] = {field: app["eligibility"].get(field) for field in ("eligible", "reasons") if field in app["eligibility"]}
     if isinstance(app.get("statusHistory"), list):
         safe["statusHistory"] = [{field: item.get(field) for field in ("status", "at") if field in item} for item in app["statusHistory"]]
+    # Phase 6E: every read of an application (apply/auto-fill/upload/get)
+    # already carries whether it is ready to submit, computed from the same
+    # canonical readiness rule the actual submission endpoint enforces --
+    # the Review page needs no separate endpoint or a second definition of
+    # "complete". Only citizen-safe requirement fields (already built above)
+    # are echoed back for the blocking list.
+    readiness = submission.evaluate_submission_readiness(app)
+    safe["readyForSubmission"] = readiness["ready"] and app.get("status") == submission.SUBMITTABLE_STATUS
+    safe["blockingRequirements"] = [item for item in safe_requirements if item["requirementCode"] in set(readiness["blockingCodes"])]
+    if app.get("status") == submission.SUBMITTED_STATUS:
+        safe["submittedAt"] = app.get("updatedAt")
     return safe
 
 
@@ -306,6 +317,18 @@ def _load_owned_application(application_id: str, citizen_id: str) -> dict:
     if not app or app.get("citizenId") != citizen_id:
         raise HTTPException(status_code=404, detail="Application not found")
     return app
+
+
+def _assert_application_not_submitted(app: dict) -> None:
+    """Fast-path rejection before any provider call/consent is created.
+
+    This is a courtesy check only -- the real, race-proof enforcement is the
+    fresh, lock-protected status check inside requirement_fulfillment.
+    mutate_requirement_under_lock, which every requirement-mutating path
+    routes through regardless of this early check.
+    """
+    if app.get("status") == submission.SUBMITTED_STATUS:
+        raise HTTPException(status_code=409, detail="This application has already been submitted and can no longer be changed.")
 
 
 @router.post("/apply")
@@ -400,12 +423,16 @@ def auto_fill_requirement(application_id: str, requirement_code: str, body: Auto
     citizen_id = user["citizenId"]
     enforce("auto_fill", citizen_id, limit=20, window_seconds=60)
     app = _load_owned_application(application_id, citizen_id)
+    _assert_application_not_submitted(app)
     requirement = requirement_fulfillment.find_requirement(app, requirement_code)
     if requirement is None:
         raise HTTPException(status_code=404, detail="Requirement not found on this application")
 
     if body.decision == "REJECT":
-        application = requirement_fulfillment.reject_auto_fill(app, requirement_code, citizen_id)
+        try:
+            application = requirement_fulfillment.reject_auto_fill(app, requirement_code, citizen_id)
+        except requirement_fulfillment.ApplicationSubmittedError:
+            raise HTTPException(status_code=409, detail="This application has already been submitted and can no longer be changed.")
         audit_bus.append(
             citizen_id, requirement_code, "Citizen declined automatic retrieval for a requirement", "GovOrchestrator",
             "AUTO_FILL_REJECTED", payload={"appId": application_id, "requirementCode": requirement_code, "actorRole": user["role"]},
@@ -430,6 +457,11 @@ def auto_fill_requirement(application_id: str, requirement_code: str, body: Auto
         application = requirement_fulfillment.fulfill_requirement(app, requirement_code, citizen_id, receipt["consentId"], correlation_id=application_id)
     except ConsentAuthorizationError as error:
         raise HTTPException(status_code=403, detail=f"Protected access denied: {error}")
+    except requirement_fulfillment.ApplicationSubmittedError:
+        # A submission committed between this request's own provider call
+        # and its attempt to persist the result -- the result is discarded,
+        # never applied to an application the citizen can no longer edit.
+        raise HTTPException(status_code=409, detail="This application has already been submitted and can no longer be changed.")
 
     updated_requirement = requirement_fulfillment.find_requirement(application, requirement_code)
     audit_bus.append(
@@ -466,6 +498,7 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
     citizen_id = user["citizenId"]
     enforce("requirement_upload", citizen_id, limit=10, window_seconds=60)
     app = _load_owned_application(application_id, citizen_id)
+    _assert_application_not_submitted(app)
     requirement = requirement_fulfillment.find_requirement(app, requirement_code)
     if requirement is None:
         raise HTTPException(status_code=404, detail="Requirement not found on this application")
@@ -485,7 +518,10 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
         target.update({"status": "VALIDATED", "documentId": document_id})
         target.pop("autoFillRequestedAt", None)
 
-    application, _ = requirement_fulfillment.mutate_requirement_under_lock(application_id, requirement_code, mutate)
+    try:
+        application, _ = requirement_fulfillment.mutate_requirement_under_lock(application_id, requirement_code, mutate)
+    except requirement_fulfillment.ApplicationSubmittedError:
+        raise HTTPException(status_code=409, detail="This application has already been submitted and can no longer be changed.")
     upsert_document({
         "documentId": document_id, "appId": application_id, "dependencyId": None,
         "requirementCode": requirement_code, "citizenId": citizen_id, "sourceType": "CITIZEN_UPLOAD",
@@ -499,6 +535,48 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
         payload={"appId": application_id, "requirementCode": requirement_code, "documentId": document_id, "actorRole": user["role"]},
         correlation_id=application_id,
     )
+    return _safe_application(application)
+
+
+@router.post("/applications/{application_id}/submit")
+def submit_citizen_application(application_id: str, user: dict = Depends(require_roles("CITIZEN"))):
+    """Application-level Review -> Submit (Phase 6E).
+
+    Citizen identity comes only from the authenticated JWT -- there is no
+    request body, so there is nothing for the client to spoof. Ownership,
+    existence, and readiness are all re-verified against the authoritative
+    PostgreSQL row under one row lock (app.engine.submission.
+    submit_application), the same lock every requirement mutation already
+    uses, so a requirement finishing (or being manually uploaded) at the
+    exact moment of submission cannot be missed, and two concurrent submit
+    requests cannot both produce an independent submission event -- the
+    second one observes the first's committed SUBMITTED status and returns
+    it unchanged rather than re-transitioning or duplicating any side
+    effect. Once SUBMITTED, this application's requirements can no longer be
+    mutated through Auto-Fill or manual upload (see
+    requirement_fulfillment.ApplicationSubmittedError).
+    """
+    citizen_id = user["citizenId"]
+    enforce("application_submit", citizen_id, limit=10, window_seconds=60)
+    try:
+        application = submission.submit_application(application_id, citizen_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Application not found")
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Application not found")
+    except submission.ApplicationNotSubmittableError:
+        raise HTTPException(status_code=409, detail="This application cannot be submitted in its current state.")
+    except submission.SubmissionNotReadyError as error:
+        safe_app = _safe_application(_load_owned_application(application_id, citizen_id))
+        raise HTTPException(status_code=422, detail={
+            "message": "This application is not ready to submit yet.",
+            "blockingRequirements": safe_app["blockingRequirements"],
+        })
+    audit_bus.append(
+        citizen_id, "APPLICATION", "Citizen submitted application", "GovOrchestrator", "SUBMIT",
+        payload={"appId": application_id, "actorRole": user["role"]}, correlation_id=application_id,
+    )
+    event_bus.publish("APPLICATION_SUBMITTED", {"citizenId": citizen_id, "appId": application_id})
     return _safe_application(application)
 
 

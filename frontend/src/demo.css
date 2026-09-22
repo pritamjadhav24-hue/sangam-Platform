@@ -58,7 +58,12 @@
 .form-section h2 { color: var(--navy); }
 .requirement-list { display: grid; gap: 14px; }
 .requirement-card { display: flex; flex-direction: column; gap: 12px; }
+.requirement-card-heading { display: flex; gap: 13px; align-items: flex-start; }
 .requirement-card-heading h3 { margin: 0 0 4px; }
+.requirement-icon { flex: 0 0 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; font-size: 15px; font-weight: 700; background: #eef1f4; color: var(--muted); }
+.requirement-icon-found { background: #daf1e7; color: #15654d; }
+.requirement-icon-pending { background: #eef4fb; color: var(--blue); }
+.requirement-icon-exception { background: #fff0df; color: #a25a12; }
 .requirement-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .status.pending { background: #eef4fb; color: var(--blue); }
 .upload-form { display: grid; gap: 8px; padding: 14px; background: #f6f9fb; border: 1px solid var(--line); border-radius: 6px; }

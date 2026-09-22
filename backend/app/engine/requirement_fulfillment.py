@@ -47,6 +47,18 @@ from app.engine.validation_engine import validate
 AUTO_FILL_PURPOSE_PREFIX = "AUTO_FILL:"
 SUCCESS_STATUSES = frozenset({"VALIDATED", "RETRIEVED"})
 TERMINAL_STATUSES = frozenset({"VALIDATED", "RETRIEVED", "REJECTED"})
+# workflow_engine.CANONICAL_STATUSES' "SUBMITTED" value -- once an
+# application has been submitted (Phase 6E), requirement-level mutation
+# (Auto-Fill, reject, manual upload) is no longer allowed. Referenced by its
+# literal value rather than imported to avoid a circular import with
+# app.engine.submission, which itself imports SUCCESS_STATUSES from here.
+SUBMITTED_APPLICATION_STATUS = "SUBMITTED"
+
+
+class ApplicationSubmittedError(RuntimeError):
+    """Raised when a requirement-level mutation (Auto-Fill, reject, manual
+    upload) is attempted against an application that has already been
+    submitted. Callers map this to a 409 Conflict."""
 
 
 def auto_fill_purpose(requirement_code: str) -> str:
@@ -265,6 +277,17 @@ def mutate_requirement_under_lock(application_id: str, requirement_code: str, mu
         locked = get_application(application_id, for_update=True, session=session)
         if locked is None:
             raise KeyError(application_id)
+        if locked.get("status") == SUBMITTED_APPLICATION_STATUS:
+            # The same row lock that serializes concurrent requirement
+            # writes against each other also serializes against a
+            # concurrent submission (app.engine.submission.submit_application
+            # takes this exact lock too) -- so this fresh, lock-protected
+            # read is always accurate: if a submission committed anywhere
+            # between this request's own provider call and this write, it is
+            # visible here, and the mutation is refused rather than silently
+            # applied to an application the citizen can no longer edit.
+            session.commit()
+            raise ApplicationSubmittedError(application_id)
         requirements = deepcopy(locked.get("requirements", []))
         requirement = find_requirement({"requirements": requirements}, requirement_code)
         if requirement is None:

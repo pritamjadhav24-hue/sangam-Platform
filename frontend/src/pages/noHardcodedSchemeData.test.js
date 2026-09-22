@@ -23,6 +23,7 @@ const SCANNED_FILES = [
   'SchemesPage.jsx',
   'SchemeDetailPage.jsx',
   'ApplicationFormPage.jsx',
+  'ReviewApplicationPage.jsx',
 ];
 
 describe('no hardcoded scheme/department data in the Phase 6A catalogue pages (requirement 2)', () => {
@@ -83,5 +84,34 @@ describe('Phase 6B application form: no hardcoded fields/documents/departments, 
   it('requirement actions are sourced from api.autoFillRequirement/api.uploadRequirement, never a hardcoded provider/department call', () => {
     expect(source).toMatch(/api\.autoFillRequirement\(/);
     expect(source).toMatch(/api\.uploadRequirement\(/);
+  });
+});
+
+// Phase 6E: the review/submit page reads scheme, personal and requirement
+// data entirely from the API response -- no scheme-specific checklist, no
+// department/provider/source leakage in the confirmation view either.
+describe('Phase 6E review/submit page: data-driven, no hardcoded checklist or provider leakage', () => {
+  const source = readFileSync(join(HERE, 'ReviewApplicationPage.jsx'), 'utf-8');
+
+  it('never hardcodes the example document checklist from the task brief', () => {
+    for (const snippet of ['Domicile Certificate', 'Income Certificate', 'Academic Record']) {
+      expect(source).not.toContain(snippet);
+    }
+  });
+
+  it('never names a department, provider or source system', () => {
+    for (const snippet of ['Revenue Department', 'Education Department', 'Social Welfare Department', 'DigiLocker', 'API Setu', 'adapter', 'providerId']) {
+      expect(source).not.toContain(snippet);
+    }
+  });
+
+  it('renders requirements via a single reusable .map(), not per-requirement branches', () => {
+    expect(source).toMatch(/\.map\(\s*requirement\s*=>/);
+    expect(source).not.toMatch(/if\s*\(\s*(requirement|scheme)(Code|Id)?\s*===/);
+  });
+
+  it('submission is sourced from api.submitApplication, never a client-computed readiness override', () => {
+    expect(source).toMatch(/api\.submitApplication\(/);
+    expect(source).toMatch(/application\.readyForSubmission/);
   });
 });

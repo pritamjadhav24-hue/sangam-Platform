@@ -196,6 +196,27 @@ describe('ApplicationFormPage', () => {
       await waitFor(() => expect(within(screen.getByRole('heading', { name: 'Identity' }).closest('article')).getByText('Verified')).toBeInTheDocument());
     });
 
+    // Phase 6E: Continue to Review must navigate to the review step using
+    // the same already-open application, never creating a second one.
+    it('Phase 6E: Continue to Review navigates to the review page without creating a second application', async () => {
+      const navigate = vi.fn();
+      render(<ApplicationFormPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={navigate} />);
+      await screen.findByText('APP-ZZZ-ALPHA-00001');
+      const user = userEvent.setup();
+      await user.click(screen.getByRole('button', { name: 'Continue to Review' }));
+      expect(navigate).toHaveBeenCalledWith('reviewApplication');
+      expect(api.applyToScheme).toHaveBeenCalledTimes(1);
+    });
+
+    it('Phase 6E: a submitted application disables all requirement actions and shows a submitted notice', async () => {
+      api.applyToScheme.mockResolvedValue({ ...APPLICATION_A, status: 'SUBMITTED' });
+      render(<ApplicationFormPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={() => {}} />);
+      await screen.findByText('APP-ZZZ-ALPHA-00001');
+      expect(screen.getByText('This application has already been submitted.')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Auto-Fill' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Upload Manually' })).not.toBeInTheDocument();
+    });
+
     // Phase 6D: requirement state must be rendered from persisted backend
     // state, not local-only React state, so it survives a fresh page load.
     it('Phase 6D: an Action Required requirement loaded fresh (e.g. after a page refresh) shows its backend-persisted guidance without any prior click in this render', async () => {

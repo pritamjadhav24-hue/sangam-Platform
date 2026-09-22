@@ -118,3 +118,18 @@ def require_roles(*roles: str):
             raise HTTPException(status_code=403, detail=f"Role {user.get('role')} is not allowed for this resource.")
         return user
     return dependency
+
+
+def demo_citizen_switch_enabled() -> bool:
+    """Gate for the demo citizen switcher (list + switch-to endpoints).
+
+    Mirrors the existing SANGAM_ALLOW_DEMO_FALLBACK pattern used throughout
+    the engine layer (app.engine.registry._demo_fallback_enabled,
+    app.engine.adapters): off by default, and impossible to enable at all
+    when SANGAM_ENV=production, regardless of the flag's value. This is a
+    demo/QA convenience, never a real authentication path -- it never
+    accepts a password and only ever issues a token for an account already
+    explicitly marked isDemoCitizen (see persistence.ensure_demo_citizen_accounts).
+    """
+    mode = os.getenv("SANGAM_ENV", "development").strip().lower()
+    return mode not in {"production", "prod"} and os.getenv("SANGAM_ALLOW_DEMO_CITIZEN_SWITCH", "false").lower() in {"1", "true", "yes"}

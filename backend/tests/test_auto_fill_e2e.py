@@ -367,5 +367,111 @@ class AutoFillEndToEndTest(unittest.TestCase):
         self.assertEqual(document_after["sourceType"], "CITIZEN_UPLOAD")
 
 
+class ApplicationSubmissionEndToEndTest(unittest.TestCase):
+    """Phase 6E: the full Review -> Submit flow against real, live-server
+    retrieval (not mocked), reusing this module's existing sandbox fixture.
+    """
+
+    def setUp(self):
+        reset_demo_state()
+        self._created_app_ids: list[str] = []
+
+    def tearDown(self):
+        if not self._created_app_ids:
+            return
+        with Session(engine) as session:
+            session.query(DocumentRow).filter(DocumentRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
+            session.query(ApplicationRow).filter(ApplicationRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
+            session.commit()
+
+    def _create_app(self, citizen_id: str, requirements: list[dict]) -> dict:
+        application = create_application_authoritative({
+            "citizenId": citizen_id, "serviceId": "PHASE6E-E2E-SERVICE", "status": "IN_PROGRESS",
+            "requirements": requirements,
+        })
+        self._created_app_ids.append(application["appId"])
+        return application
+
+    def test_full_review_and_submit_flow_with_real_retrieval(self):
+        """Create/resume application -> satisfy required requirements via
+        real Auto-Fill (live sandbox HTTP, no mocks) -> submit -> verify
+        authoritative submitted state -> repeat submit (idempotent, no
+        duplicate submission) -> verify post-submit requirement mutation is
+        rejected."""
+        from app.api.citizen_routes import AutoFillDecision, RequirementUpload, auto_fill_requirement, submit_citizen_application, upload_requirement_document
+        from fastapi import HTTPException
+
+        citizen_id = _citizen_with_land_record_and_ration_card()
+        application = self._create_app(citizen_id, [
+            {"code": "LAND_HOLDING", "label": "Land holding", "mandatory": True, "status": "NOT_PROVIDED", "dataType": "RECORD"},
+            {"code": "RATION_CARD", "label": "Ration card", "mandatory": True, "status": "NOT_PROVIDED", "dataType": "CERTIFICATE"},
+        ])
+
+        for code in ("LAND_HOLDING", "RATION_CARD"):
+            auto_fill_requirement(application["appId"], code, AutoFillDecision(decision="ACCEPT"), user=_user(citizen_id))
+
+        # Review: the application should now report itself ready.
+        review = get_citizen_application(application["appId"], user=_user(citizen_id))
+        self.assertTrue(review["readyForSubmission"], review)
+        self.assertEqual(review["blockingRequirements"], [])
+
+        submitted = submit_citizen_application(application["appId"], user=_user(citizen_id))
+        self.assertEqual(submitted["status"], "SUBMITTED")
+        self.assertIn("submittedAt", submitted)
+
+        # Repeat submit: idempotent, no duplicate logical submission.
+        resubmitted = submit_citizen_application(application["appId"], user=_user(citizen_id))
+        self.assertEqual(resubmitted["status"], "SUBMITTED")
+        self.assertEqual(resubmitted["submittedAt"], submitted["submittedAt"])
+        with Session(engine) as session:
+            from app.core.persistence import WorkflowHistoryRow
+            history = session.query(WorkflowHistoryRow).filter_by(app_id=application["appId"], status="SUBMITTED").all()
+        self.assertEqual(len(history), 1)
+
+        # Post-submit mutation is rejected through both real mutation paths.
+        with self.assertRaises(HTTPException) as ctx:
+            auto_fill_requirement(application["appId"], "LAND_HOLDING", AutoFillDecision(decision="ACCEPT"), user=_user(citizen_id))
+        self.assertEqual(ctx.exception.status_code, 409)
+        with self.assertRaises(HTTPException) as ctx:
+            upload_requirement_document(application["appId"], "RATION_CARD", RequirementUpload(title="x", content="y"), user=_user(citizen_id))
+        self.assertEqual(ctx.exception.status_code, 409)
+
+        # Final authoritative state remains SUBMITTED, untouched by the
+        # rejected mutation attempts.
+        final = get_citizen_application(application["appId"], user=_user(citizen_id))
+        self.assertEqual(final["status"], "SUBMITTED")
+
+    def test_incomplete_application_cannot_be_submitted_and_remains_editable(self):
+        """Review an incomplete application -> submission is rejected
+        safely -> the application remains editable/unsubmitted."""
+        from app.api.citizen_routes import AutoFillDecision, auto_fill_requirement, submit_citizen_application
+        from fastapi import HTTPException
+
+        citizen_id = _citizen_with_land_record_and_ration_card()
+        application = self._create_app(citizen_id, [
+            {"code": "LAND_HOLDING", "label": "Land holding", "mandatory": True, "status": "NOT_PROVIDED", "dataType": "RECORD"},
+            {"code": "RATION_CARD", "label": "Ration card", "mandatory": True, "status": "NOT_PROVIDED", "dataType": "CERTIFICATE"},
+        ])
+        auto_fill_requirement(application["appId"], "LAND_HOLDING", AutoFillDecision(decision="ACCEPT"), user=_user(citizen_id))
+        # RATION_CARD deliberately left NOT_PROVIDED.
+
+        review = get_citizen_application(application["appId"], user=_user(citizen_id))
+        self.assertFalse(review["readyForSubmission"], review)
+        blocking_codes = {item["requirementCode"] for item in review["blockingRequirements"]}
+        self.assertIn("RATION_CARD", blocking_codes)
+
+        with self.assertRaises(HTTPException) as ctx:
+            submit_citizen_application(application["appId"], user=_user(citizen_id))
+        self.assertEqual(ctx.exception.status_code, 422)
+
+        still_editable = get_citizen_application(application["appId"], user=_user(citizen_id))
+        self.assertEqual(still_editable["status"], "IN_PROGRESS")
+        # Manual upload / Auto-Fill remain usable -- the rejected submit
+        # attempt did not lock the application.
+        auto_fill_requirement(application["appId"], "RATION_CARD", AutoFillDecision(decision="ACCEPT"), user=_user(citizen_id))
+        final_review = get_citizen_application(application["appId"], user=_user(citizen_id))
+        self.assertTrue(final_review["readyForSubmission"], final_review)
+
+
 if __name__ == "__main__":
     unittest.main()

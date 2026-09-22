@@ -1,35 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { NEEDS_ATTENTION_STATUSES, requirementStateClass, requirementStateIcon, requirementStateLabel } from '../requirementState';
 
-// RETRIEVED (non-document requirements) and VALIDATED (document/certificate
-// requirements) are kept as distinct persisted statuses -- they still gate
-// different behaviour (document lifecycle) -- but both represent the same
-// citizen-facing outcome ("this was successfully verified, no action
-// needed"), so they share one label rather than exposing an internal
-// document-vs-record distinction the citizen has no reason to care about.
-const STATE_LABELS = {
-  en: {
-    NOT_PROVIDED: 'Not provided', PROCESSING: 'Processing', RETRIEVED: 'Verified', VALIDATED: 'Verified',
-    WAITING: 'Waiting', ACTION_REQUIRED: 'Action required', REJECTED: 'Rejected', FAILED: 'Failed',
-  },
-  mr: {
-    NOT_PROVIDED: 'दिलेले नाही', PROCESSING: 'प्रक्रिया सुरू', RETRIEVED: 'पडताळणी झाली', VALIDATED: 'पडताळणी झाली',
-    WAITING: 'प्रतीक्षेत', ACTION_REQUIRED: 'कृती आवश्यक', REJECTED: 'नाकारले', FAILED: 'अयशस्वी',
-  },
-};
-
-const STATE_CLASS = {
-  NOT_PROVIDED: 'missing', PROCESSING: 'pending', RETRIEVED: 'found', VALIDATED: 'found',
-  WAITING: 'pending', ACTION_REQUIRED: 'exception', REJECTED: 'exception', FAILED: 'exception',
-};
-
-// Statuses that mean a prior Auto-Fill attempt did not (yet) succeed --
-// the action button reads "Retry" instead of "Auto-Fill" for these, and the
-// backend's own persisted guidance (requirement.userAction) is shown so the
-// message survives a page refresh instead of living only in local state.
-const NEEDS_ATTENTION_STATUSES = new Set(['WAITING', 'ACTION_REQUIRED', 'REJECTED', 'FAILED']);
-
-function RequirementCard({ requirement, applicationId, language, onChange }) {
+function RequirementCard({ requirement, applicationId, language, onChange, locked }) {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
   const [title, setTitle] = useState('');
@@ -38,9 +11,8 @@ function RequirementCard({ requirement, applicationId, language, onChange }) {
   const [error, setError] = useState(null);
 
   const isDocumentLike = requirement.dataType === 'DOCUMENT' || requirement.dataType === 'CERTIFICATE';
-  const stateLabels = STATE_LABELS[language] || STATE_LABELS.en;
-  const label = stateLabels[requirement.status] || requirement.status;
-  const statusClass = STATE_CLASS[requirement.status] || 'missing';
+  const label = requirementStateLabel(requirement.status, language);
+  const statusClass = requirementStateClass(requirement.status);
   const needsAttention = NEEDS_ATTENTION_STATUSES.has(requirement.status);
   const isRetry = needsAttention; // same action, different button copy
 
@@ -83,6 +55,7 @@ function RequirementCard({ requirement, applicationId, language, onChange }) {
   return (
     <article className="card requirement-card">
       <div className="requirement-card-heading">
+        <span className={`requirement-icon requirement-icon-${statusClass}`} aria-hidden="true">{requirementStateIcon(requirement.status)}</span>
         <div>
           <h3>{requirement.displayLabel}{requirement.mandatory === false && <small className="muted"> ({language === 'en' ? 'optional' : 'ऐच्छिक'})</small>}</h3>
           <p className="muted">{language === 'en' ? 'Status' : 'स्थिती'}: <span className={`status ${statusClass}`}>{label}</span></p>
@@ -96,7 +69,7 @@ function RequirementCard({ requirement, applicationId, language, onChange }) {
           a button click. */}
       {needsAttention && requirement.userAction && <div className="notice">{requirement.userAction}</div>}
 
-      {consentOpen && (
+      {consentOpen && !locked && (
         <div className="notice consent-prompt">
           <p>{language === 'en'
             ? 'Allow SANGAM to retrieve and verify this information for your application?'
@@ -108,20 +81,24 @@ function RequirementCard({ requirement, applicationId, language, onChange }) {
         </div>
       )}
 
-      <div className="requirement-actions">
-        <button className="outline" disabled={busy !== null} onClick={() => setConsentOpen(true)}>
-          {busy === 'auto-fill'
-            ? (language === 'en' ? 'Processing…' : 'प्रक्रिया सुरू…')
-            : isRetry
-              ? (language === 'en' ? 'Retry' : 'पुन्हा प्रयत्न करा')
-              : (language === 'en' ? 'Auto-Fill' : 'ऑटो-फिल')}
-        </button>
-        {isDocumentLike && (
-          <button className="outline" disabled={busy !== null} onClick={() => setUploadOpen(open => !open)}>
-            {language === 'en' ? 'Upload Manually' : 'स्वतः अपलोड करा'}
+      {locked ? (
+        <p className="muted">{language === 'en' ? 'This application has been submitted and can no longer be changed.' : 'हा अर्ज सादर करण्यात आला आहे आणि तो आता बदलता येणार नाही.'}</p>
+      ) : (
+        <div className="requirement-actions">
+          <button className="outline" disabled={busy !== null} onClick={() => setConsentOpen(true)}>
+            {busy === 'auto-fill'
+              ? (language === 'en' ? 'Processing…' : 'प्रक्रिया सुरू…')
+              : isRetry
+                ? (language === 'en' ? 'Retry' : 'पुन्हा प्रयत्न करा')
+                : (language === 'en' ? 'Auto-Fill' : 'ऑटो-फिल')}
           </button>
-        )}
-      </div>
+          {isDocumentLike && (
+            <button className="outline" disabled={busy !== null} onClick={() => setUploadOpen(open => !open)}>
+              {language === 'en' ? 'Upload Manually' : 'स्वतः अपलोड करा'}
+            </button>
+          )}
+        </div>
+      )}
 
       {isDocumentLike && uploadOpen && (
         <form className="upload-form" onSubmit={handleUploadSubmit}>
@@ -197,6 +174,12 @@ export default function ApplicationFormPage({ schemeId, citizen, navigate, langu
         </div>
       </div>
 
+      {application.status === 'SUBMITTED' && (
+        <div className="alert success" role="status">
+          {language === 'en' ? 'This application has already been submitted.' : 'हा अर्ज आधीच सादर करण्यात आला आहे.'}
+        </div>
+      )}
+
       <section className="card form-section">
         <h2>{language === 'en' ? '1. Personal details' : '१. वैयक्तिक तपशील'}</h2>
         <ul className="compact">
@@ -225,6 +208,7 @@ export default function ApplicationFormPage({ schemeId, citizen, navigate, langu
               applicationId={application.appId}
               language={language}
               onChange={updateRequirement}
+              locked={application.status === 'SUBMITTED'}
             />
           ))}
         </div>
@@ -233,9 +217,12 @@ export default function ApplicationFormPage({ schemeId, citizen, navigate, langu
       <section className="card form-section scheme-detail-actions">
         <div>
           <h2>{language === 'en' ? '4. Review & continue' : '४. पुनरावलोकन व पुढे जा'}</h2>
-          <p className="muted">{language === 'en' ? 'Final review and submission will be available in a future release.' : 'अंतिम पुनरावलोकन व सादरीकरण भविष्यातील आवृत्तीत उपलब्ध होईल.'}</p>
+          <p className="muted">{language === 'en' ? 'Review your application before submitting it.' : 'सादर करण्यापूर्वी आपल्या अर्जाचे पुनरावलोकन करा.'}</p>
         </div>
-        <button className="outline" onClick={() => navigate('dashboard')}>{language === 'en' ? 'Save & continue later' : 'जतन करा व नंतर सुरू ठेवा'}</button>
+        <div className="requirement-actions">
+          <button className="outline" onClick={() => navigate('dashboard')}>{language === 'en' ? 'Save & continue later' : 'जतन करा व नंतर सुरू ठेवा'}</button>
+          <button className="primary" onClick={() => navigate('reviewApplication')}>{language === 'en' ? 'Continue to Review' : 'पुनरावलोकनाकडे जा'}</button>
+        </div>
       </section>
     </main>
   );

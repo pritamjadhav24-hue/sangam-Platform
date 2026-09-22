@@ -14,6 +14,11 @@ async function request(path, options = {}) {
 }
 export const api = {
   login: (citizenId, password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ citizenId, password }) }),
+  // DEMO ONLY: lists/switches between seeded synthetic citizens. Backend
+  // returns an empty list when demo switching isn't enabled server-side, so
+  // the UI naturally hides the control rather than hardcoding a citizen list.
+  demoCitizens: () => request('/auth/demo-citizens').catch(() => ({ citizens: [] })),
+  demoLogin: citizenId => request('/auth/demo-login', { method: 'POST', body: JSON.stringify({ citizenId }) }),
   schemes: () => request('/citizen/schemes'),
   services: () => request('/citizen/services'),
   service: serviceId => request(`/citizen/services/${encodeURIComponent(serviceId)}`),
@@ -23,6 +28,7 @@ export const api = {
   applyToScheme: schemeId => request('/citizen/apply', { method: 'POST', body: JSON.stringify({ schemeId }) }),
   autoFillRequirement: (applicationId, requirementCode, decision = 'ACCEPT') => request(`/citizen/applications/${encodeURIComponent(applicationId)}/requirements/${encodeURIComponent(requirementCode)}/auto-fill`, { method: 'POST', body: JSON.stringify({ decision }) }),
   uploadRequirement: (applicationId, requirementCode, body) => request(`/citizen/applications/${encodeURIComponent(applicationId)}/requirements/${encodeURIComponent(requirementCode)}/upload`, { method: 'POST', body: JSON.stringify(body) }),
+  submitApplication: applicationId => request(`/citizen/applications/${encodeURIComponent(applicationId)}/submit`, { method: 'POST', body: JSON.stringify({}) }),
   catalog: () => request('/catalog'),
   discover: (citizenId, timeout = false, schemeId = '') => request(`/citizen/discover?citizen_id=${encodeURIComponent(citizenId)}&simulate_timeout=${timeout}${schemeId ? `&scheme_id=${encodeURIComponent(schemeId)}` : ''}`),
   consent: (citizenId, allow, schemeId = null) => request('/citizen/consent', { method: 'POST', body: JSON.stringify({ citizenId, allow, schemeId }) }),

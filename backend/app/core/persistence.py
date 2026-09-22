@@ -1695,6 +1695,66 @@ def ensure_user_accounts() -> None:
         session.commit()
 
 
+def select_demo_switchable_citizen_ids(limit: int = 10) -> list[str]:
+    """Deterministically pick one synthetic citizen per distinct persona from
+    the platform citizen pool (STUDENT, FARMER, SENIOR_CITIZEN, ...), in
+    generation order. Used both to seed demo-loginable accounts and to
+    answer the "which citizens can I demo-switch to" listing -- one function,
+    so the two can never drift apart.
+    """
+    from app.seeds.synthetic_identity_pool import generate_citizen_pool
+    seen_personas: set[str] = set()
+    selected: list[str] = []
+    for citizen in generate_citizen_pool():
+        if citizen["persona"] in seen_personas:
+            continue
+        seen_personas.add(citizen["persona"])
+        selected.append(citizen["citizenId"])
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def ensure_demo_citizen_accounts() -> None:
+    """Give a diverse, persona-spanning slice of the synthetic platform
+    citizen pool (app.core.persistence.CitizenRow, seeded by
+    seed_platform_citizens) real, loginable PostgreSQL accounts.
+
+    This is what makes the "demo citizen switcher" real rather than cosmetic:
+    each account here is an ordinary UserAccountRow authenticate()/issue_token()
+    already know how to handle, with its profile payload copied verbatim from
+    the citizen's own persisted CitizenRow -- never a separate hardcoded
+    profile. All such accounts share one demo-only password (never a
+    per-citizen secret, since there are dozens of them and none represent a
+    real identity) and are marked isDemoCitizen so the demo-switch endpoints
+    can never be used to authenticate as a citizen outside this explicit set.
+    """
+    if os.getenv("SANGAM_SEED_DEMO_USERS", "false").lower() not in {"1", "true", "yes"}:
+        return
+    demo_password = os.getenv("SANGAM_DEMO_CITIZEN_PASSWORD")
+    if not demo_password:
+        return
+    from app.core.auth import hash_password
+
+    with Session(engine) as session:
+        citizen_ids = select_demo_switchable_citizen_ids()
+        rows = {row.citizen_id: row for row in session.query(CitizenRow).filter(CitizenRow.citizen_id.in_(citizen_ids)).all()}
+        if not rows:
+            return  # CitizenRow not seeded yet -- nothing to do this run.
+        password_hash = hash_password(demo_password)
+        for citizen_id in citizen_ids:
+            citizen = rows.get(citizen_id)
+            if citizen is None or session.get(UserAccountRow, citizen_id) is not None:
+                continue
+            payload = {
+                "userId": citizen_id, "citizenId": citizen_id, "name": citizen.full_name,
+                "dob": citizen.date_of_birth, "phone": citizen.phone, "role": "CITIZEN",
+                "district": citizen.district, "persona": citizen.persona, "isDemoCitizen": True,
+            }
+            session.add(UserAccountRow(user_id=citizen_id, role="CITIZEN", password_hash=password_hash, payload=payload))
+        session.commit()
+
+
 def _int_suffix(value: str, default: int) -> int:
     try:
         return int(value.rsplit("-", 1)[-1]) + 1
