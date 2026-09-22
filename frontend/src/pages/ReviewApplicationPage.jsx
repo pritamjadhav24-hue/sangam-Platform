@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { requirementStateClass, requirementStateLabel } from '../requirementState';
+import { categoryLabel, translateNotification } from '../i18n';
 import ApplicationTimeline from '../components/ApplicationTimeline';
 
 export default function ReviewApplicationPage({ schemeId, citizen, navigate, language = 'en' }) {
@@ -120,12 +121,15 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
           <section className="card form-section">
             <h2>{language === 'en' ? 'Updates' : 'अद्यतने'}</h2>
             <ul className="compact">
-              {relatedNotifications.map(item => (
-                <li key={item.notificationId}>
-                  <span>{item.title}</span>
-                  <span className="muted">{item.message}</span>
-                </li>
-              ))}
+              {relatedNotifications.map(item => {
+                const note = translateNotification(item, language);
+                return (
+                  <li key={item.notificationId}>
+                    <span>{note.title}</span>
+                    <span className="muted">{note.message}</span>
+                  </li>
+                );
+              })}
             </ul>
           </section>
         )}
@@ -148,8 +152,8 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
 
       <section className="card form-section">
         <h2>{language === 'en' ? 'Scheme' : 'योजना'}</h2>
-        <p className="muted">{scheme?.category}</p>
-        {scheme?.description && <p>{scheme.description}</p>}
+        <p className="muted">{categoryLabel(scheme?.category, language)}</p>
+        {scheme?.description && <p>{language === 'en' ? scheme.description : (scheme.descriptionMr || scheme.description)}</p>}
       </section>
 
       <section className="card form-section">

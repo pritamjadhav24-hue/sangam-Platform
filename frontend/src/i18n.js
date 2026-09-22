@@ -44,3 +44,96 @@ export const text = {
 };
 
 export const languageText = language => text[language] || text.en;
+
+export const CATEGORY_LABELS = {
+  en: {
+    Education: 'Education', Health: 'Health', Agriculture: 'Agriculture',
+    Welfare: 'Social Welfare', 'Social Welfare': 'Social Welfare',
+    Employment: 'Employment & Skills', 'Employment & Skills': 'Employment & Skills',
+    Other: 'Other services',
+  },
+  mr: {
+    Education: 'शिक्षण', Health: 'आरोग्य', Agriculture: 'कृषी',
+    Welfare: 'समाज कल्याण', 'Social Welfare': 'समाज कल्याण',
+    Employment: 'रोजगार व कौशल्य', 'Employment & Skills': 'रोजगार व कौशल्य',
+    Other: 'इतर सेवा',
+  },
+};
+
+export function categoryLabel(category, language) {
+  if (!category) return '';
+  const labels = CATEGORY_LABELS[language] || CATEGORY_LABELS.en;
+  return labels[category] || category;
+}
+
+export function userActionLabel(action, language) {
+  if (!action || language !== 'mr') return action;
+  const mrActions = {
+    'No action required': 'कोणतीही कृती आवश्यक नाही',
+    'Use Auto-Fill or Manual Upload to provide this.': 'हे देण्यासाठी ऑटो-फिल किंवा स्वतः अपलोडचा वापर करा.',
+    'Automatic retrieval was not allowed. You can provide this manually.': 'स्वयंचलित पुनर्प्राप्तीस अनुमती दिली नाही. आपण हे स्वतः अपलोड करू शकता.',
+    'The retrieved information could not be verified. You can provide this manually.': 'मिळालेली माहिती पडताळता आली नाही. आपण हे स्वतः प्रदान करू शकता.',
+    'Retrieval is in progress. You can try again shortly.': 'माहिती मिळवण्याची प्रक्रिया सुरू आहे. कृपया थोड्या वेळाने पुन्हा प्रयत्न करा.',
+    'Automatic retrieval could not complete. You can provide this manually.': 'स्वयंचलित पुनर्प्राप्ती पूर्ण होऊ शकली नाही. आपण हे स्वतः अपलोड करू शकता.',
+    'Retry verification or request help': 'पुन्हा पडताळणी करा किंवा मदत मागा',
+  };
+  return mrActions[action] || action;
+}
+
+const NOTIFICATION_TITLES_MR = {
+  'Action needed': 'कृती आवश्यक',
+  'Document verified': 'दस्तऐवज पडताळला',
+  'Application submitted': 'अर्ज सादर झाला',
+};
+
+const DOCUMENT_NAMES_MR = {
+  'Domicile Certificate': 'अधिवास प्रमाणपत्र',
+  'domicile certificate': 'अधिवास प्रमाणपत्र',
+  'Income Certificate': 'उत्पन्न प्रमाणपत्र',
+  'income certificate': 'उत्पन्न प्रमाणपत्र',
+  'Ration Card': 'रेशन कार्ड',
+  'ration card': 'रेशन कार्ड',
+  'Land Holding Record': 'जमीन धारणा नोंद',
+  'land holding record': 'जमीन धारणा नोंद',
+  'Caste Certificate': 'जातीचा दाखला',
+  'caste certificate': 'जातीचा दाखला',
+  'Academic Record': 'शैक्षणिक नोंद',
+  'academic record': 'शैक्षणिक नोंद',
+};
+
+export function translateNotification(notification, language) {
+  if (!notification || language !== 'mr') return notification || {};
+  const rawTitle = notification.title || '';
+  const rawMessage = notification.message || '';
+  const title = NOTIFICATION_TITLES_MR[rawTitle] || rawTitle;
+
+  let message = rawMessage;
+  // Match "Your <name> could not be retrieved automatically. Please upload it manually."
+  const failDocMatch = rawMessage.match(/^Your (.*) could not be retrieved automatically\. Please upload it manually\.$/);
+  if (failDocMatch) {
+    const docName = DOCUMENT_NAMES_MR[failDocMatch[1]] || failDocMatch[1];
+    message = `आपले ${docName} आपोआप मिळवता आले नाही. कृपया स्वतः अपलोड करा.`;
+  } else {
+    // Match "We could not verify your <name> automatically. Please try again later."
+    const failNonDocMatch = rawMessage.match(/^We could not verify your (.*) automatically\. Please try again later\.$/);
+    if (failNonDocMatch) {
+      const fieldName = DOCUMENT_NAMES_MR[failNonDocMatch[1]] || failNonDocMatch[1];
+      message = `आम्ही आपले ${fieldName} आपोआप पडताळू शकलो नाही. कृपया नंतर पुन्हा प्रयत्न करा.`;
+    } else {
+      // Match "Your <name> has been verified."
+      const verifiedMatch = rawMessage.match(/^Your (.*) has been verified\.$/);
+      if (verifiedMatch) {
+        const docName = DOCUMENT_NAMES_MR[verifiedMatch[1]] || verifiedMatch[1];
+        message = `आपले ${docName} पडताळले गेले आहे.`;
+      } else {
+        // Match "Your application for <scheme> was submitted successfully."
+        const submitMatch = rawMessage.match(/^Your application for (.*) was submitted successfully\.$/);
+        if (submitMatch) {
+          message = `${submitMatch[1]} साठीचा आपला अर्ज यशस्वीपणे सादर झाला आहे.`;
+        }
+      }
+    }
+  }
+
+  return { ...notification, title, message };
+}

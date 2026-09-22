@@ -71,7 +71,7 @@ export default function App() {
       setAppId(notification.applicationId); setPage('myApplications');
     } else if (user.role === 'OFFICER') setPage('officer'); else if (user.role === 'ADMIN') setPage('health');
   }
-  if (!user) return <><Navbar page={page} setPage={setPage} language={language} onLanguageChange={changeLanguage} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} /><LoginPage onLogin={login} /></>;
+  if (!user) return <><Navbar page={page} setPage={setPage} language={language} onLanguageChange={changeLanguage} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} /><LoginPage onLogin={login} language={language} /></>;
   const props = { navigate, language };
   const t = languageText(language);
   const content = {
@@ -92,7 +92,27 @@ export default function App() {
     health: <IntegrationHealthPage onHealth={api.integrationHealth} onReset={api.resetDemo} />,
     audit: <AuditLineagePage onAudit={api.audit} />,
   }[page] || null;
-  return <><Navbar page={page} setPage={setPage} citizen={user} language={language} onLanguageChange={changeLanguage} onLogout={logout} onNotificationSelect={onNotificationSelect} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} />{content}<Footer /></>;
+  return <><Navbar page={page} setPage={setPage} citizen={user} language={language} onLanguageChange={changeLanguage} onLogout={logout} onNotificationSelect={onNotificationSelect} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} />{content}<Footer language={language} /></>;
 }
 
-function Footer() { return <footer className="site-footer"><div className="footer-brand"><SangamMark size={30}/><div><b>SANGAM</b><span>Federated Government Interoperability Platform</span></div></div><div className="footer-links"><span>Accessibility</span><span>Privacy</span><span>Help</span><span>Terms</span></div><small>SIH 2026 Prototype · Connecting Government Services, Seamlessly.</small></footer>; }
+function Footer({ language = 'en' }) {
+  const isMr = language === 'mr';
+  return (
+    <footer className="site-footer">
+      <div className="footer-brand">
+        <SangamMark size={30} />
+        <div>
+          <b>SANGAM</b>
+          <span>{isMr ? 'फेडरेटेड शासकीय इंटरऑपरेबिलिटी प्लॅटफॉर्म' : 'Federated Government Interoperability Platform'}</span>
+        </div>
+      </div>
+      <div className="footer-links">
+        <span>{isMr ? 'सुलभता' : 'Accessibility'}</span>
+        <span>{isMr ? 'गोपनीयता' : 'Privacy'}</span>
+        <span>{isMr ? 'मदत' : 'Help'}</span>
+        <span>{isMr ? 'अटी' : 'Terms'}</span>
+      </div>
+      <small>{isMr ? 'SIH २०२६ प्रोटोटाइप · शासकीय सेवांचे अखंड, सुलभ एकत्रीकरण.' : 'SIH 2026 Prototype · Connecting Government Services, Seamlessly.'}</small>
+    </footer>
+  );
+}

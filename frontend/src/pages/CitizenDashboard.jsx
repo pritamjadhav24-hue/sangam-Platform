@@ -1,4 +1,4 @@
-import { languageText } from '../i18n';
+import { languageText, categoryLabel } from '../i18n';
 import { NEEDS_ATTENTION_STATUSES } from '../requirementState';
 import { applicationStateClass, applicationStateLabel } from '../applicationState';
 
@@ -55,7 +55,7 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
         <div className="track-box">
           <div><p className="eyebrow">{t.trackTitle}</p><label htmlFor="quick-track">{t.applicationId}</label></div>
           <div className="track-input">
-            <input id="quick-track" placeholder="Application ID" onKeyDown={event => { if (event.key === 'Enter' && event.currentTarget.value) navigate('tracking', event.currentTarget.value); }} />
+            <input id="quick-track" placeholder={t.applicationId} onKeyDown={event => { if (event.key === 'Enter' && event.currentTarget.value) navigate('tracking', event.currentTarget.value); }} />
             <button className="primary" onClick={() => { const value = document.getElementById('quick-track')?.value; if (value) navigate('tracking', value); }}>{t.track}</button>
           </div>
         </div>
@@ -123,7 +123,7 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
               return (
                 <article className="scheme-card card" key={id}>
                   <div className="scheme-card-heading">
-                    {scheme.category && <span className="tag">{scheme.category}</span>}
+                    {scheme.category && <span className="tag">{categoryLabel(scheme.category, language)}</span>}
                     {appliedSchemeIds.has(id) && <span className="tag applied-tag">{t.alreadyApplied}</span>}
                   </div>
                   <h3>{language === 'en' ? scheme.name : (scheme.nameMr || scheme.name)}</h3>

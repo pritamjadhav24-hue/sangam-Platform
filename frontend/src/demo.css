@@ -15,7 +15,7 @@
 .conflict-box { border-left-color: #b8791d; }
 .notification-wrap { position: relative; }
 .notification-button { border: 1px solid #E8D5D0; background: #fff; color: #562C2C; border-radius: 3px; padding: 8px 10px; cursor: pointer; font: inherit; }
-.notification-badge { display: inline-grid; place-items: center; min-width: 19px; height: 19px; margin-left: 4px; border-radius: 10px; background: #b64636; color: #fff; font-size: 11px; }
+.notification-badge { display: inline-grid; place-items: center; min-width: 19px; height: 19px; margin-left: 4px; border-radius: 10px; background: #F2542D; color: #fff; font-size: 11px; }
 .notification-panel { position: absolute; z-index: 10; right: 0; top: 42px; width: 330px; max-height: 420px; overflow-y: auto; background: #fff; border: 1px solid #E8D5D0; box-shadow: 0 5px 18px #14213d22; padding: 8px; }
 .notification-item { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid #E8D5D0; background: #fff; padding: 10px; cursor: pointer; color: #562C2C; }
 .notification-item.unread { background: #F5DFDB; }
@@ -87,4 +87,4 @@
 button.link { border: 0; background: none; padding: 0; font: inherit; color: var(--blue); cursor: pointer; text-decoration: underline; }
 .document-preview { display: grid; gap: 8px; }
 .document-preview-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-.document-preview pre { margin: 0; padding: 14px; background: #fff; border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 13px; color: #2b3a4a; max-height: 320px; overflow-y: auto; }
+.document-preview pre { margin: 0; padding: 14px; background: #fff; border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 13px; color: #3A2626; max-height: 320px; overflow-y: auto; }

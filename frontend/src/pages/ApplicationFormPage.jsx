@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { NEEDS_ATTENTION_STATUSES, requirementStateClass, requirementStateIcon, requirementStateLabel } from '../requirementState';
+import { categoryLabel, userActionLabel } from '../i18n';
 
 function RequirementCard({ requirement, applicationId, language, onChange, locked }) {
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -102,7 +103,7 @@ function RequirementCard({ requirement, applicationId, language, onChange, locke
           page refresh/reopen because it is derived from requirement.userAction
           (part of the API response), not from something set only right after
           a button click. */}
-      {needsAttention && requirement.userAction && <div className="notice">{requirement.userAction}</div>}
+      {needsAttention && requirement.userAction && <div className="notice">{userActionLabel(requirement.userAction, language)}</div>}
 
       {consentOpen && !locked && (
         <div className="notice consent-prompt">
@@ -159,7 +160,7 @@ function RequirementCard({ requirement, applicationId, language, onChange, locke
       {isDocumentLike && uploadOpen && (
         <form className="upload-form" onSubmit={handleUploadSubmit}>
           <label htmlFor={`title-${requirement.requirementCode}`}>{language === 'en' ? 'Document title' : 'दस्तऐवजाचे शीर्षक'}</label>
-          <input id={`title-${requirement.requirementCode}`} required value={title} onChange={event => setTitle(event.target.value)} placeholder={requirement.displayLabel} />
+          <input id={`title-${requirement.requirementCode}`} required value={title} onChange={event => setTitle(event.target.value)} placeholder={language === 'en' ? requirement.displayLabel : (requirement.displayLabelMr || requirement.displayLabel)} />
           <label htmlFor={`content-${requirement.requirementCode}`}>{language === 'en' ? 'Document details (demo upload)' : 'दस्तऐवज तपशील (नमुना अपलोड)'}</label>
           <textarea id={`content-${requirement.requirementCode}`} required rows={3} value={content} onChange={event => setContent(event.target.value)} placeholder={language === 'en' ? 'This is a synthetic/demo upload -- no real document is required in the prototype.' : 'हे एक नमुना अपलोड आहे -- प्रोटोटाइपमध्ये खऱ्या दस्तऐवजाची आवश्यकता नाही.'} />
           <div className="actions">
@@ -249,8 +250,8 @@ export default function ApplicationFormPage({ schemeId, citizen, navigate, langu
       {scheme && (
         <section className="card form-section">
           <h2>{language === 'en' ? '2. Scheme information' : '२. योजना माहिती'}</h2>
-          <p className="muted">{scheme.category}</p>
-          <p>{scheme.description}</p>
+          <p className="muted">{categoryLabel(scheme.category, language)}</p>
+          <p>{language === 'en' ? scheme.description : (scheme.descriptionMr || scheme.description)}</p>
         </section>
       )}
 

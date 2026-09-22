@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
-import { languageText } from '../i18n';
+import { languageText, categoryLabel } from '../i18n';
 import { applicationStateLabel } from '../applicationState';
 
 export default function SchemesPage({ applications, onViewScheme, language = 'en' }) {
@@ -61,7 +61,7 @@ export default function SchemesPage({ applications, onViewScheme, language = 'en
           <div className="category-filters" role="group" aria-label={language === 'en' ? 'Filter by category' : 'श्रेणीनुसार गाळा'}>
             {categories.map(cat => (
               <button key={cat} type="button" className={cat === category ? 'chip selected' : 'chip'} onClick={() => setCategory(cat)}>
-                {cat === 'ALL' ? (language === 'en' ? 'All categories' : 'सर्व श्रेणी') : cat}
+                {cat === 'ALL' ? (language === 'en' ? 'All categories' : 'सर्व श्रेणी') : categoryLabel(cat, language)}
               </button>
             ))}
           </div>
@@ -80,7 +80,7 @@ export default function SchemesPage({ applications, onViewScheme, language = 'en
               return (
                 <article className="scheme-card card" key={id}>
                   <div className="scheme-card-heading">
-                    {scheme.category && <span className="tag">{scheme.category}</span>}
+                    {scheme.category && <span className="tag">{categoryLabel(scheme.category, language)}</span>}
                     {scheme.synthetic && <span className="tag demo-tag">{language === 'en' ? 'Demo' : 'नमुना'}</span>}
                     {application && <span className="tag applied-tag">{application.status === 'SUBMITTED' ? applicationStateLabel('SUBMITTED', language) : t.alreadyApplied}</span>}
                   </div>

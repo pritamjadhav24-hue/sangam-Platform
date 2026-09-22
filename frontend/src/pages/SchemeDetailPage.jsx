@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { categoryLabel } from '../i18n';
 
 export default function SchemeDetailPage({ schemeId, navigate, onApply, language = 'en' }) {
   const [scheme, setScheme] = useState(null);
@@ -48,7 +49,7 @@ export default function SchemeDetailPage({ schemeId, navigate, onApply, language
 
       <div className="page-title">
         <div>
-          <p className="eyebrow">{scheme.category}{scheme.synthetic ? ` · ${language === 'en' ? 'Demo scheme' : 'नमुना योजना'}` : ''}</p>
+          <p className="eyebrow">{categoryLabel(scheme.category, language)}{scheme.synthetic ? ` · ${language === 'en' ? 'Demo scheme' : 'नमुना योजना'}` : ''}</p>
           <h1>{name}</h1>
           <p className="muted">{department}</p>
         </div>
