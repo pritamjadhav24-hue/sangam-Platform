@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5173"],
       "port": 5173
+    },
+    {
+      "name": "sangam-backend",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "main:app", "--app-dir", "backend", "--host", "127.0.0.1", "--port", "8010", "--reload", "--reload-dir", "backend/app", "--reload-dir", "backend/main.py"],
+      "port": 8010
     }
   ]
 }

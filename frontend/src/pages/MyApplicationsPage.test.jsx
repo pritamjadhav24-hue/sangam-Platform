@@ -22,7 +22,7 @@ describe('MyApplicationsPage', () => {
     render(<MyApplicationsPage applications={[APPLICATION_A, APPLICATION_B]} onOpenApplication={() => {}} navigate={() => {}} />);
     expect(screen.getByText('Post-Matric Scholarship')).toBeInTheDocument();
     expect(screen.getByText('Farmer Input Subsidy')).toBeInTheDocument();
-    expect(screen.getByText('In progress')).toBeInTheDocument();
+    expect(screen.getByText('Information being collected')).toBeInTheDocument();
     expect(screen.getByText('Submitted')).toBeInTheDocument();
   });
 

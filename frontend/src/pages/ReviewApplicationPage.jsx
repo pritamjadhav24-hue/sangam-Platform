@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { requirementStateClass, requirementStateLabel } from '../requirementState';
+import ApplicationTimeline from '../components/ApplicationTimeline';
 
 export default function ReviewApplicationPage({ schemeId, citizen, navigate, language = 'en' }) {
   const [application, setApplication] = useState(null);
@@ -10,6 +11,7 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  const [relatedNotifications, setRelatedNotifications] = useState([]);
 
   useEffect(() => {
     let active = true;
@@ -37,6 +39,16 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
       });
     return () => { active = false; };
   }, [schemeId, language]);
+
+  useEffect(() => {
+    if (!application?.appId) return undefined;
+    let active = true;
+    api.notifications('citizen').then(result => {
+      if (!active) return;
+      setRelatedNotifications((result.notifications || []).filter(item => item.applicationId === application.appId));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [application?.appId]);
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -73,6 +85,15 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
   if (isSubmitted) {
     return (
       <main className="container narrow">
+        <div className="page-title">
+          <div>
+            <p className="eyebrow">{language === 'en' ? 'Application' : 'अर्ज'} · <code>{application.appId}</code></p>
+            <h1>{schemeName}</h1>
+          </div>
+        </div>
+
+        <ApplicationTimeline application={application} language={language} />
+
         <div className="alert success" role="status">
           <h2>{language === 'en' ? 'Application submitted' : 'अर्ज सादर झाला'}</h2>
           <ul className="compact">
@@ -82,6 +103,33 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
             {application.submittedAt && <li><span>{language === 'en' ? 'Submitted on' : 'सादर केल्याची तारीख'}</span><span>{new Date(application.submittedAt).toLocaleString()}</span></li>}
           </ul>
         </div>
+
+        <section className="card form-section">
+          <h2>{language === 'en' ? 'Requirements' : 'आवश्यकता'}</h2>
+          <ul className="compact">
+            {(application.requirements || []).map(requirement => (
+              <li key={requirement.requirementCode}>
+                <span>{language === 'en' ? requirement.displayLabel : (requirement.displayLabelMr || requirement.displayLabel)}</span>
+                <span className={`status ${requirementStateClass(requirement.status)}`}>{requirementStateLabel(requirement.status, language)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        {relatedNotifications.length > 0 && (
+          <section className="card form-section">
+            <h2>{language === 'en' ? 'Updates' : 'अद्यतने'}</h2>
+            <ul className="compact">
+              {relatedNotifications.map(item => (
+                <li key={item.notificationId}>
+                  <span>{item.title}</span>
+                  <span className="muted">{item.message}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         <button className="outline" onClick={() => navigate('dashboard')}>{language === 'en' ? 'Back to dashboard' : 'डॅशबोर्डवर परत जा'}</button>
       </main>
     );
@@ -95,6 +143,8 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
           <h1>{schemeName}</h1>
         </div>
       </div>
+
+      <ApplicationTimeline application={application} language={language} />
 
       <section className="card form-section">
         <h2>{language === 'en' ? 'Scheme' : 'योजना'}</h2>
@@ -117,7 +167,7 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
         <ul className="compact">
           {(application.requirements || []).map(requirement => (
             <li key={requirement.requirementCode}>
-              <span>{requirement.displayLabel}{requirement.mandatory === false && (language === 'en' ? ' (optional)' : ' (ऐच्छिक)')}</span>
+              <span>{language === 'en' ? requirement.displayLabel : (requirement.displayLabelMr || requirement.displayLabel)}{requirement.mandatory === false && (language === 'en' ? ' (optional)' : ' (ऐच्छिक)')}</span>
               <span className={`status ${requirementStateClass(requirement.status)}`}>{requirementStateLabel(requirement.status, language)}</span>
             </li>
           ))}
@@ -138,7 +188,7 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
             <ul className="compact">
               {application.blockingRequirements.map(item => (
                 <li key={item.requirementCode}>
-                  <span>{item.displayLabel}</span>
+                  <span>{language === 'en' ? item.displayLabel : (item.displayLabelMr || item.displayLabel)}</span>
                   <span className={`status ${requirementStateClass(item.status)}`}>{requirementStateLabel(item.status, language)}</span>
                 </li>
               ))}

@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import ReviewApplicationPage from './ReviewApplicationPage';
 import { api } from '../api';
 
-vi.mock('../api', () => ({ api: { applyToScheme: vi.fn(), service: vi.fn(), submitApplication: vi.fn() } }));
+vi.mock('../api', () => ({ api: { applyToScheme: vi.fn(), service: vi.fn(), submitApplication: vi.fn(), notifications: vi.fn().mockResolvedValue({ notifications: [] }) } }));
 
 const CITIZEN = { citizenId: 'CITIZEN_001', name: 'Test Citizen', dob: '2000-01-01', phone: '+91-9000000000' };
 
@@ -118,9 +118,9 @@ describe('ReviewApplicationPage', () => {
     await user.click(screen.getByRole('button', { name: 'Submit Application' }));
     await user.click(screen.getByRole('button', { name: 'Confirm & Submit' }));
     await screen.findByText('Application submitted');
-    expect(screen.getByText('APP-ZZZ-ALPHA-00001')).toBeInTheDocument();
-    expect(screen.getByText('Zeta Test Assistance Scheme')).toBeInTheDocument();
-    expect(screen.getByText('Submitted')).toBeInTheDocument();
+    expect(screen.getAllByText('APP-ZZZ-ALPHA-00001').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Zeta Test Assistance Scheme').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Submitted').length).toBeGreaterThan(0);
   });
 
   it('a submitted application loaded fresh (e.g. after reload) shows the confirmation view directly, from backend state', async () => {
@@ -128,7 +128,7 @@ describe('ReviewApplicationPage', () => {
     render(<ReviewApplicationPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={() => {}} />);
     await screen.findByText('Application submitted');
     expect(api.submitApplication).not.toHaveBeenCalled();
-    expect(screen.getByText('APP-ZZZ-ALPHA-00001')).toBeInTheDocument();
+    expect(screen.getAllByText('APP-ZZZ-ALPHA-00001').length).toBeGreaterThan(0);
   });
 
   it('a rejected submission attempt shows an error and does not pretend it succeeded', async () => {

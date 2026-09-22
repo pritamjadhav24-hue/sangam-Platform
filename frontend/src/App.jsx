@@ -64,7 +64,13 @@ export default function App() {
   function openApplicationForm(scheme) { const id = scheme?.serviceId || scheme?.schemeId || scheme; if (id) setSchemeId(id); setPage('applicationForm'); }
   function openApplication(application) { if (application?.serviceId) setSchemeId(application.serviceId); setPage(application?.status === 'SUBMITTED' ? 'reviewApplication' : 'applicationForm'); }
   function logout() { setSessionToken(null); setUser(null); setAppId(null); setDiscovery(null); setPage('dashboard'); }
-  function onNotificationSelect(notification) { if (notification.applicationId && user.role === 'CITIZEN') { setAppId(notification.applicationId); setPage('tracking'); } else if (user.role === 'OFFICER') setPage('officer'); else if (user.role === 'ADMIN') setPage('health'); }
+  function onNotificationSelect(notification) {
+    if (notification.applicationId && user.role === 'CITIZEN') {
+      const application = applications.find(item => item.appId === notification.applicationId);
+      if (application) { openApplication(application); return; }
+      setAppId(notification.applicationId); setPage('myApplications');
+    } else if (user.role === 'OFFICER') setPage('officer'); else if (user.role === 'ADMIN') setPage('health');
+  }
   if (!user) return <><Navbar page={page} setPage={setPage} language={language} onLanguageChange={changeLanguage} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} /><LoginPage onLogin={login} /></>;
   const props = { navigate, language };
   const t = languageText(language);

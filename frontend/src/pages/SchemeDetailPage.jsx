@@ -36,6 +36,10 @@ export default function SchemeDetailPage({ schemeId, navigate, onApply, language
 
   const name = language === 'en' ? scheme.name : (scheme.nameMr || scheme.name);
   const department = language === 'en' ? scheme.department : (scheme.departmentMr || scheme.department);
+  const description = language === 'en' ? scheme.description : (scheme.descriptionMr || scheme.description);
+  const benefits = language === 'en' ? scheme.benefits : (scheme.benefitsMr || scheme.benefits);
+  const eligibility = language === 'en' ? scheme.eligibility : (scheme.eligibilityMr || scheme.eligibility);
+  const applicationWindow = language === 'en' ? scheme.applicationWindow : (scheme.applicationWindowMr || scheme.applicationWindow);
   const available = scheme.enabled !== false;
 
   return (
@@ -52,20 +56,20 @@ export default function SchemeDetailPage({ schemeId, navigate, onApply, language
 
       <section className="card scheme-detail-section">
         <h2>{language === 'en' ? 'About this scheme' : 'योजनेबद्दल'}</h2>
-        <p>{scheme.description}</p>
+        <p>{description}</p>
       </section>
 
-      {scheme.benefits && (
+      {benefits && (
         <section className="card scheme-detail-section">
           <h2>{language === 'en' ? 'Benefits' : 'लाभ'}</h2>
-          <p>{scheme.benefits}</p>
+          <p>{benefits}</p>
         </section>
       )}
 
-      {scheme.eligibility && (
+      {eligibility && (
         <section className="card scheme-detail-section">
           <h2>{language === 'en' ? 'Eligibility' : 'पात्रता'}</h2>
-          <p>{scheme.eligibility}</p>
+          <p>{eligibility}</p>
         </section>
       )}
 
@@ -75,7 +79,7 @@ export default function SchemeDetailPage({ schemeId, navigate, onApply, language
           <ul className="compact">
             {scheme.requirements.map(requirement => (
               <li key={requirement.code}>
-                <span>{requirement.label}</span>
+                <span>{language === 'en' ? requirement.label : (requirement.labelMr || requirement.label)}</span>
                 <span>{requirement.mandatory ? (language === 'en' ? 'Required' : 'आवश्यक') : (language === 'en' ? 'Optional' : 'ऐच्छिक')}</span>
               </li>
             ))}
@@ -83,10 +87,10 @@ export default function SchemeDetailPage({ schemeId, navigate, onApply, language
         </section>
       )}
 
-      {scheme.applicationWindow && (
+      {applicationWindow && (
         <section className="card scheme-detail-section">
           <h2>{language === 'en' ? 'Important information' : 'महत्त्वाची माहिती'}</h2>
-          <p>{scheme.applicationWindow}</p>
+          <p>{applicationWindow}</p>
         </section>
       )}
 

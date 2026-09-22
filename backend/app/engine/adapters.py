@@ -144,12 +144,13 @@ def register_sandbox_handler(name: str, fetcher: Callable) -> None: _SANDBOX_HAN
 
 def _load_sandbox_handlers() -> None:
     if _SANDBOX_HANDLERS: return
-    from app.mocks import education_dept, revenue_dept, social_welfare_dept
+    from app.mocks import education_dept, identity_registry, revenue_dept, social_welfare_dept
     register_sandbox_handler("domicile_issue", revenue_dept.issue_domicile)
     register_sandbox_handler("income_fetch", revenue_dept.get_income)
     register_sandbox_handler("caste_fetch", social_welfare_dept.get_caste)
     register_sandbox_handler("bank_fetch", social_welfare_dept.get_bank_status)
     register_sandbox_handler("academic_fetch", education_dept.get_academic)
+    register_sandbox_handler("identity_verify", identity_registry.get_identity)
 
 
 class AdapterFactory:

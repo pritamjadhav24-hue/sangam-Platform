@@ -1,4 +1,5 @@
 import { languageText } from '../i18n';
+import { applicationStateClass, applicationStateLabel } from '../applicationState';
 
 export default function MyApplicationsPage({ applications, onOpenApplication, navigate, language = 'en' }) {
   const t = languageText(language);
@@ -28,7 +29,7 @@ export default function MyApplicationsPage({ applications, onOpenApplication, na
             return (
               <article className="scheme-card card application-card" key={application.appId}>
                 <div className="scheme-card-heading">
-                  <span className={`status ${application.status === 'SUBMITTED' ? 'found' : 'pending'}`}>{application.status === 'SUBMITTED' ? (language === 'en' ? 'Submitted' : 'सादर केले') : (language === 'en' ? 'In progress' : 'सुरू आहे')}</span>
+                  <span className={`status ${applicationStateClass(application.status)}`}>{applicationStateLabel(application.status, language)}</span>
                 </div>
                 <h3>{application.schemeName || application.serviceId}</h3>
                 <p className="muted">{total > 0 ? `${satisfied}/${total} ${language === 'en' ? 'requirements verified' : 'आवश्यकता पडताळल्या'}` : ''}</p>

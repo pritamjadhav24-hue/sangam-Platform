@@ -1,5 +1,6 @@
 import { languageText } from '../i18n';
-import { NEEDS_ATTENTION_STATUSES, requirementStateClass, requirementStateLabel } from '../requirementState';
+import { NEEDS_ATTENTION_STATUSES } from '../requirementState';
+import { applicationStateClass, applicationStateLabel } from '../applicationState';
 
 function greetingKey() {
   const hour = new Date().getHours();
@@ -95,7 +96,7 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
               return (
                 <article className="scheme-card card application-card" key={application.appId}>
                   <div className="scheme-card-heading">
-                    <span className={`status ${application.status === 'SUBMITTED' ? 'found' : 'pending'}`}>{application.status === 'SUBMITTED' ? (language === 'en' ? 'Submitted' : 'सादर केले') : (language === 'en' ? 'In progress' : 'सुरू आहे')}</span>
+                    <span className={`status ${applicationStateClass(application.status)}`}>{applicationStateLabel(application.status, language)}</span>
                   </div>
                   <h3>{application.schemeName || application.serviceId}</h3>
                   <p className="muted">{total > 0 ? `${satisfied}/${total} ${language === 'en' ? 'requirements verified' : 'आवश्यकता पडताळल्या'}` : ''}</p>
@@ -109,30 +110,6 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
           </div>
         )}
       </section>
-
-      {actionItems.length > 0 && (
-        <section className="services-section">
-          <div className="section-heading">
-            <div><h2>{t.actionRequiredSection}</h2><p className="muted">{t.actionRequiredBlurb}</p></div>
-          </div>
-          <div className="requirement-list">
-            {actionItems.map(({ application, requirement }) => (
-              <article className="card requirement-card" key={`${application.appId}-${requirement.requirementCode}`}>
-                <div className="requirement-card-heading">
-                  <span className={`requirement-icon requirement-icon-${requirementStateClass(requirement.status)}`} aria-hidden="true">!</span>
-                  <div>
-                    <h3>{requirement.displayLabel}</h3>
-                    <p className="muted">{application.schemeName} · <span className={`status ${requirementStateClass(requirement.status)}`}>{requirementStateLabel(requirement.status, language)}</span></p>
-                  </div>
-                </div>
-                <div className="requirement-actions">
-                  <button className="outline" onClick={() => onOpenApplication?.(application)}>{language === 'en' ? 'Resolve' : 'निराकरण करा'}</button>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      )}
 
       {highlighted.length > 0 && (
         <section className="services-section">
@@ -150,7 +127,7 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
                     {appliedSchemeIds.has(id) && <span className="tag applied-tag">{t.alreadyApplied}</span>}
                   </div>
                   <h3>{language === 'en' ? scheme.name : (scheme.nameMr || scheme.name)}</h3>
-                  <p>{scheme.description}</p>
+                  <p>{language === 'en' ? scheme.description : (scheme.descriptionMr || scheme.description)}</p>
                   <div className="scheme-card-footer">
                     <small>{language === 'en' ? scheme.department : (scheme.departmentMr || scheme.department)}</small>
                     <button className="outline" onClick={() => onViewScheme(id)}>{language === 'en' ? 'View details' : 'तपशील पहा'}</button>

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { languageText } from '../i18n';
+import { applicationStateLabel } from '../applicationState';
 
 export default function SchemesPage({ applications, onViewScheme, language = 'en' }) {
   const t = languageText(language);
@@ -81,10 +82,10 @@ export default function SchemesPage({ applications, onViewScheme, language = 'en
                   <div className="scheme-card-heading">
                     {scheme.category && <span className="tag">{scheme.category}</span>}
                     {scheme.synthetic && <span className="tag demo-tag">{language === 'en' ? 'Demo' : 'नमुना'}</span>}
-                    {application && <span className="tag applied-tag">{application.status === 'SUBMITTED' ? (language === 'en' ? 'Submitted' : 'सादर केले') : t.alreadyApplied}</span>}
+                    {application && <span className="tag applied-tag">{application.status === 'SUBMITTED' ? applicationStateLabel('SUBMITTED', language) : t.alreadyApplied}</span>}
                   </div>
                   <h3>{language === 'en' ? scheme.name : (scheme.nameMr || scheme.name)}</h3>
-                  <p>{scheme.description}</p>
+                  <p>{language === 'en' ? scheme.description : (scheme.descriptionMr || scheme.description)}</p>
                   <div className="scheme-card-footer">
                     <small>{language === 'en' ? scheme.department : (scheme.departmentMr || scheme.department)}</small>
                     <button className="outline" onClick={() => onViewScheme(id)}>{language === 'en' ? 'View details' : 'तपशील पहा'}</button>

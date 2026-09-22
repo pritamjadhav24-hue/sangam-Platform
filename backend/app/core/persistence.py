@@ -20,14 +20,24 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 
 def _load_local_env() -> None:
-    if os.getenv("DATABASE_URL"):
-        return
+    """Load every KEY=VALUE line from a local .env into the process
+    environment, for any key not already set (a real environment variable
+    always wins). Previously this only ever read DATABASE_URL, so every
+    other SANGAM_*/CORS_*/etc. flag in .env was silently ignored unless
+    exported by hand -- this generalizes the same existing mechanism rather
+    than adding a new config-loading path."""
     for path in (Path(__file__).resolve().parents[2] / ".env", Path(__file__).resolve().parents[3] / ".env"):
-        if path.exists():
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if line.startswith("DATABASE_URL="):
-                    os.environ["DATABASE_URL"] = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    return
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip().strip('"').strip("'")
+        return
 
 
 _load_local_env()
@@ -40,7 +50,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0014_documents"
+MIGRATION_HEAD = "0015_citizen_notifications"
 
 
 class Base(DeclarativeBase):
@@ -359,6 +369,66 @@ def _document_payload(row: DocumentRow) -> dict:
         "validation": row.validation,
     })
     return payload
+
+
+class CitizenNotificationRow(Base):
+    """A citizen-facing notification (Phase 6F2 Task E), written through
+    directly on every create/read/mark-read -- unlike the legacy
+    NotificationRow/`notifications` table (used by the officer/admin
+    notification_manager, untouched here), whose persist_state() snapshot
+    deliberately excludes anything tied to a PostgreSQL-authoritative
+    application. application_id/requirement_code are deliberately not
+    foreign keys, matching the existing documents/audit_entries convention.
+    """
+    __tablename__ = "citizen_notifications"
+    notification_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    citizen_id: Mapped[str] = mapped_column(String(120), index=True)
+    notification_type: Mapped[str] = mapped_column(String(60))
+    title: Mapped[str] = mapped_column(String(200))
+    message: Mapped[str] = mapped_column(Text)
+    application_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    requirement_code: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+def _citizen_notification_payload(row: CitizenNotificationRow) -> dict:
+    return {
+        "notificationId": row.notification_id, "citizenId": row.citizen_id, "type": row.notification_type,
+        "title": row.title, "message": row.message, "applicationId": row.application_id,
+        "requirementCode": row.requirement_code, "read": row.is_read,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def create_citizen_notification(citizen_id: str, notification_type: str, title: str, message: str, *, application_id: Optional[str] = None, requirement_code: Optional[str] = None) -> dict:
+    import uuid
+    with Session(engine) as session:
+        row = CitizenNotificationRow(
+            notification_id=f"CN-{uuid.uuid4().hex[:16]}", citizen_id=citizen_id, notification_type=notification_type,
+            title=title, message=message, application_id=application_id, requirement_code=requirement_code,
+            is_read=False, created_at=datetime.now(timezone.utc), payload={},
+        )
+        session.add(row)
+        session.commit()
+        return _citizen_notification_payload(row)
+
+
+def list_citizen_notifications(citizen_id: str) -> list[dict]:
+    with Session(engine) as session:
+        rows = session.query(CitizenNotificationRow).filter_by(citizen_id=citizen_id).order_by(CitizenNotificationRow.created_at.desc()).all()
+        return [_citizen_notification_payload(row) for row in rows]
+
+
+def mark_citizen_notification_read(notification_id: str, citizen_id: str) -> Optional[dict]:
+    with Session(engine) as session:
+        row = session.get(CitizenNotificationRow, notification_id)
+        if row is None or row.citizen_id != citizen_id:
+            return None
+        row.is_read = True
+        session.commit()
+        return _citizen_notification_payload(row)
 
 
 def upsert_document(document: Mapping) -> dict:
@@ -1631,6 +1701,7 @@ def citizen_service_snapshot(service_id: str | None = None) -> list[dict] | dict
         return {
             "code": row.requirement_code,
             "label": row.label,
+            "labelMr": metadata.get("labelMr", row.label),
             "mandatory": row.mandatory,
             "requirementType": metadata.get("requirementType", "VERIFICATION"),
             "source": metadata.get("source", "GOVERNMENT_SERVICE"),
@@ -1651,10 +1722,14 @@ def citizen_service_snapshot(service_id: str | None = None) -> list[dict] | dict
                 "department": row.department,
                 "departmentMr": metadata.get("departmentMr"),
                 "description": metadata.get("description", "Configured government service"),
+                "descriptionMr": metadata.get("descriptionMr"),
                 "category": metadata.get("category", "Government services"),
                 "benefits": metadata.get("benefits"),
+                "benefitsMr": metadata.get("benefitsMr"),
                 "eligibility": metadata.get("eligibility"),
+                "eligibilityMr": metadata.get("eligibilityMr"),
                 "applicationWindow": metadata.get("applicationWindow"),
+                "applicationWindowMr": metadata.get("applicationWindowMr"),
                 "synthetic": metadata.get("synthetic", False),
                 "enabled": row.active,
                 "requirements": requirements,

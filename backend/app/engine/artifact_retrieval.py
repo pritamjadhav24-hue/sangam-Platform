@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -36,6 +37,8 @@ DOCUMENT_DATA_TYPES = frozenset({"DOCUMENT", "CERTIFICATE"})
 DEFAULT_SOURCE_CATEGORY = "DEPARTMENT_PROVIDER"
 MAX_UPLOAD_TEXT_BYTES = 200_000
 ALLOWED_UPLOAD_CONTENT_TYPES = frozenset({"text/plain", "application/json"})
+_GENERIC_DOCUMENT_SUFFIXES = ("certificate", "certification", "card", "licence", "license")
+_CANONICAL_FIELDS_HIDDEN_FROM_CITIZEN = frozenset({"sourceRecordId"})
 
 
 def requirement_data_type(requirement_code: str) -> str:
@@ -51,6 +54,46 @@ def requirement_data_type(requirement_code: str) -> str:
 
 def is_document_requirement(requirement_code: str) -> bool:
     return requirement_data_type(requirement_code) in DOCUMENT_DATA_TYPES
+
+
+def document_display_name(requirement_label: str) -> str:
+    """A realistic, citizen-facing document title derived purely from the
+    requirement's own label (e.g. 'Maharashtra domicile' -> 'Maharashtra
+    Domicile Certificate', 'Ration card' -> 'Ration Card') -- never a
+    provider, department or source-system name."""
+    label = (requirement_label or "Document").strip()
+    lower = label.lower()
+    if lower.endswith("proof"):
+        label = label[: -len("proof")].strip()
+    words = [word if word.isupper() else word.capitalize() for word in label.split()]
+    title = " ".join(words) or "Document"
+    if any(title.lower().endswith(suffix) for suffix in _GENERIC_DOCUMENT_SUFFIXES):
+        return title
+    return f"{title} Certificate"
+
+
+def _humanize_field_name(field: str) -> str:
+    spaced = re.sub(r"(?<!^)(?=[A-Z])", " ", field).replace("_", " ")
+    return spaced.strip().title()
+
+
+def citizen_safe_document_text(*, title: str, reference: str, citizen_name: Optional[str], canonical: dict, verified_on: Optional[str] = None) -> str:
+    """A plain-text rendering of a verified document's canonical fields only
+    -- never the provider/department/API/database details behind it."""
+    lines = [title.upper(), "=" * len(title), ""]
+    if citizen_name:
+        lines.append(f"Citizen: {citizen_name}")
+    lines.append(f"Reference: {reference}")
+    if verified_on:
+        lines.append(f"Valid until: {verified_on}")
+    lines.append("")
+    for field, value in (canonical or {}).items():
+        if field in _CANONICAL_FIELDS_HIDDEN_FROM_CITIZEN or value in (None, ""):
+            continue
+        lines.append(f"{_humanize_field_name(field)}: {value}")
+    lines.append("")
+    lines.append("This is a synthetically generated demo document issued by the SANGAM prototype.")
+    return "\n".join(lines)
 
 
 def _source_category_for_provider(provider_id: Optional[str]) -> str:

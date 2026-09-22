@@ -7,14 +7,49 @@ function RequirementCard({ requirement, applicationId, language, onChange, locke
   const [consentOpen, setConsentOpen] = useState(false);
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
-  const [busy, setBusy] = useState(null); // 'auto-fill' | 'upload' | null
+  const [busy, setBusy] = useState(null); // 'auto-fill' | 'upload' | 'download' | null
   const [error, setError] = useState(null);
+  const [viewedDocument, setViewedDocument] = useState(null);
 
   const isDocumentLike = requirement.dataType === 'DOCUMENT' || requirement.dataType === 'CERTIFICATE';
+  const hasViewableDocument = isDocumentLike && requirement.status === 'VALIDATED';
   const label = requirementStateLabel(requirement.status, language);
   const statusClass = requirementStateClass(requirement.status);
   const needsAttention = NEEDS_ATTENTION_STATUSES.has(requirement.status);
   const isRetry = needsAttention; // same action, different button copy
+
+  async function handleViewDocument() {
+    setBusy('view');
+    setError(null);
+    try {
+      const doc = await api.viewDocument(applicationId, requirement.requirementCode);
+      setViewedDocument(doc);
+    } catch (err) {
+      setError(err.message || (language === 'en' ? 'The document could not be opened.' : 'दस्तऐवज उघडता आले नाही.'));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleDownloadDocument() {
+    setBusy('download');
+    setError(null);
+    try {
+      const { blob, filename } = await api.downloadDocument(applicationId, requirement.requirementCode);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message || (language === 'en' ? 'The document could not be downloaded.' : 'दस्तऐवज डाउनलोड करता आले नाही.'));
+    } finally {
+      setBusy(null);
+    }
+  }
 
   // Auto-Fill never retrieves anything until the citizen explicitly accepts
   // this per-requirement consent prompt -- wording is deliberately generic
@@ -57,7 +92,7 @@ function RequirementCard({ requirement, applicationId, language, onChange, locke
       <div className="requirement-card-heading">
         <span className={`requirement-icon requirement-icon-${statusClass}`} aria-hidden="true">{requirementStateIcon(requirement.status)}</span>
         <div>
-          <h3>{requirement.displayLabel}{requirement.mandatory === false && <small className="muted"> ({language === 'en' ? 'optional' : 'ऐच्छिक'})</small>}</h3>
+          <h3>{language === 'en' ? requirement.displayLabel : (requirement.displayLabelMr || requirement.displayLabel)}{requirement.mandatory === false && <small className="muted"> ({language === 'en' ? 'optional' : 'ऐच्छिक'})</small>}</h3>
           <p className="muted">{language === 'en' ? 'Status' : 'स्थिती'}: <span className={`status ${statusClass}`}>{label}</span></p>
         </div>
       </div>
@@ -97,6 +132,27 @@ function RequirementCard({ requirement, applicationId, language, onChange, locke
               {language === 'en' ? 'Upload Manually' : 'स्वतः अपलोड करा'}
             </button>
           )}
+        </div>
+      )}
+
+      {hasViewableDocument && (
+        <div className="requirement-actions">
+          <button className="outline" disabled={busy !== null} onClick={handleViewDocument}>
+            {busy === 'view' ? (language === 'en' ? 'Opening…' : 'उघडत आहे…') : (language === 'en' ? 'View Document' : 'दस्तऐवज पहा')}
+          </button>
+          <button className="outline" disabled={busy !== null} onClick={handleDownloadDocument}>
+            {busy === 'download' ? (language === 'en' ? 'Downloading…' : 'डाउनलोड होत आहे…') : (language === 'en' ? 'Download' : 'डाउनलोड करा')}
+          </button>
+        </div>
+      )}
+
+      {viewedDocument && (
+        <div className="notice document-preview">
+          <div className="document-preview-heading">
+            <b>{viewedDocument.title}</b>
+            <button className="link" onClick={() => setViewedDocument(null)}>{language === 'en' ? 'Close' : 'बंद करा'}</button>
+          </div>
+          <pre>{viewedDocument.content}</pre>
         </div>
       )}
 

@@ -29,6 +29,19 @@ export const api = {
   autoFillRequirement: (applicationId, requirementCode, decision = 'ACCEPT') => request(`/citizen/applications/${encodeURIComponent(applicationId)}/requirements/${encodeURIComponent(requirementCode)}/auto-fill`, { method: 'POST', body: JSON.stringify({ decision }) }),
   uploadRequirement: (applicationId, requirementCode, body) => request(`/citizen/applications/${encodeURIComponent(applicationId)}/requirements/${encodeURIComponent(requirementCode)}/upload`, { method: 'POST', body: JSON.stringify(body) }),
   submitApplication: applicationId => request(`/citizen/applications/${encodeURIComponent(applicationId)}/submit`, { method: 'POST', body: JSON.stringify({}) }),
+  viewDocument: (applicationId, requirementCode) => request(`/citizen/applications/${encodeURIComponent(applicationId)}/requirements/${encodeURIComponent(requirementCode)}/document`),
+  downloadDocument: async (applicationId, requirementCode) => {
+    const headers = {};
+    if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
+    const res = await fetch(`${BASE}/citizen/applications/${encodeURIComponent(applicationId)}/requirements/${encodeURIComponent(requirementCode)}/document/download`, { headers });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'The document could not be downloaded.');
+    }
+    const blob = await res.blob();
+    const match = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '');
+    return { blob, filename: match ? match[1] : 'document.txt' };
+  },
   catalog: () => request('/catalog'),
   discover: (citizenId, timeout = false, schemeId = '') => request(`/citizen/discover?citizen_id=${encodeURIComponent(citizenId)}&simulate_timeout=${timeout}${schemeId ? `&scheme_id=${encodeURIComponent(schemeId)}` : ''}`),
   consent: (citizenId, allow, schemeId = null) => request('/citizen/consent', { method: 'POST', body: JSON.stringify({ citizenId, allow, schemeId }) }),

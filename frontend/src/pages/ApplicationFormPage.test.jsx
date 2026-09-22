@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import ApplicationFormPage from './ApplicationFormPage';
 import { api } from '../api';
 
-vi.mock('../api', () => ({ api: { applyToScheme: vi.fn(), service: vi.fn(), autoFillRequirement: vi.fn(), uploadRequirement: vi.fn() } }));
+vi.mock('../api', () => ({ api: { applyToScheme: vi.fn(), service: vi.fn(), autoFillRequirement: vi.fn(), uploadRequirement: vi.fn(), viewDocument: vi.fn(), downloadDocument: vi.fn() } }));
 
 const CITIZEN = { citizenId: 'CITIZEN_001', name: 'Test Citizen', dob: '2000-01-01', phone: '+91-9000000000' };
 
@@ -33,6 +33,8 @@ describe('ApplicationFormPage', () => {
     api.service.mockReset();
     api.autoFillRequirement.mockReset();
     api.uploadRequirement.mockReset();
+    api.viewDocument.mockReset();
+    api.downloadDocument.mockReset();
   });
 
   it('shows a loading state before the backend responds', async () => {
@@ -307,5 +309,43 @@ describe('ApplicationFormPage', () => {
     expect(screen.queryByRole('heading', { name: 'Income proof' })).not.toBeInTheDocument();
     // Only one requirement on this scheme -> only one Auto-Fill button.
     expect(screen.getAllByRole('button', { name: 'Auto-Fill' })).toHaveLength(1);
+  });
+
+  describe('verified document view/download (Phase 6F2 Task C)', () => {
+    const VALIDATED_APPLICATION = {
+      ...APPLICATION_A,
+      requirements: APPLICATION_A.requirements.map(r => r.requirementCode === 'DOMICILE_PROOF' ? { ...r, status: 'VALIDATED' } : r),
+    };
+
+    it('shows View Document and Download only for a VALIDATED document-type requirement, never for a merely-verified attribute', async () => {
+      api.applyToScheme.mockResolvedValue(VALIDATED_APPLICATION);
+      api.service.mockResolvedValue(SCHEME_A);
+      render(<ApplicationFormPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={() => {}} />);
+      await screen.findByText('Zeta Test Assistance Scheme');
+
+      const domicileCard = screen.getByRole('heading', { name: 'Maharashtra domicile' }).closest('article');
+      expect(within(domicileCard).getByRole('button', { name: 'View Document' })).toBeInTheDocument();
+      expect(within(domicileCard).getByRole('button', { name: 'Download' })).toBeInTheDocument();
+
+      const identityCard = screen.getByRole('heading', { name: 'Identity' }).closest('article');
+      expect(within(identityCard).queryByRole('button', { name: 'View Document' })).not.toBeInTheDocument();
+
+      const incomeCard = screen.getByRole('heading', { name: 'Income proof' }).closest('article');
+      expect(within(incomeCard).queryByRole('button', { name: 'View Document' })).not.toBeInTheDocument();
+    });
+
+    it('clicking View Document renders the citizen-safe content returned by the backend', async () => {
+      api.applyToScheme.mockResolvedValue(VALIDATED_APPLICATION);
+      api.service.mockResolvedValue(SCHEME_A);
+      api.viewDocument.mockResolvedValue({ documentId: 'DOC-1', title: 'Maharashtra Domicile Certificate', requirementCode: 'DOMICILE_PROOF', status: 'VALIDATED', content: 'MAHARASHTRA DOMICILE CERTIFICATE\n\nState: Maharashtra' });
+      render(<ApplicationFormPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={() => {}} />);
+      await screen.findByText('Zeta Test Assistance Scheme');
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole('button', { name: 'View Document' }));
+      expect(await screen.findByText('Maharashtra Domicile Certificate')).toBeInTheDocument();
+      expect(screen.getByText(/State: Maharashtra/)).toBeInTheDocument();
+      expect(api.viewDocument).toHaveBeenCalledWith('APP-ZZZ-ALPHA-00001', 'DOMICILE_PROOF');
+    });
   });
 });

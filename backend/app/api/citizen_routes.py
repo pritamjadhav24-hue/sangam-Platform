@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -12,12 +13,12 @@ from app.core.auth import require_roles
 from app.core.event_bus import event_bus
 from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuthorizationError, authorize_access, create_consent, current, revoke_consent
 from app.engine.dependency_orchestrator import ensure_missing_dependencies, initiate_dependency
-from app.core.persistence import (citizen_service_snapshot, catalog_snapshot, engine,
-                                  get_application, list_applications_for_citizen,
+from app.core.persistence import (citizen_service_snapshot, catalog_snapshot, create_citizen_notification, engine,
+                                  get_application, get_document, list_applications_for_citizen,
                                   list_dependencies_for_application,
                                   create_application as create_application_authoritative,
                                   mark_application_write_authoritative, upsert_document)
-from app.engine.artifact_retrieval import requirement_data_type, validate_upload_metadata
+from app.engine.artifact_retrieval import citizen_safe_document_text, document_display_name, requirement_data_type, validate_upload_metadata
 from app.engine import requirement_fulfillment, submission
 from app.engine.requirement_analyzer import discover
 from app.engine.rules_engine import evaluate
@@ -187,6 +188,26 @@ _REQUIREMENT_USER_ACTION = {
     "FAILED": "Automatic retrieval could not complete. You can provide this manually.",
 }
 
+_NEEDS_ATTENTION_REQUIREMENT_STATUSES = frozenset({"ACTION_REQUIRED", "FAILED"})
+
+
+def _notify_requirement_outcome(citizen_id: str, application_id: str, requirement_code: str, label: str, previous_status: str | None, new_status: str | None) -> None:
+    """Phase 6F2 Task E: a persisted citizen notification for exactly the
+    two requirement outcomes that need one -- Auto-Fill/upload needing
+    attention, and a document becoming verified -- fired only on an actual
+    status change (never repeated on a redundant retry/no-op call)."""
+    if new_status == previous_status:
+        return
+    if new_status in _NEEDS_ATTENTION_REQUIREMENT_STATUSES:
+        doc_like = requirement_data_type(requirement_code) in {"DOCUMENT", "CERTIFICATE"}
+        name = document_display_name(label) if doc_like else label
+        message = (f"Your {name} could not be retrieved automatically. Please upload it manually." if doc_like
+                    else f"We could not verify your {name} automatically. Please try again later.")
+        create_citizen_notification(citizen_id, "ACTION_REQUIRED", "Action needed", message, application_id=application_id, requirement_code=requirement_code)
+    elif new_status == "VALIDATED":
+        name = document_display_name(label)
+        create_citizen_notification(citizen_id, "DOCUMENT_VERIFIED", "Document verified", f"Your {name} has been verified.", application_id=application_id, requirement_code=requirement_code)
+
 
 def _safe_application(app: dict) -> dict:
     safe_requirements = []
@@ -194,6 +215,7 @@ def _safe_application(app: dict) -> dict:
         safe_requirements.append({
             "requirementCode": requirement.get("code"),
             "displayLabel": requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title(),
+            "displayLabelMr": requirement.get("labelMr") or requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title(),
             "status": requirement.get("status"),
             "userAction": requirement.get("action") or _REQUIREMENT_USER_ACTION.get(requirement.get("status"), "Retry verification or request help"),
             **({"verifiedOn": requirement.get("verifiedOn")} if requirement.get("verifiedOn") else {}),
@@ -362,6 +384,7 @@ def apply_to_scheme(body: ApplySchemeRequest, request: Request, user: dict = Dep
                 {
                     "code": item["code"],
                     "label": item.get("label") or str(item["code"]).replace("_", " ").title(),
+                    "labelMr": item.get("labelMr") or item.get("label") or str(item["code"]).replace("_", " ").title(),
                     "mandatory": item.get("mandatory", True),
                     "status": "NOT_PROVIDED",
                     "dataType": requirement_data_type(item["code"]),
@@ -429,6 +452,8 @@ def auto_fill_requirement(application_id: str, requirement_code: str, body: Auto
         raise HTTPException(status_code=404, detail="Requirement not found on this application")
 
     if body.decision == "REJECT":
+        previous_status = requirement.get("status")
+        label = requirement.get("label") or requirement_code
         try:
             application = requirement_fulfillment.reject_auto_fill(app, requirement_code, citizen_id)
         except requirement_fulfillment.ApplicationSubmittedError:
@@ -438,11 +463,15 @@ def auto_fill_requirement(application_id: str, requirement_code: str, body: Auto
             "AUTO_FILL_REJECTED", payload={"appId": application_id, "requirementCode": requirement_code, "actorRole": user["role"]},
             correlation_id=application_id,
         )
+        updated_requirement = requirement_fulfillment.find_requirement(application, requirement_code)
+        _notify_requirement_outcome(citizen_id, application_id, requirement_code, label, previous_status, (updated_requirement or {}).get("status"))
         return _safe_application(application)
 
     if requirement.get("status") in requirement_fulfillment.SUCCESS_STATUSES:
         return _safe_application(app)
 
+    previous_status = requirement.get("status")
+    label = requirement.get("label") or requirement_code
     receipt = create_consent(
         citizen_id, True, attributes=[], service_id=app.get("serviceId"), application_id=application_id,
         purpose=requirement_fulfillment.auto_fill_purpose(requirement_code),
@@ -470,6 +499,7 @@ def auto_fill_requirement(application_id: str, requirement_code: str, body: Auto
         payload={"appId": application_id, "requirementCode": requirement_code, "status": (updated_requirement or {}).get("status"), "actorRole": user["role"]},
         correlation_id=application_id,
     )
+    _notify_requirement_outcome(citizen_id, application_id, requirement_code, label, previous_status, (updated_requirement or {}).get("status"))
     return _safe_application(application)
 
 
@@ -513,6 +543,8 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
     checksum = hashlib.sha256(body.content.encode("utf-8")).hexdigest()
     document_id = f"DOC-{application_id}-{requirement_code}"
     canonical = {"title": body.title, "contentType": body.contentType, "checksum": checksum}
+    previous_status = requirement.get("status")
+    label = requirement.get("label") or requirement_code
 
     def mutate(target: dict) -> None:
         target.update({"status": "VALIDATED", "documentId": document_id})
@@ -535,7 +567,71 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
         payload={"appId": application_id, "requirementCode": requirement_code, "documentId": document_id, "actorRole": user["role"]},
         correlation_id=application_id,
     )
+    _notify_requirement_outcome(citizen_id, application_id, requirement_code, label, previous_status, "VALIDATED")
     return _safe_application(application)
+
+
+def _owned_validated_document(application_id: str, requirement_code: str, citizen_id: str) -> tuple[dict, dict]:
+    """Shared ownership + status check for both the view and download
+    routes: the application must belong to the caller, the requirement must
+    exist on it, and only an already-VALIDATED document is ever exposed --
+    never a provider/department/API/database detail, and never a
+    still-pending or rejected result."""
+    app = _load_owned_application(application_id, citizen_id)
+    requirement = requirement_fulfillment.find_requirement(app, requirement_code)
+    if requirement is None:
+        raise HTTPException(status_code=404, detail="Requirement not found on this application")
+    document_id = requirement.get("documentId") or f"DOC-{application_id}-{requirement_code}"
+    document = get_document(document_id)
+    if not document or document.get("appId") != application_id or document.get("citizenId") != citizen_id or document.get("status") != "VALIDATED":
+        raise HTTPException(status_code=404, detail="No verified document is available for this requirement")
+    return requirement, document
+
+
+def _document_view_payload(requirement: dict, document: dict, user: dict) -> dict:
+    label = requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title()
+    title = document_display_name(label)
+    document_id = document["documentId"]
+    if document.get("sourceType") == "CITIZEN_UPLOAD" and document.get("contentPreview"):
+        # A citizen's own manual upload has no provider canonical fields to
+        # show -- render back what they actually submitted instead.
+        display_fields = {"Details": document["contentPreview"]}
+    else:
+        display_fields = document.get("canonical") or {}
+    text = citizen_safe_document_text(
+        title=title, reference=document_id, citizen_name=user.get("name"),
+        canonical=display_fields, verified_on=requirement.get("verifiedOn"),
+    )
+    return {
+        "documentId": document_id, "title": title, "requirementCode": requirement["code"],
+        "status": document["status"], "content": text,
+    }
+
+
+@router.get("/applications/{application_id}/requirements/{requirement_code}/document")
+def view_requirement_document(application_id: str, requirement_code: str, user: dict = Depends(require_roles("CITIZEN"))):
+    """Citizen-facing verified-document view (Phase 6F2 Task C).
+
+    Exposes only a citizen-safe rendering of an already-VALIDATED document
+    reference -- title and canonical field values only, never the provider,
+    department, API or database details behind it."""
+    citizen_id = user["citizenId"]
+    requirement, document = _owned_validated_document(application_id, requirement_code, citizen_id)
+    return _document_view_payload(requirement, document, user)
+
+
+@router.get("/applications/{application_id}/requirements/{requirement_code}/document/download")
+def download_requirement_document(application_id: str, requirement_code: str, user: dict = Depends(require_roles("CITIZEN"))):
+    """Download variant of the same citizen-safe document view, as a plain
+    text file attachment."""
+    citizen_id = user["citizenId"]
+    requirement, document = _owned_validated_document(application_id, requirement_code, citizen_id)
+    payload = _document_view_payload(requirement, document, user)
+    filename = re.sub(r"[^A-Za-z0-9]+", "-", payload["title"]).strip("-") + ".txt"
+    return Response(
+        content=payload["content"], media_type="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/applications/{application_id}/submit")
@@ -558,6 +654,7 @@ def submit_citizen_application(application_id: str, user: dict = Depends(require
     """
     citizen_id = user["citizenId"]
     enforce("application_submit", citizen_id, limit=10, window_seconds=60)
+    already_submitted = (get_application(application_id) or {}).get("status") == "SUBMITTED"
     try:
         application = submission.submit_application(application_id, citizen_id)
     except KeyError:
@@ -577,6 +674,12 @@ def submit_citizen_application(application_id: str, user: dict = Depends(require
         payload={"appId": application_id, "actorRole": user["role"]}, correlation_id=application_id,
     )
     event_bus.publish("APPLICATION_SUBMITTED", {"citizenId": citizen_id, "appId": application_id})
+    if not already_submitted:
+        scheme_name = application.get("schemeName") or "your scheme"
+        create_citizen_notification(
+            citizen_id, "APPLICATION_SUBMITTED", "Application submitted",
+            f"Your application for {scheme_name} was submitted successfully.", application_id=application_id,
+        )
     return _safe_application(application)
 
 

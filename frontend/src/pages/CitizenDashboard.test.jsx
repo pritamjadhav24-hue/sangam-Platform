@@ -48,7 +48,7 @@ describe('CitizenDashboard', () => {
     render(<CitizenDashboard schemes={SCHEMES} applications={[application()]} citizen={CITIZEN_A} navigate={() => {}} onViewScheme={() => {}} />);
     const yourApplications = screen.getByText('Your Applications').closest('section');
     expect(within(yourApplications).getByText('Post-Matric Scholarship')).toBeInTheDocument();
-    expect(within(yourApplications).getByText('In progress')).toBeInTheDocument();
+    expect(within(yourApplications).getByText('Information being collected')).toBeInTheDocument();
     expect(within(yourApplications).getByText('1/2 requirements verified')).toBeInTheDocument();
   });
 
@@ -59,13 +59,14 @@ describe('CitizenDashboard', () => {
     expect(summarySection.textContent).toContain('1'); // one active
   });
 
-  it('shows an Action Required section only when a requirement actually needs attention', () => {
-    const { rerender } = render(<CitizenDashboard schemes={SCHEMES} applications={[application()]} citizen={CITIZEN_A} navigate={() => {}} onViewScheme={() => {}} />);
-    expect(screen.queryByText('Action Required')).not.toBeInTheDocument(); // NOT_PROVIDED alone doesn't count
+  it('never shows a prominent Action Required section on the dashboard, even when a requirement needs attention -- only the subtle summary count', () => {
     const withFailure = application({ requirements: [{ requirementCode: 'INCOME_PROOF', displayLabel: 'Income proof', status: 'FAILED' }] });
-    rerender(<CitizenDashboard schemes={SCHEMES} applications={[withFailure]} citizen={CITIZEN_A} navigate={() => {}} onViewScheme={() => {}} />);
-    expect(screen.getByText('Action Required')).toBeInTheDocument();
-    expect(screen.getByText('Income proof')).toBeInTheDocument();
+    render(<CitizenDashboard schemes={SCHEMES} applications={[withFailure]} citizen={CITIZEN_A} navigate={() => {}} onViewScheme={() => {}} />);
+    expect(screen.queryByText('Action Required')).not.toBeInTheDocument();
+    expect(screen.queryByText('Income proof')).not.toBeInTheDocument();
+    const summarySection = screen.getByLabelText('Application overview');
+    expect(within(summarySection).getByText('Needs attention')).toBeInTheDocument();
+    expect(summarySection.textContent).toContain('1');
   });
 
   it('clicking a resolve/continue action calls onOpenApplication with the real application, not a hardcoded id', async () => {
