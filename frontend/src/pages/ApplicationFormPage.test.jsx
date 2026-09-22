@@ -128,7 +128,7 @@ describe('ApplicationFormPage', () => {
     });
 
     it('requirement: Reject sends the REJECT decision, never calls Accept behaviour, and shows the generic decline message', async () => {
-      api.autoFillRequirement.mockResolvedValue({ ...APPLICATION_A, requirements: APPLICATION_A.requirements.map(r => r.requirementCode === 'INCOME_PROOF' ? { ...r, status: 'ACTION_REQUIRED' } : r) });
+      api.autoFillRequirement.mockResolvedValue({ ...APPLICATION_A, requirements: APPLICATION_A.requirements.map(r => r.requirementCode === 'INCOME_PROOF' ? { ...r, status: 'ACTION_REQUIRED', userAction: 'Automatic retrieval was not allowed. You can provide this manually.' } : r) });
       render(<ApplicationFormPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={() => {}} />);
       await screen.findByText('APP-ZZZ-ALPHA-00001');
 
@@ -193,7 +193,86 @@ describe('ApplicationFormPage', () => {
       await user.click(within(identityCard).getByRole('button', { name: 'Auto-Fill' }));
       await user.click(within(identityCard).getByRole('button', { name: 'Accept' }));
 
-      await waitFor(() => expect(within(screen.getByRole('heading', { name: 'Identity' }).closest('article')).getByText('Retrieved')).toBeInTheDocument());
+      await waitFor(() => expect(within(screen.getByRole('heading', { name: 'Identity' }).closest('article')).getByText('Verified')).toBeInTheDocument());
+    });
+
+    // Phase 6D: requirement state must be rendered from persisted backend
+    // state, not local-only React state, so it survives a fresh page load.
+    it('Phase 6D: an Action Required requirement loaded fresh (e.g. after a page refresh) shows its backend-persisted guidance without any prior click in this render', async () => {
+      api.applyToScheme.mockResolvedValue({
+        ...APPLICATION_A,
+        requirements: APPLICATION_A.requirements.map(r => r.requirementCode === 'INCOME_PROOF'
+          ? { ...r, status: 'ACTION_REQUIRED', userAction: 'Automatic retrieval was not allowed. You can provide this manually.' }
+          : r),
+      });
+      render(<ApplicationFormPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={() => {}} />);
+      await screen.findByText('APP-ZZZ-ALPHA-00001');
+
+      const incomeCard = screen.getByRole('heading', { name: 'Income proof' }).closest('article');
+      expect(within(incomeCard).getByText('Action required')).toBeInTheDocument();
+      expect(within(incomeCard).getByText('Automatic retrieval was not allowed. You can provide this manually.')).toBeInTheDocument();
+      // No Auto-Fill click happened in this render at all -- this message
+      // came entirely from the initial API response.
+      expect(api.autoFillRequirement).not.toHaveBeenCalled();
+    });
+
+    it('Phase 6D: a Verified (VALIDATED) requirement loaded fresh shows the Verified label and no action guidance', async () => {
+      api.applyToScheme.mockResolvedValue({
+        ...APPLICATION_A,
+        requirements: APPLICATION_A.requirements.map(r => r.requirementCode === 'DOMICILE_PROOF' ? { ...r, status: 'VALIDATED', userAction: 'No action required' } : r),
+      });
+      render(<ApplicationFormPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={() => {}} />);
+      await screen.findByText('APP-ZZZ-ALPHA-00001');
+      const domicileCard = screen.getByRole('heading', { name: 'Maharashtra domicile' }).closest('article');
+      expect(within(domicileCard).getByText('Verified')).toBeInTheDocument();
+      expect(within(domicileCard).queryByText(/action required/i)).not.toBeInTheDocument();
+    });
+
+    it('Phase 6D: a requirement with a prior failed/action-required attempt offers Retry instead of Auto-Fill, and Retry re-runs the same consent-gated flow', async () => {
+      api.applyToScheme.mockResolvedValue({
+        ...APPLICATION_A,
+        requirements: APPLICATION_A.requirements.map(r => r.requirementCode === 'INCOME_PROOF'
+          ? { ...r, status: 'WAITING', userAction: 'Retrieval is in progress. You can try again shortly.' }
+          : r),
+      });
+      api.autoFillRequirement.mockResolvedValue({ ...APPLICATION_A, requirements: APPLICATION_A.requirements.map(r => r.requirementCode === 'INCOME_PROOF' ? { ...r, status: 'VALIDATED', userAction: 'No action required' } : r) });
+      render(<ApplicationFormPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={() => {}} />);
+      await screen.findByText('APP-ZZZ-ALPHA-00001');
+
+      const incomeCard = screen.getByRole('heading', { name: 'Income proof' }).closest('article');
+      expect(within(incomeCard).queryByRole('button', { name: 'Auto-Fill' })).not.toBeInTheDocument();
+      expect(within(incomeCard).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+
+      const user = userEvent.setup();
+      await user.click(within(incomeCard).getByRole('button', { name: 'Retry' }));
+      // Retry goes through the exact same consent prompt -- never bypassed.
+      expect(within(incomeCard).getByText(/Allow SANGAM to retrieve and verify/)).toBeInTheDocument();
+      await user.click(within(incomeCard).getByRole('button', { name: 'Accept' }));
+
+      expect(api.autoFillRequirement).toHaveBeenCalledWith('APP-ZZZ-ALPHA-00001', 'INCOME_PROOF', 'ACCEPT');
+      await waitFor(() => expect(within(screen.getByRole('heading', { name: 'Income proof' }).closest('article')).getByText('Verified')).toBeInTheDocument());
+    });
+
+    it('Phase 6D: independent per-requirement loading states -- one card retrying does not disable or block an unrelated card', async () => {
+      let resolveRetry;
+      api.applyToScheme.mockResolvedValue({
+        ...APPLICATION_A,
+        requirements: APPLICATION_A.requirements.map(r => r.requirementCode === 'INCOME_PROOF' ? { ...r, status: 'FAILED', userAction: 'Automatic retrieval could not complete. You can provide this manually.' } : r),
+      });
+      api.autoFillRequirement.mockReturnValue(new Promise(resolve => { resolveRetry = resolve; }));
+      render(<ApplicationFormPage schemeId="ZZZ-ALPHA-2099" citizen={CITIZEN} navigate={() => {}} />);
+      await screen.findByText('APP-ZZZ-ALPHA-00001');
+
+      const incomeCard = screen.getByRole('heading', { name: 'Income proof' }).closest('article');
+      const identityCard = screen.getByRole('heading', { name: 'Identity' }).closest('article');
+      const user = userEvent.setup();
+      await user.click(within(incomeCard).getByRole('button', { name: 'Retry' }));
+      await user.click(within(incomeCard).getByRole('button', { name: 'Accept' }));
+
+      // Income's retry is now in flight (unresolved promise); Identity's own
+      // Auto-Fill button must remain fully enabled and independent.
+      expect(within(identityCard).getByRole('button', { name: 'Auto-Fill' })).not.toBeDisabled();
+      resolveRetry({ ...APPLICATION_A, requirements: APPLICATION_A.requirements.map(r => r.requirementCode === 'INCOME_PROOF' ? { ...r, status: 'VALIDATED', userAction: 'No action required' } : r) });
     });
   });
 

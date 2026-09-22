@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from copy import deepcopy
-from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,7 +16,7 @@ from app.core.persistence import (citizen_service_snapshot, catalog_snapshot, en
                                   get_application, list_applications_for_citizen,
                                   list_dependencies_for_application,
                                   create_application as create_application_authoritative,
-                                  mark_application_write_authoritative, mutate_application, upsert_document)
+                                  mark_application_write_authoritative, upsert_document)
 from app.engine.artifact_retrieval import requirement_data_type, validate_upload_metadata
 from app.engine import requirement_fulfillment
 from app.engine.requirement_analyzer import discover
@@ -177,9 +175,15 @@ def _safe_discovery(result: dict) -> dict:
 _REQUIREMENT_USER_ACTION = {
     "FOUND": "No action required", "VALIDATED": "No action required", "RETRIEVED": "No action required",
     "NOT_PROVIDED": "Use Auto-Fill or Manual Upload to provide this.",
-    "REJECTED": "Automatic retrieval was not allowed. You can provide this manually.",
+    # ACTION_REQUIRED covers two distinct causes (the citizen declined the
+    # Auto-Fill consent prompt, or retries were exhausted after repeated
+    # failures) -- one persisted, refresh-safe message that reads correctly
+    # for both, matching the citizen-facing wording this phase specifies.
+    "ACTION_REQUIRED": "Automatic retrieval was not allowed. You can provide this manually.",
+    # REJECTED is different: the provider actually returned data, but it
+    # failed validation -- nothing was "not allowed", it just didn't verify.
+    "REJECTED": "The retrieved information could not be verified. You can provide this manually.",
     "WAITING": "Retrieval is in progress. You can try again shortly.",
-    "ACTION_REQUIRED": "Automatic retrieval could not complete. You can provide this manually.",
     "FAILED": "Automatic retrieval could not complete. You can provide this manually.",
 }
 
@@ -446,12 +450,23 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
     requirement-state change through the PostgreSQL-authoritative mutation
     gateway (mutate_application) rather than the legacy in-memory dependency
     path, since this application is authoritative from creation.
+
+    Uses the same requirement_fulfillment.mutate_requirement_under_lock
+    helper Auto-Fill uses (Phase 6D): reading the requirements list inside
+    the same row lock that writes it prevents a concurrent Auto-Fill (or
+    another upload) for a *different* requirement on this application from
+    losing this update, or vice versa. A manual upload is an explicit
+    citizen action and always wins here -- it is not skipped even if the
+    requirement already has a successful Auto-Fill result -- but a stale,
+    slower Auto-Fill outcome that finishes *after* this upload can never
+    downgrade it in turn, because requirement_fulfillment._apply_outcome
+    checks the requirement's freshly-locked status before applying any
+    outcome and is a no-op once the requirement is already VALIDATED.
     """
     citizen_id = user["citizenId"]
     enforce("requirement_upload", citizen_id, limit=10, window_seconds=60)
     app = _load_owned_application(application_id, citizen_id)
-    requirements = deepcopy(app.get("requirements", []))
-    requirement = next((item for item in requirements if item.get("code") == requirement_code), None)
+    requirement = requirement_fulfillment.find_requirement(app, requirement_code)
     if requirement is None:
         raise HTTPException(status_code=404, detail="Requirement not found on this application")
     if requirement.get("dataType") not in {"DOCUMENT", "CERTIFICATE"}:
@@ -465,8 +480,12 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
     checksum = hashlib.sha256(body.content.encode("utf-8")).hexdigest()
     document_id = f"DOC-{application_id}-{requirement_code}"
     canonical = {"title": body.title, "contentType": body.contentType, "checksum": checksum}
-    requirement.update({"status": "VALIDATED", "documentId": document_id})
-    application = mutate_application(application_id, {"requirements": requirements})
+
+    def mutate(target: dict) -> None:
+        target.update({"status": "VALIDATED", "documentId": document_id})
+        target.pop("autoFillRequestedAt", None)
+
+    application, _ = requirement_fulfillment.mutate_requirement_under_lock(application_id, requirement_code, mutate)
     upsert_document({
         "documentId": document_id, "appId": application_id, "dependencyId": None,
         "requirementCode": requirement_code, "citizenId": citizen_id, "sourceType": "CITIZEN_UPLOAD",

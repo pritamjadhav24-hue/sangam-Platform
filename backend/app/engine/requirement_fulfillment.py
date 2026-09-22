@@ -80,8 +80,11 @@ def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_i
     )
 
 
-def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult]) -> None:
-    """Mutate the requirement dict in place from one adapter outcome.
+def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult]) -> bool:
+    """Mutate the requirement dict in place from one adapter outcome. Returns
+    whether the outcome was actually applied (``False`` for a stale no-op --
+    see below), so the caller knows whether to also touch the document
+    reference for this requirement.
 
     Reuses the existing schema-mapped canonical output, the existing
     validation engine, and the existing retry-classification taxonomy
@@ -89,6 +92,17 @@ def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult]) -
     it already reads a legacy dependency dict, since both simply carry
     attempts/maxAttempts/errorCategory/status fields.
     """
+    if requirement.get("status") in SUCCESS_STATUSES:
+        # A newer attempt (another concurrent Auto-Fill, or a citizen manual
+        # upload) already satisfied this requirement while this outcome's
+        # provider call was still in flight. This outcome is stale -- win or
+        # lose, it must never overwrite an already-achieved result. This is
+        # only reachable at all because the caller re-reads the requirement
+        # fresh under the same row lock it writes with (see
+        # mutate_requirement_under_lock); the route's own pre-check normally
+        # short-circuits a request for an already-successful requirement
+        # before any provider call even starts.
+        return False
     requirement["attempts"] = requirement.get("attempts", 0) + 1
     requirement["maxAttempts"] = requirement.get("maxAttempts", 3)
     requirement.pop("autoFillRequestedAt", None)
@@ -114,7 +128,7 @@ def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult]) -
             requirement["verifiedOn"] = record.get("validUntil")
         else:
             requirement["status"] = "REJECTED"
-        return
+        return True
     category = getattr(adapter_result, "error_category", None) or "UPSTREAM_UNAVAILABLE"
     requirement["errorCategory"] = category
     requirement["lastError"] = "The requested information could not be retrieved at this time."
@@ -125,6 +139,7 @@ def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult]) -
         requirement["status"] = "ACTION_REQUIRED"
     else:
         requirement["status"] = "WAITING"
+    return True
 
 
 def _upsert_requirement_document(application_id: str, requirement_code: str, citizen_id: str, requirement: dict) -> Optional[dict]:
@@ -184,11 +199,21 @@ def fulfill_requirement(application: dict, requirement_code: str, citizen_id: st
         operation=lambda: _discover_and_retrieve(requirement_code, citizen_id, application_id, correlation_id),
     )
 
-    def mutate(requirement: dict) -> None:
-        _apply_outcome(requirement, adapter_result)
+    applied = []
 
-    updated_application, updated_requirement = _mutate_requirement_under_lock(application_id, requirement_code, mutate)
-    _upsert_requirement_document(application_id, requirement_code, citizen_id, updated_requirement)
+    def mutate(requirement: dict) -> None:
+        applied.append(_apply_outcome(requirement, adapter_result))
+
+    updated_application, updated_requirement = mutate_requirement_under_lock(application_id, requirement_code, mutate)
+    if applied and applied[0]:
+        # Only touch the document reference when this outcome was actually
+        # applied. A stale/no-op outcome (the requirement was already
+        # satisfied by a faster concurrent attempt or a manual upload by the
+        # time this one reached the lock) must not re-derive a document from
+        # this attempt's own (possibly empty, possibly different) canonical
+        # data and silently overwrite what's already there -- see
+        # test_requirement_resilience.py's stale-response tests.
+        _upsert_requirement_document(application_id, requirement_code, citizen_id, updated_requirement)
     return updated_application
 
 
@@ -209,26 +234,29 @@ def reject_auto_fill(application: dict, requirement_code: str, citizen_id: str) 
         requirement["status"] = "ACTION_REQUIRED"
         requirement.pop("autoFillRequestedAt", None)
 
-    updated_application, _ = _mutate_requirement_under_lock(application_id, requirement_code, mutate)
+    updated_application, _ = mutate_requirement_under_lock(application_id, requirement_code, mutate)
     return updated_application
 
 
-def _mutate_requirement_under_lock(application_id: str, requirement_code: str, mutator) -> tuple[dict, dict]:
+def mutate_requirement_under_lock(application_id: str, requirement_code: str, mutator) -> tuple[dict, dict]:
     """Read the application's current requirements *inside* a PostgreSQL row
     lock, apply ``mutator`` to just the target requirement, and persist the
     full list back through the authoritative mutation gateway, all within
     one caller-owned transaction.
 
-    This is required for correctness under concurrent Auto-Fill calls:
-    ``mutate_application`` locks the row for its own write, but two
-    concurrent callers that each read the requirements list *before*
-    acquiring any lock (as a naive ``get_application`` + patch would) can
-    each build a patch from a stale snapshot and the second writer's patch
-    silently discards the first writer's change (a classic lost update).
-    Reading under the same lock that protects the write closes that window:
-    the second caller's read happens only after the first caller's write has
-    committed and released the lock, so it always builds its patch from the
-    latest state.
+    This is required for correctness under ANY concurrent requirement-level
+    write to the same application -- not just Auto-Fill against Auto-Fill,
+    but also Auto-Fill racing a citizen's manual upload for a different
+    requirement (``citizen_routes.upload_requirement_document`` uses this
+    same helper for exactly that reason). ``mutate_application`` locks the
+    row for its own write, but two concurrent callers that each read the
+    requirements list *before* acquiring any lock (as a naive
+    ``get_application`` + patch would) can each build a patch from a stale
+    snapshot, and the second writer's patch silently discards the first
+    writer's change (a classic lost update). Reading under the same lock
+    that protects the write closes that window: the second caller's read
+    happens only after the first caller's write has committed and released
+    the lock, so it always builds its patch from the latest state.
     """
     from sqlalchemy.orm import Session
     from app.core.persistence import engine, get_application, mutate_application

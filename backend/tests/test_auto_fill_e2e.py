@@ -32,7 +32,7 @@ from types import SimpleNamespace
 import uvicorn
 from sqlalchemy.orm import Session
 
-from app.api.citizen_routes import AutoFillDecision, auto_fill_requirement, get_citizen_application
+from app.api.citizen_routes import AutoFillDecision, RequirementUpload, auto_fill_requirement, get_citizen_application, upload_requirement_document
 from app.core.demo_state import reset_demo_state
 from app.core.persistence import (
     DEPARTMENT_SANDBOX_PROVIDERS, REQUIREMENT_CATALOG, ApplicationRow, DepartmentRow, DocumentRow,
@@ -42,6 +42,7 @@ from app.core.persistence import (
     seed_requirement_catalog,
 )
 from app.engine import requirement_fulfillment
+from app.engine.consent_manager import create_consent
 from app.sandbox.common import session_scope
 from app.sandbox.registry import SANDBOXES_BY_KEY
 from app.seeds.synthetic_identity_pool import generate_citizen_pool
@@ -255,6 +256,115 @@ class AutoFillEndToEndTest(unittest.TestCase):
         self.assertIsNotNone(get_document(f"DOC-{application['appId']}-RATION_CARD"))
         self.assertIsNone(get_document(f"DOC-{application['appId']}-LAND_HOLDING"))
         self.assertIsNone(get_document(f"DOC-{application['appId']}-SCHOLARSHIP_ELIGIBILITY"))
+
+    def test_retryable_failure_then_retry_succeeds_while_another_requirement_succeeds_independently(self):
+        """Phase 6D's required scenario: requirement A hits a retryable
+        failure while requirement B succeeds -- both dispatched concurrently,
+        A's failure never blocks or cancels B. Retrying A afterward (the same
+        consent-gated Auto-Fill action, not a separate mechanism) then
+        succeeds. Final persisted state: both requirements verified.
+
+        A's first attempt is forced to a retryable failure via a thin
+        side_effect wrapper around the real adapter boundary (rather than
+        marking its provider globally unavailable, which -- since
+        select_dependency_provider only considers AVAILABLE/HEALTHY
+        candidates -- would make discovery find no provider at all and
+        produce a non-retryable CONFIGURATION_ERROR instead of a realistic
+        transient one). B's call is never touched and goes through the real
+        live HTTP path exactly like every other test in this file.
+        """
+        from app.engine.adapters import request_registered_service as real_request_registered_service
+
+        citizen_id = _citizen_with_land_record_and_ration_card()
+        application = self._create_app(citizen_id, [
+            {"code": "LAND_HOLDING", "label": "Land holding", "mandatory": True, "status": "NOT_PROVIDED", "dataType": "RECORD"},
+            {"code": "RATION_CARD", "label": "Ration card", "mandatory": True, "status": "NOT_PROVIDED", "dataType": "CERTIFICATE"},
+        ])
+
+        def flaky_once(service_id, citizen, requirement_code=None, correlation_id=None, idempotency_key=None):
+            if requirement_code == "RATION_CARD":
+                from app.engine.adapters import AdapterResult
+                return AdapterResult(None, success=False, error_category="UPSTREAM_UNAVAILABLE", retryable=True)
+            return real_request_registered_service(service_id, citizen, requirement_code=requirement_code, correlation_id=correlation_id, idempotency_key=idempotency_key)
+
+        results: dict[str, dict] = {}
+        errors: list[tuple[str, Exception]] = []
+        barrier = threading.Barrier(2, timeout=10)
+
+        def run(code: str):
+            try:
+                barrier.wait()
+                results[code] = auto_fill_requirement(application["appId"], code, AutoFillDecision(decision="ACCEPT"), user=_user(citizen_id))
+            except Exception as error:  # pragma: no cover
+                errors.append((code, error))
+
+        with patch.object(requirement_fulfillment, "request_registered_service", side_effect=flaky_once):
+            threads = [threading.Thread(target=run, args=(code,)) for code in ("RATION_CARD", "LAND_HOLDING")]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20)
+        self.assertEqual(errors, [], errors)
+
+        after_first_round = get_citizen_application(application["appId"], user=_user(citizen_id))
+        by_code = {item["requirementCode"]: item for item in after_first_round["requirements"]}
+        # A: the provider was unavailable -> a retryable failure, not success.
+        self.assertEqual(by_code["RATION_CARD"]["status"], "WAITING", by_code["RATION_CARD"])
+        # B: independent, unaffected, succeeds in the same round.
+        self.assertEqual(by_code["LAND_HOLDING"]["status"], "RETRIEVED", by_code["LAND_HOLDING"])
+
+        # Retry A (same consent-gated Auto-Fill action) now that the
+        # provider is healthy again.
+        retried = auto_fill_requirement(application["appId"], "RATION_CARD", AutoFillDecision(decision="ACCEPT"), user=_user(citizen_id))
+        retried_requirement = next(item for item in retried["requirements"] if item["requirementCode"] == "RATION_CARD")
+        self.assertEqual(retried_requirement["status"], "VALIDATED", retried_requirement)
+
+        final = get_citizen_application(application["appId"], user=_user(citizen_id))
+        final_by_code = {item["requirementCode"]: item for item in final["requirements"]}
+        self.assertIn(final_by_code["RATION_CARD"]["status"], requirement_fulfillment.SUCCESS_STATUSES)
+        self.assertIn(final_by_code["LAND_HOLDING"]["status"], requirement_fulfillment.SUCCESS_STATUSES)
+        self.assertEqual(final_by_code["RATION_CARD"]["userAction"], "No action required")
+        self.assertEqual(final_by_code["LAND_HOLDING"]["userAction"], "No action required")
+
+    def test_manual_upload_is_not_downgraded_by_a_stale_auto_fill_result_arriving_later(self):
+        """End-to-end version of the stale-response protection: a citizen
+        manually uploads a document for a requirement; a slower Auto-Fill
+        attempt for the *same* requirement (already in flight before the
+        upload, through the real live adapter/provider path) resolves only
+        afterward. The manually supplied, already-validated requirement and
+        its document must remain exactly as the citizen left them."""
+        citizen_id = _citizen_with_ration_card()
+        application = self._create_app(citizen_id, [
+            {"code": "RATION_CARD", "label": "Ration card", "mandatory": True, "status": "NOT_PROVIDED", "dataType": "CERTIFICATE"},
+        ])
+
+        uploaded = upload_requirement_document(
+            application["appId"], "RATION_CARD",
+            RequirementUpload(title="My own ration card copy", content="citizen-provided synthetic content"),
+            user=_user(citizen_id),
+        )
+        requirement = next(item for item in uploaded["requirements"] if item["requirementCode"] == "RATION_CARD")
+        self.assertEqual(requirement["status"], "VALIDATED")
+        document_before = get_document(f"DOC-{application['appId']}-RATION_CARD")
+
+        # Simulate the "already in flight, resolves late" ordering: this
+        # attempt's own consent + real provider call happen strictly after
+        # the manual upload already committed.
+        from app.core.persistence import get_application as get_application_raw
+        app_snapshot = get_application_raw(application["appId"])
+        receipt = create_consent(
+            citizen_id, True, attributes=[], service_id=app_snapshot.get("serviceId"),
+            application_id=application["appId"], purpose=requirement_fulfillment.auto_fill_purpose("RATION_CARD"),
+        )
+        requirement_fulfillment.fulfill_requirement(app_snapshot, "RATION_CARD", citizen_id, receipt["consentId"])
+
+        final = get_citizen_application(application["appId"], user=_user(citizen_id))
+        final_requirement = next(item for item in final["requirements"] if item["requirementCode"] == "RATION_CARD")
+        self.assertEqual(final_requirement["status"], "VALIDATED")
+        self.assertEqual(final_requirement["documentId"], f"DOC-{application['appId']}-RATION_CARD")
+        document_after = get_document(f"DOC-{application['appId']}-RATION_CARD")
+        self.assertEqual(document_after["checksum"], document_before["checksum"], "the citizen's own upload must not be replaced by a stale Auto-Fill result")
+        self.assertEqual(document_after["sourceType"], "CITIZEN_UPLOAD")
 
 
 if __name__ == "__main__":

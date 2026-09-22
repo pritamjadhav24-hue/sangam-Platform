@@ -1,13 +1,19 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 
+// RETRIEVED (non-document requirements) and VALIDATED (document/certificate
+// requirements) are kept as distinct persisted statuses -- they still gate
+// different behaviour (document lifecycle) -- but both represent the same
+// citizen-facing outcome ("this was successfully verified, no action
+// needed"), so they share one label rather than exposing an internal
+// document-vs-record distinction the citizen has no reason to care about.
 const STATE_LABELS = {
   en: {
-    NOT_PROVIDED: 'Not provided', PROCESSING: 'Processing', RETRIEVED: 'Retrieved', VALIDATED: 'Verified',
+    NOT_PROVIDED: 'Not provided', PROCESSING: 'Processing', RETRIEVED: 'Verified', VALIDATED: 'Verified',
     WAITING: 'Waiting', ACTION_REQUIRED: 'Action required', REJECTED: 'Rejected', FAILED: 'Failed',
   },
   mr: {
-    NOT_PROVIDED: 'दिलेले नाही', PROCESSING: 'प्रक्रिया सुरू', RETRIEVED: 'प्राप्त झाले', VALIDATED: 'पडताळणी झाली',
+    NOT_PROVIDED: 'दिलेले नाही', PROCESSING: 'प्रक्रिया सुरू', RETRIEVED: 'पडताळणी झाली', VALIDATED: 'पडताळणी झाली',
     WAITING: 'प्रतीक्षेत', ACTION_REQUIRED: 'कृती आवश्यक', REJECTED: 'नाकारले', FAILED: 'अयशस्वी',
   },
 };
@@ -17,6 +23,12 @@ const STATE_CLASS = {
   WAITING: 'pending', ACTION_REQUIRED: 'exception', REJECTED: 'exception', FAILED: 'exception',
 };
 
+// Statuses that mean a prior Auto-Fill attempt did not (yet) succeed --
+// the action button reads "Retry" instead of "Auto-Fill" for these, and the
+// backend's own persisted guidance (requirement.userAction) is shown so the
+// message survives a page refresh instead of living only in local state.
+const NEEDS_ATTENTION_STATUSES = new Set(['WAITING', 'ACTION_REQUIRED', 'REJECTED', 'FAILED']);
+
 function RequirementCard({ requirement, applicationId, language, onChange }) {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
@@ -24,29 +36,26 @@ function RequirementCard({ requirement, applicationId, language, onChange }) {
   const [content, setContent] = useState('');
   const [busy, setBusy] = useState(null); // 'auto-fill' | 'upload' | null
   const [error, setError] = useState(null);
-  const [notice, setNotice] = useState(null);
 
   const isDocumentLike = requirement.dataType === 'DOCUMENT' || requirement.dataType === 'CERTIFICATE';
   const stateLabels = STATE_LABELS[language] || STATE_LABELS.en;
   const label = stateLabels[requirement.status] || requirement.status;
   const statusClass = STATE_CLASS[requirement.status] || 'missing';
+  const needsAttention = NEEDS_ATTENTION_STATUSES.has(requirement.status);
+  const isRetry = needsAttention; // same action, different button copy
 
   // Auto-Fill never retrieves anything until the citizen explicitly accepts
   // this per-requirement consent prompt -- wording is deliberately generic
-  // and never names a department, provider, API or document source.
+  // and never names a department, provider, API or document source. A
+  // retry goes through this exact same consent-gated call -- consent is
+  // never skipped just because a prior attempt already happened.
   async function handleAutoFillDecision(decision) {
     setConsentOpen(false);
     setBusy('auto-fill');
     setError(null);
-    setNotice(null);
     try {
       const updated = await api.autoFillRequirement(applicationId, requirement.requirementCode, decision);
       onChange(updated);
-      if (decision === 'REJECT') {
-        setNotice(language === 'en'
-          ? 'Automatic retrieval was not allowed. You can provide this manually.'
-          : 'स्वयंचलित पुनर्प्राप्तीला परवानगी नव्हती. आपण हे स्वतः देऊ शकता.');
-      }
     } catch (err) {
       setError(err.message || (language === 'en' ? 'Auto-Fill could not be started.' : 'ऑटो-फिल सुरू करता आले नाही.'));
     } finally {
@@ -81,7 +90,11 @@ function RequirementCard({ requirement, applicationId, language, onChange }) {
       </div>
 
       {error && <div className="alert danger" role="alert">{error}</div>}
-      {notice && <div className="notice">{notice}</div>}
+      {/* Backend-persisted guidance, not local-only state -- this survives a
+          page refresh/reopen because it is derived from requirement.userAction
+          (part of the API response), not from something set only right after
+          a button click. */}
+      {needsAttention && requirement.userAction && <div className="notice">{requirement.userAction}</div>}
 
       {consentOpen && (
         <div className="notice consent-prompt">
@@ -97,7 +110,11 @@ function RequirementCard({ requirement, applicationId, language, onChange }) {
 
       <div className="requirement-actions">
         <button className="outline" disabled={busy !== null} onClick={() => setConsentOpen(true)}>
-          {busy === 'auto-fill' ? (language === 'en' ? 'Processing…' : 'प्रक्रिया सुरू…') : (language === 'en' ? 'Auto-Fill' : 'ऑटो-फिल')}
+          {busy === 'auto-fill'
+            ? (language === 'en' ? 'Processing…' : 'प्रक्रिया सुरू…')
+            : isRetry
+              ? (language === 'en' ? 'Retry' : 'पुन्हा प्रयत्न करा')
+              : (language === 'en' ? 'Auto-Fill' : 'ऑटो-फिल')}
         </button>
         {isDocumentLike && (
           <button className="outline" disabled={busy !== null} onClick={() => setUploadOpen(open => !open)}>
