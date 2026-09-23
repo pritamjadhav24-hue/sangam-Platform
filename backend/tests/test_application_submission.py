@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.api.citizen_routes import (
     ApplySchemeRequest, AutoFillDecision, RequirementUpload, apply_to_scheme, auto_fill_requirement,
-    get_citizen_application, submit_citizen_application, upload_requirement_document,
+    get_citizen_application, submit_citizen_application, upload_requirement_document, track,
 )
 from app.core.persistence import (
     REQUIREMENT_CATALOG, ApplicationRow, ConsentRow, DocumentRow, RequirementCatalogRow,
@@ -324,6 +324,18 @@ class ApplicationSubmissionTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             upload_requirement_document(application["appId"], document_code, RequirementUpload(title="x", content="y"), user=_user("CITIZEN_6E_016"))
         self.assertEqual(ctx.exception.status_code, 409)
+    def test_authoritative_application_can_be_tracked_by_owner(self):
+        application = self._apply("CITIZEN_6E_017")
+        tracked = track(application["appId"], user=_user("CITIZEN_6E_017"))
+        self.assertEqual(tracked["appId"], application["appId"])
+        self.assertEqual(tracked["status"], "IN_PROGRESS")
+        self.assertIn("requirements", tracked)
+
+    def test_authoritative_application_tracking_blocks_other_citizens(self):
+        application = self._apply("CITIZEN_6E_018")
+        with self.assertRaises(HTTPException) as ctx:
+            track(application["appId"], user=_user("OTHER_CITIZEN"))
+        self.assertEqual(ctx.exception.status_code, 404)
 
 
 if __name__ == "__main__":

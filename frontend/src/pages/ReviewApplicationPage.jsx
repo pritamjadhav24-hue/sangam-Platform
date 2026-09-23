@@ -134,7 +134,10 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
           </section>
         )}
 
-        <button className="outline" onClick={() => navigate('dashboard')}>{language === 'en' ? 'Back to dashboard' : 'डॅशबोर्डवर परत जा'}</button>
+        <div className="requirement-actions">
+          <button className="outline" onClick={() => navigate('dashboard')}>{language === 'en' ? 'Back to dashboard' : 'डॅशबोर्डवर परत जा'}</button>
+          <button className="primary" onClick={() => navigate('tracking', application.appId)}>{language === 'en' ? 'Track Application' : 'अर्जाचा मागोवा घ्या'}</button>
+        </div>
       </main>
     );
   }

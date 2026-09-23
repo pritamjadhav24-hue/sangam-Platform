@@ -805,12 +805,17 @@ def submit(body: Submit, user: dict = Depends(require_roles("CITIZEN"))):
 
 @router.get("/track/{app_id}")
 def track(app_id: str, user: dict = Depends(require_roles("CITIZEN", "OFFICER"))):
-    if app_id not in APPLICATIONS:
+    app = APPLICATIONS.get(app_id)
+    if not app:
+        with Session(engine) as session:
+            db_app = get_application(app_id, session=session)
+            if db_app:
+                app = _application_with_database_dependencies(db_app, session)
+    if not app:
         raise HTTPException(404, "Application not found")
-    app = APPLICATIONS[app_id]
-    if user.get("role") == "CITIZEN" and app["citizenId"] != user.get("citizenId"):
+    if user.get("role") == "CITIZEN" and app.get("citizenId") != user.get("citizenId"):
         raise HTTPException(status_code=404, detail="Application not found")
-    receipt = current(app["citizenId"])
+    receipt = current(app.get("citizenId"))
     consent_view = None
     if receipt:
         consent_view = {field: receipt.get(field) for field in ("consentId", "serviceId", "purpose", "allowed", "expiresAt", "decision", "createdAt", "revokedAt") if field in receipt}
