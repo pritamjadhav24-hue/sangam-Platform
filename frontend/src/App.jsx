@@ -50,10 +50,14 @@ export default function App() {
   // the switcher simply doesn't render anything when it comes back empty.
   useEffect(() => { api.demoCitizens().then(x => setDemoCitizens(x.citizens || [])).catch(() => {}); }, []);
   function changeLanguage(next) { setLanguage(next); localStorage.setItem(LANGUAGE_KEY, next); }
-  async function login(id, pw) { const result = await api.login(id, pw); setSessionToken(result.token); setUser(result.user); setPage(result.user.role === 'CITIZEN' ? 'dashboard' : result.user.role === 'OFFICER' ? 'officer' : 'health'); }
+  async function login(id, pw) {
+    const result = await api.login(id, pw);
+    setSessionToken(result.token); setUser(result.user); setApplications([]); setAppId(null); setDiscovery(null); setSchemeId(null);
+    setPage(result.user.role === 'CITIZEN' ? 'dashboard' : result.user.role === 'OFFICER' ? 'officer' : 'health');
+  }
   async function demoSwitch(citizenId) {
     const result = await api.demoLogin(citizenId);
-    setSessionToken(result.token); setUser(result.user); setAppId(null); setDiscovery(null); setSchemeId(null); setPage('dashboard');
+    setSessionToken(result.token); setUser(result.user); setApplications([]); setAppId(null); setDiscovery(null); setSchemeId(null); setPage('dashboard');
   }
   async function discover(timeout = false) { const result = await api.discover(user.citizenId, timeout, schemeId); setDiscovery(result); if (result.schemeId) setSchemeId(result.schemeId); return result; }
   async function consent(allow) { const result = await api.consent(user.citizenId, allow, schemeId); if (result.appId) setAppId(result.appId); return result; }
@@ -63,7 +67,7 @@ export default function App() {
   function viewScheme(id) { setSchemeId(id); setPage('schemeDetail'); }
   function openApplicationForm(scheme) { const id = scheme?.serviceId || scheme?.schemeId || scheme; if (id) setSchemeId(id); setPage('applicationForm'); }
   function openApplication(application) { if (application?.serviceId) setSchemeId(application.serviceId); setPage(application?.status === 'SUBMITTED' ? 'reviewApplication' : 'applicationForm'); }
-  function logout() { setSessionToken(null); setUser(null); setAppId(null); setDiscovery(null); setPage('dashboard'); }
+  function logout() { setSessionToken(null); setUser(null); setApplications([]); setAppId(null); setDiscovery(null); setSchemeId(null); setPage('dashboard'); }
   function onNotificationSelect(notification) {
     if (notification.applicationId && user.role === 'CITIZEN') {
       const application = applications.find(item => item.appId === notification.applicationId);
