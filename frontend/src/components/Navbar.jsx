@@ -18,7 +18,9 @@ export default function Navbar({ page, setPage, citizen, language = 'en', onLang
   // original bell + dropdown popup, restored below, unchanged in behaviour.
   const links = role === 'CITIZEN'
     ? [['dashboard', t.homeNav], ['schemes', t.schemesNav], ['myApplications', t.myApplicationsNav], ['notificationsPage', t.notificationsNav, unread], ['profile', t.profileNav]]
-    : role === 'OFFICER' ? [['officer', 'Officer Desk']] : role === 'ADMIN' ? [['health', 'Integration Health'], ['audit', 'Audit Lineage']] : [];
+    : role === 'OFFICER' ? [['officer', 'Officer Desk']]
+    : role === 'ADMIN' ? [['adminDashboard', 'Dashboard'], ['adminApplications', 'Applications'], ['adminProviders', 'Providers'], ['adminAlerts', 'Alerts'], ['audit', 'Audit Lineage']] : [];
+  const adminActivePage = page === 'adminApplicationDetail' ? 'adminApplications' : page;
 
   function selectBellNotification(notification) {
     setBellOpen(false);
@@ -36,13 +38,13 @@ export default function Navbar({ page, setPage, citizen, language = 'en', onLang
   return <>
     <header className="tricolor" />
     <nav>
-      <button className="brand brand-button" onClick={() => citizen && setPage(role === 'CITIZEN' ? 'dashboard' : role === 'OFFICER' ? 'officer' : 'health')} aria-label="Sangam home">
+      <button className="brand brand-button" onClick={() => citizen && setPage(role === 'CITIZEN' ? 'dashboard' : role === 'OFFICER' ? 'officer' : 'adminDashboard')} aria-label="Sangam home">
         <SangamMark size={34} />
         <div><strong>SANGAM</strong><small>{language === 'en' ? 'Federated Government Interoperability Platform' : 'फेडरेटेड शासकीय इंटरऑपरेबिलिटी प्लॅटफॉर्म'}</small></div>
       </button>
       <div className="navlinks">
         {citizen && links.map(([key, label, badge]) => (
-          <button key={key} className={page === key ? 'active' : ''} onClick={() => setPage(key)}>
+          <button key={key} className={adminActivePage === key ? 'active' : ''} onClick={() => setPage(key)}>
             {label}{badge > 0 && <span className="nav-notification-badge">{badge}</span>}
           </button>
         ))}

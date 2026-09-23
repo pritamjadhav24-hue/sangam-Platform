@@ -18,7 +18,11 @@ import ReviewSubmitPage from './pages/ReviewSubmitPage';
 import TrackingPage from './pages/TrackingPage';
 import OfficerDashboard from './pages/OfficerDashboard';
 import AuditLineagePage from './pages/AuditLineagePage';
-import IntegrationHealthPage from './pages/IntegrationHealthPage';
+import AdminDashboardPage from './pages/admin/AdminDashboardPage';
+import AdminApplicationsPage from './pages/admin/AdminApplicationsPage';
+import AdminApplicationDetailPage from './pages/admin/AdminApplicationDetailPage';
+import AdminProvidersPage from './pages/admin/AdminProvidersPage';
+import AdminAlertsPage from './pages/admin/AdminAlertsPage';
 import SangamMark from './components/SangamMark';
 
 export default function App() {
@@ -26,6 +30,7 @@ export default function App() {
   const [applications, setApplications] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [demoCitizens, setDemoCitizens] = useState([]);
+  const [adminApplicationId, setAdminApplicationId] = useState(null);
   useEffect(() => { setAuthFailureHandler(() => { setSessionToken(null); setUser(null); setAppId(null); setDiscovery(null); setPage('dashboard'); }); return () => setAuthFailureHandler(null); }, []);
   useEffect(() => {
     if (user?.role !== 'CITIZEN') return undefined;
@@ -65,7 +70,7 @@ export default function App() {
   async function login(id, pw) {
     const result = await api.login(id, pw);
     setSessionToken(result.token); setUser(result.user); setApplications([]); setNotifications([]); setAppId(null); setDiscovery(null); setSchemeId(null);
-    setPage(result.user.role === 'CITIZEN' ? 'dashboard' : result.user.role === 'OFFICER' ? 'officer' : 'health');
+    setPage(result.user.role === 'CITIZEN' ? 'dashboard' : result.user.role === 'OFFICER' ? 'officer' : 'adminDashboard');
   }
   async function demoSwitch(citizenId) {
     const result = await api.demoLogin(citizenId);
@@ -89,7 +94,11 @@ export default function App() {
       const application = applications.find(item => item.appId === notification.applicationId);
       if (application) { openApplication(application); return; }
       setAppId(notification.applicationId); setPage('myApplications');
-    } else if (user.role === 'OFFICER') setPage('officer'); else if (user.role === 'ADMIN') setPage('health');
+    } else if (user.role === 'OFFICER') setPage('officer'); else if (user.role === 'ADMIN') setPage('adminDashboard');
+  }
+  function navigateAdmin(nextPage, applicationId) {
+    if (applicationId) setAdminApplicationId(applicationId);
+    setPage(nextPage);
   }
   if (!user) return <><Navbar page={page} setPage={setPage} language={language} onLanguageChange={changeLanguage} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} /><LoginPage onLogin={login} language={language} /></>;
   const props = { navigate, language, notifications, schemes };
@@ -108,7 +117,12 @@ export default function App() {
     review: <ReviewSubmitPage discovery={discovery} onDiscover={discover} onSubmit={submit} {...props} />,
     tracking: <TrackingPage appId={appId} onTrack={api.track} onDomicile={domicile} {...props} />,
     officer: <OfficerDashboard onQueue={api.queue} onAction={api.action} />,
-    health: <IntegrationHealthPage onHealth={api.integrationHealth} onReset={api.resetDemo} />,
+    adminDashboard: <AdminDashboardPage onNavigate={navigateAdmin} api={api} onReset={api.resetDemo} />,
+    adminApplications: <AdminApplicationsPage onSelectApplication={id => navigateAdmin('adminApplicationDetail', id)} api={api} />,
+    adminApplicationDetail: <AdminApplicationDetailPage applicationId={adminApplicationId} onBack={() => navigateAdmin('adminApplications')} api={api} />,
+    adminProviders: <AdminProvidersPage api={api} />,
+    adminAlerts: <AdminAlertsPage onNavigateToApplication={id => navigateAdmin('adminApplicationDetail', id)} api={api} />,
+    health: <AdminProvidersPage api={api} />,
     audit: <AuditLineagePage onAudit={api.audit} />,
   }[page] || null;
   return <><Navbar page={page} setPage={setPage} citizen={user} language={language} onLanguageChange={changeLanguage} onLogout={logout} onNotificationSelect={onNotificationSelect} notifications={notifications} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} />{content}<Footer language={language} /></>;

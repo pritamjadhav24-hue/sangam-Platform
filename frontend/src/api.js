@@ -56,4 +56,22 @@ export const api = {
   resetDemo: () => request('/admin/demo/reset', { method: 'POST' }),
   notifications: (role) => request(`/${role.toLowerCase()}/notifications`),
   markNotificationRead: (notificationId) => request(`/notifications/${notificationId}/read`, { method: 'POST' }),
+  adminOverview: () => request('/admin/operations/overview'),
+  adminApplications: (params = {}) => {
+    const q = new URLSearchParams();
+    if (params.status) q.set('status', params.status);
+    if (params.search) q.set('search', params.search);
+    if (params.limit) q.set('limit', params.limit);
+    const qs = q.toString();
+    return request('/admin/applications' + (qs ? `?${qs}` : ''));
+  },
+  adminApplicationDetail: (appId) => request(`/admin/applications/${encodeURIComponent(appId)}`),
+  adminProviders: () => request('/admin/operations/providers'),
+  adminDeadLetterJobs: (limit = 50) => request(`/admin/operations/jobs/dead-letter?limit=${limit}`),
+  adminRecentJobs: (limit = 50) => request(`/admin/operations/jobs/recent?limit=${limit}`),
+  adminReplayJob: (jobId) => request(`/admin/operations/jobs/${encodeURIComponent(jobId)}/replay`, { method: 'POST' }),
+  adminSimulateHealth: (system, available, error) => request('/admin/integration-health/simulate', { method: 'POST', body: JSON.stringify({ system, available, error }) }),
+  adminWorkerStatus: () => request('/admin/operations/worker'),
+  adminSchemaMappingReviews: () => request('/officer/schema-mapping-reviews'),
+  adminSchemaMappingAction: (reviewId, decision, remarks) => request('/officer/schema-mapping-action', { method: 'POST', body: JSON.stringify({ reviewId, decision, remarks }) }),
 };

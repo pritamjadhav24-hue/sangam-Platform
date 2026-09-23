@@ -1308,9 +1308,9 @@ def job_operational_summary() -> dict:
 def recent_provider_jobs(limit: int = 50, dead_letter_only: bool = False) -> list[dict]:
     limit = max(1, min(limit, 100))
     with Session(engine) as session:
-        query = session.query(ProviderJobRow).order_by(ProviderJobRow.created_at.desc()).limit(limit)
+        query = session.query(ProviderJobRow).order_by(ProviderJobRow.created_at.desc())
         if dead_letter_only: query = query.filter(ProviderJobRow.status == "DEAD_LETTER")
-        return [_safe_job_view(row) for row in query.all()]
+        return [_safe_job_view(row) for row in query.limit(limit).all()]
 
 
 def provider_job_detail(job_id: str) -> dict | None:
