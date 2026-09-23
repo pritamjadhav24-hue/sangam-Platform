@@ -485,6 +485,8 @@ def integration_health(record_event=False):
         if record_event and _last_health.get(system) != status:
             event_bus.publish("INTEGRATION_HEALTH_CHANGED", {"system": system, "status": status, "service": metadata.get("service")})
             audit_bus.append("SYSTEM", "INTEGRATION_HEALTH", "Integration availability check", system, status, payload={"system": system, "status": status})
+            from app.core.persistence import record_provider_health_transition
+            record_provider_health_transition(system, item.get("department"), item.get("service"), _last_health.get(system), status, item.get("errorCategory"))
         _last_health[system] = status
     return result
 

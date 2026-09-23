@@ -50,7 +50,7 @@ if not DATABASE_URL.startswith("postgresql+psycopg://"):
     raise RuntimeError("DATABASE_URL must use PostgreSQL (postgresql:// or postgresql+psycopg://).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-MIGRATION_HEAD = "0015_citizen_notifications"
+MIGRATION_HEAD = "0016_provider_incidents"
 
 
 class Base(DeclarativeBase):
@@ -107,6 +107,25 @@ class ConflictReviewRow(Base):
     review_id: Mapped[str] = mapped_column(String(160), primary_key=True)
     app_id: Mapped[str] = mapped_column(ForeignKey("applications.app_id", ondelete="CASCADE"), index=True)
     payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class ProviderIncidentRow(Base):
+    """A system/provider-level outage or degradation record.
+
+    One incident groups every execution (jobs, requirement attempts)
+    affected by the same underlying provider problem; it is distinct from
+    the many individual ProviderJobRow rows it may relate to. Opened/closed
+    by record_provider_health_transition(), called from the existing
+    integration_health() health-change detection -- this table only
+    persists that detection, it does not add a second detector.
+    """
+    __tablename__ = "provider_incidents"
+    incident_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    provider_system: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(20), index=True)  # OPEN | RESOLVED
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
 class NotificationRow(Base):
@@ -1338,6 +1357,123 @@ def provider_operational_summary() -> list[dict]:
                            "successCount": sum(1 for row in related if row.status == "COMPLETED"),
                            "failureCount": sum(1 for row in related if row.status in {"FAILED", "DEAD_LETTER"})})
         return result
+
+
+_HEALTHY_STATUSES = {"AVAILABLE", "HEALTHY"}
+
+
+def record_provider_health_transition(system: str, department: str | None, service: str | None,
+                                       from_status: str | None, to_status: str,
+                                       error_category: str | None = None) -> None:
+    """Open or resolve a ProviderIncidentRow for a health-status transition
+    already detected by integration_health() (app.engine.adapters
+    tracks _last_health and only calls this once per real transition, never
+    on every poll). This function only persists that detection; it is not a
+    second detector.
+    """
+    now = datetime.now(timezone.utc)
+    with Session(engine) as session:
+        open_incident = session.execute(
+            select(ProviderIncidentRow).where(
+                ProviderIncidentRow.provider_system == system,
+                ProviderIncidentRow.status == "OPEN",
+            )
+        ).scalar_one_or_none()
+        if to_status not in _HEALTHY_STATUSES:
+            if open_incident is None:
+                incident_id = f"INC-{system}-{int(now.timestamp() * 1000)}"
+                session.add(ProviderIncidentRow(
+                    incident_id=incident_id, provider_system=system, status="OPEN", detected_at=now,
+                    payload={"department": department, "service": service, "fromStatus": from_status,
+                             "toStatus": to_status, "errorCategory": error_category},
+                ))
+        elif open_incident is not None:
+            open_incident.status = "RESOLVED"
+            open_incident.resolved_at = now
+            open_incident.payload = {**(open_incident.payload or {}), "resolvedToStatus": to_status}
+        session.commit()
+
+
+def _parse_job_timestamp(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def provider_incidents_summary(resolved_limit: int = 20) -> list[dict]:
+    """Provider-level incidents, each enriched with real counts aggregated
+    from ProviderJobRow -- the asynchronous provider-job pipeline is the
+    only place a per-attempt provider/outcome history is persisted, so
+    affected-application/fallback/retry/dead-letter counts here reflect
+    jobs dispatched through that pipeline for the incident's provider
+    within its open window, not every citizen-facing retrieval path.
+    """
+    with Session(engine) as session:
+        incidents = session.query(ProviderIncidentRow).order_by(ProviderIncidentRow.detected_at.desc()).all()
+        result = []
+        for incident in incidents:
+            jobs_for_provider = session.query(ProviderJobRow).filter(ProviderJobRow.provider_id == incident.provider_system).all()
+            window_start = incident.detected_at
+            window_end = incident.resolved_at
+            jobs = []
+            for job in jobs_for_provider:
+                created = _parse_job_timestamp(job.created_at)
+                if created is None:
+                    continue
+                if window_start and created < window_start:
+                    continue
+                if window_end and created > window_end:
+                    continue
+                jobs.append(job)
+
+            affected_applications = {j.application_id for j in jobs if j.application_id}
+            dead_letter_jobs = [j for j in jobs if j.status == "DEAD_LETTER"]
+            retry_pending_jobs = [j for j in jobs if j.status in {"QUEUED", "RUNNING"}]
+
+            # A dependency this provider failed/dead-lettered that later
+            # completed via a different provider counts as recovered by
+            # fallback -- derived from real ProviderJobRow history, not
+            # estimated.
+            failed_dependency_ids = {j.dependency_id for j in jobs if j.dependency_id and j.status in {"FAILED", "DEAD_LETTER"}}
+            fallback_recovered = 0
+            for dependency_id in failed_dependency_ids:
+                recovered = session.query(ProviderJobRow).filter(
+                    ProviderJobRow.dependency_id == dependency_id,
+                    ProviderJobRow.provider_id != incident.provider_system,
+                    ProviderJobRow.status == "COMPLETED",
+                ).first()
+                if recovered:
+                    fallback_recovered += 1
+
+            payload = incident.payload or {}
+            result.append({
+                "incidentId": incident.incident_id,
+                "providerSystem": incident.provider_system,
+                "department": payload.get("department") or incident.provider_system,
+                "service": payload.get("service"),
+                "status": incident.status,
+                "detectedAt": incident.detected_at.isoformat() if incident.detected_at else None,
+                "resolvedAt": incident.resolved_at.isoformat() if incident.resolved_at else None,
+                "errorCategory": payload.get("errorCategory"),
+                "affectedApplications": len(affected_applications),
+                "affectedJobs": len(jobs),
+                "fallbackRecoveredCount": fallback_recovered,
+                "retryPendingCount": len(retry_pending_jobs),
+                "deadLetterCount": len(dead_letter_jobs),
+                "actionRequiredCount": len(dead_letter_jobs),
+            })
+
+        open_incidents = [r for r in result if r["status"] == "OPEN"]
+        resolved_incidents = [r for r in result if r["status"] != "OPEN"][:resolved_limit]
+        return open_incidents + resolved_incidents
+
+
+def open_provider_incident_count() -> int:
+    with Session(engine) as session:
+        return session.query(ProviderIncidentRow).filter(ProviderIncidentRow.status == "OPEN").count()
 
 
 def replay_dead_letter_job(job_id: str, redis_service) -> dict:

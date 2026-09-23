@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 export default function AdminAlertsPage({ onNavigateToApplication, api }) {
+  const [incidents, setIncidents] = useState([]);
   const [deadLetterJobs, setDeadLetterJobs] = useState([]);
   const [mappingReviews, setMappingReviews] = useState([]);
   const [overview, setOverview] = useState(null);
@@ -14,11 +15,13 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
     setLoading(true);
     setError('');
     Promise.all([
+      api.adminIncidents(),
       api.adminDeadLetterJobs(50),
       api.adminSchemaMappingReviews().catch(() => ({ reviews: [] })),
       api.adminOverview(),
     ])
-      .then(([jobsRes, reviewsRes, overviewRes]) => {
+      .then(([incidentsRes, jobsRes, reviewsRes, overviewRes]) => {
+        setIncidents(incidentsRes.incidents || []);
         setDeadLetterJobs(jobsRes.jobs || []);
         setMappingReviews((reviewsRes.reviews || []).filter(r => r.status === 'WAITING_FOR_OFFICER'));
         setOverview(overviewRes);
@@ -81,6 +84,11 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
       {notice && <div className="alert success" role="alert">{notice}</div>}
 
       <div className="summary-grid" style={{ marginBottom: '24px' }}>
+        <div className={`summary-card ${incidents.some(i => i.status === 'OPEN') ? 'amber' : ''}`}>
+          <span className="eyebrow">Active Provider Incidents</span>
+          <b>{incidents.filter(i => i.status === 'OPEN').length}</b>
+          <small>System/provider-level outages, distinct from individual dead-letter jobs</small>
+        </div>
         <div className="summary-card amber">
           <span className="eyebrow">Dead-Letter Jobs</span>
           <b>{deadLetterJobs.length}</b>
@@ -101,8 +109,62 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
       <div className="card" style={{ marginBottom: '24px' }}>
         <div className="section-heading">
           <div>
+            <h2>Provider Incidents</h2>
+            <p>One incident represents one underlying department/provider outage — not one per affected citizen. Affected/recovered/dead-letter counts are aggregated from tracked provider jobs.</p>
+          </div>
+          <span className="count-badge">Open: {incidents.filter(i => i.status === 'OPEN').length}</span>
+        </div>
+
+        {loading ? (
+          <p className="loading-state">Loading incidents…</p>
+        ) : incidents.length === 0 ? (
+          <div className="empty-state">
+            <span>✓</span>
+            <h3>No provider incidents recorded</h3>
+            <p className="muted">Every registered department provider has been healthy since this record began.</p>
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: '12px', marginTop: '12px' }}>
+            {incidents.map(incident => (
+              <div
+                key={incident.incidentId}
+                style={{
+                  border: '1px solid #E8D5D0', borderRadius: '6px', padding: '14px',
+                  borderLeft: `4px solid ${incident.status === 'OPEN' ? '#F2542D' : '#0E9594'}`,
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px', alignItems: 'flex-start' }}>
+                  <div>
+                    <b>{incident.department}</b>{incident.service ? <span className="muted"> — {incident.service}</span> : null}
+                    <div style={{ marginTop: '4px' }}>
+                      <span className={`status ${incident.status === 'OPEN' ? 'exception' : 'found'}`}>
+                        {incident.status === 'OPEN' ? 'DOWN' : 'RESOLVED'}
+                      </span>
+                      {incident.errorCategory && <small style={{ marginLeft: '8px', color: '#7A6360' }}>[{incident.errorCategory}]</small>}
+                    </div>
+                    <small style={{ display: 'block', marginTop: '6px', color: '#7A6360' }}>
+                      Detected {new Date(incident.detectedAt).toLocaleString()}
+                      {incident.resolvedAt && ` · Resolved ${new Date(incident.resolvedAt).toLocaleString()}`}
+                    </small>
+                  </div>
+                  <div style={{ textAlign: 'right', fontSize: '13px' }}>
+                    <div><b>{incident.affectedApplications}</b> affected application{incident.affectedApplications === 1 ? '' : 's'}</div>
+                    <div style={{ color: '#0E9594' }}><b>{incident.fallbackRecoveredCount}</b> recovered via fallback</div>
+                    <div style={{ color: incident.actionRequiredCount > 0 ? '#a25a12' : '#7A6360' }}><b>{incident.actionRequiredCount}</b> require citizen action</div>
+                    <div className="muted"><b>{incident.retryPendingCount}</b> retry-pending</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: '24px' }}>
+        <div className="section-heading">
+          <div>
             <h2>Dead-Letter Provider Jobs</h2>
-            <p>Automated retries were exhausted for these dispatches. Replay after the upstream issue is resolved.</p>
+            <p>Individual execution-level records. Automated retries were exhausted for these dispatches — replay after the upstream issue is resolved.</p>
           </div>
           <span className="count-badge">Jobs: {deadLetterJobs.length}</span>
         </div>

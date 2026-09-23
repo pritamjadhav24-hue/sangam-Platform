@@ -14,7 +14,8 @@ from app.core.persistence import (
     job_operational_summary, recent_provider_jobs, provider_job_detail,
     provider_operational_summary, replay_dead_letter_job, worker_operational_status,
     _safe_job_view, ApplicationRow, DependencyRow, ProviderJobRow, EntityReviewRow,
-    ConflictReviewRow, AuditEntryRow, engine,
+    ConflictReviewRow, AuditEntryRow, engine, provider_incidents_summary,
+    open_provider_incident_count,
 )
 from app.core.redis_service import RedisService, RedisUnavailable
 from app.core.rate_limit import enforce
@@ -23,7 +24,11 @@ from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/admin", tags=["Administration"])
 @router.get("/audit-trail")
-def audit_trail(user: dict = Depends(require_roles("ADMIN"))): return {"zeroDocumentCentralization": True, "chainValid": audit_bus.verify(), "entries": audit_bus.entries, "events": event_bus.events}
+def audit_trail(user: dict = Depends(require_roles("ADMIN"))):
+    # audit_bus.entries is append-only and hash-chained in sequence order --
+    # that underlying order/integrity is never touched here, this only
+    # reverses the *response* so the newest activity reads first.
+    return {"zeroDocumentCentralization": True, "chainValid": audit_bus.verify(), "entries": list(reversed(audit_bus.entries)), "events": event_bus.events}
 
 
 class IntegrationAvailability(BaseModel):
@@ -118,35 +123,52 @@ def replay_job(job_id: str, user: dict = Depends(require_roles("ADMIN"))):
         raise HTTPException(status_code=503, detail="Provider job replay is unavailable.") from error
 
 
+@router.get("/operations/incidents")
+def operations_incidents(user: dict = Depends(require_roles("ADMIN"))):
+    return {"incidents": provider_incidents_summary()}
+
+
 @router.get("/operations/overview")
 def operations_overview(user: dict = Depends(require_roles("ADMIN"))):
     with Session(engine) as session:
         apps = session.query(ApplicationRow).all()
         app_list = [dict(a.payload or {}) for a in apps]
-        
+
         status_counts: dict[str, int] = {}
-        auto_verified = 0
-        exceptions = 0
         success_statuses = {"VALIDATED", "RETRIEVED", "USER_OVERRIDDEN"}
+        # Application-outcome buckets, mutually exclusive, all derived from
+        # actual requirement-level data rather than the coarse application
+        # status alone:
+        #   automaticallyVerified -- every requirement fulfilled, none by
+        #       manual upload.
+        #   manuallyFulfilled -- every requirement fulfilled, but at least
+        #       one via citizen manual upload (documentId set).
+        #   citizenActionRequired -- a requirement is ACTION_REQUIRED/
+        #       FAILED/REJECTED and needs the citizen to act (e.g. upload).
+        #   officerReviewRequired -- application is waiting on an officer
+        #       (entity/conflict review) rather than the citizen.
+        #   retryInProgress -- a requirement is still WAITING on an
+        #       automated retry, nothing needs a person yet.
+        auto_verified = manually_fulfilled = citizen_action_required = 0
+        officer_review_required = retry_in_progress = 0
         for a in app_list:
             st = a.get("status", "DRAFT")
             status_counts[st] = status_counts.get(st, 0) + 1
             reqs = a.get("requirements", [])
-            has_exc = any(r.get("status") in {"ACTION_REQUIRED", "FAILED", "REJECTED"} for r in reqs) or st in {"WAITING_FOR_OFFICER", "CONFLICT_DETECTED", "VERIFICATION_FAILED"}
-            if has_exc:
-                exceptions += 1
+            is_manual = lambda r: bool(r.get("documentId")) or r.get("fulfillmentMethod") == "MANUAL_UPLOAD"
+            if st in {"WAITING_FOR_OFFICER", "CONFLICT_DETECTED"}:
+                officer_review_required += 1
+            elif any(r.get("status") in {"ACTION_REQUIRED", "FAILED", "REJECTED"} for r in reqs) or st == "VERIFICATION_FAILED":
+                citizen_action_required += 1
+            elif any(r.get("status") == "WAITING" for r in reqs):
+                retry_in_progress += 1
             else:
-                # Automatic verification is a requirement-level fact, not an
-                # application-status guess: every requirement must have
-                # actually reached a success status, and none of them may
-                # have been satisfied by a citizen's manual document upload
-                # (documentId set, or fulfillmentMethod == MANUAL_UPLOAD) --
-                # otherwise a manually-uploaded application would be
-                # miscounted as automatically verified.
                 fulfilled = [r for r in reqs if r.get("status") in success_statuses]
-                is_manual = lambda r: bool(r.get("documentId")) or r.get("fulfillmentMethod") == "MANUAL_UPLOAD"
-                if reqs and len(fulfilled) == len(reqs) and not any(is_manual(r) for r in fulfilled):
-                    auto_verified += 1
+                if reqs and len(fulfilled) == len(reqs):
+                    if any(is_manual(r) for r in fulfilled):
+                        manually_fulfilled += 1
+                    else:
+                        auto_verified += 1
 
         providers = provider_operational_summary()
         jobs = job_operational_summary()
@@ -154,38 +176,66 @@ def operations_overview(user: dict = Depends(require_roles("ADMIN"))):
         dead_letter_count = jobs.get("counts", {}).get("DEAD_LETTER", 0)
         entity_reviews_count = sum(1 for r in session.query(EntityReviewRow).all() if (r.payload or {}).get("status") == "WAITING_FOR_OFFICER")
         conflict_reviews_count = sum(1 for r in session.query(ConflictReviewRow).all() if (r.payload or {}).get("status") == "WAITING_FOR_OFFICER")
-        
+        active_incidents = open_provider_incident_count()
+
         workers = []
         try:
             workers = worker_operational_status()
         except Exception:
             pass
 
+        ledger_valid = audit_bus.verify()
+        provider_health_statuses = [p.get("health", {}).get("status") for p in providers]
+        healthy_count = sum(1 for s in provider_health_statuses if s in {"AVAILABLE", "HEALTHY"})
+        down_count = sum(1 for s in provider_health_statuses if s == "UNAVAILABLE")
+        degraded_count = sum(1 for s in provider_health_statuses if s not in {"AVAILABLE", "HEALTHY", "UNAVAILABLE"})
+        # An honest, data-driven summary label rather than a flat
+        # "Operational" that would contradict a failed ledger check or an
+        # open provider incident right next to it.
+        if not ledger_valid:
+            system_state = "DEGRADED_LEDGER_INTEGRITY"
+        elif active_incidents > 0 or down_count > 0:
+            system_state = "DEGRADED_PROVIDER_INCIDENT"
+        else:
+            system_state = "OPERATIONAL"
+
         return {
             "system": {
-                "postgres": "CONNECTED",
+                "state": system_state,
+                "postgresConnected": True,
                 "redis": RedisService().health_check().get("status", "UNAVAILABLE") if RedisService().enabled else "LOCAL_MEMORY",
                 "workersActive": sum(1 for w in workers if w.get("status") in {"AVAILABLE", "BUSY"}),
-                "auditChainValid": audit_bus.verify(),
+                "auditChainValid": ledger_valid,
                 "auditEntriesCount": len(audit_bus.entries),
-                "zeroDocumentCentralization": True,
+                "architecture": "FEDERATED",
             },
             "applications": {
                 "total": len(app_list),
                 "byStatus": status_counts,
                 "automaticallyVerified": auto_verified,
-                "requiringAttention": exceptions,
+                "manuallyFulfilled": manually_fulfilled,
+                "citizenActionRequired": citizen_action_required,
+                "officerReviewRequired": officer_review_required,
+                "retryInProgress": retry_in_progress,
+                # Kept for backward compatibility with existing callers;
+                # equals citizenActionRequired + officerReviewRequired.
+                "requiringAttention": citizen_action_required + officer_review_required,
             },
             "providers": {
-                "total": len(providers),
-                "available": sum(1 for p in providers if p.get("health", {}).get("status") in {"AVAILABLE", "HEALTHY"}),
-                "degraded": sum(1 for p in providers if p.get("health", {}).get("status") not in {"AVAILABLE", "HEALTHY"}),
+                "registered": len(providers),
+                "healthy": healthy_count,
+                "down": down_count,
+                "degraded": degraded_count,
             },
             "jobs": jobs,
             "exceptions": {
                 "deadLetterJobs": dead_letter_count,
                 "entityReviews": entity_reviews_count,
                 "conflictReviews": conflict_reviews_count,
+                # Provider incidents are a distinct, system-level concept
+                # from dead-letter jobs/reviews -- intentionally NOT folded
+                # into totalAlerts below.
+                "activeProviderIncidents": active_incidents,
                 "totalAlerts": dead_letter_count + entity_reviews_count + conflict_reviews_count,
             },
         }
@@ -230,6 +280,59 @@ def list_admin_applications(
         return {"applications": results}
 
 
+def _requirement_lineage_steps(req: dict, fulfillment_method: str, is_fallback: bool,
+                                primary_candidate: dict | None, chosen_provider: str | None,
+                                candidate_count: int) -> list[dict]:
+    """A requirement's orchestration story as an ordered list of steps, built
+    only from fields already persisted on the requirement (status, attempts,
+    providerId, documentId, errorCategory) -- no separate lineage-event log
+    exists yet, so this is derived on read rather than fabricated.
+    """
+    steps = [{"step": "Requirement identified", "detail": req.get("label") or req.get("code")}]
+    status = req.get("status")
+    attempts = req.get("attempts", 0) or 0
+    success_statuses = {"VALIDATED", "RETRIEVED", "USER_OVERRIDDEN", "FOUND"}
+
+    if fulfillment_method == "MANUAL_UPLOAD":
+        steps.append({"step": "Citizen manual upload", "detail": "Document uploaded directly by citizen"})
+        if status in success_statuses:
+            steps.append({"step": "Validation passed", "detail": "Requirement fulfilled"})
+        return steps
+
+    if fulfillment_method == "PENDING":
+        steps.append({"step": "Awaiting action", "detail": "No retrieval attempted yet"})
+        return steps
+
+    # AUTO_FILL
+    steps.append({"step": "Consent recorded", "detail": "Citizen granted Auto-Fill consent"})
+    steps.append({"step": "Provider discovery evaluated", "detail": f"{candidate_count} eligible provider(s) considered"})
+    if primary_candidate:
+        steps.append({
+            "step": "Primary provider unavailable" if is_fallback else "Primary provider selected",
+            "detail": primary_candidate.get("provider"),
+        })
+    if is_fallback:
+        steps.append({"step": "Fallback evaluation", "detail": "Next eligible, healthy provider identified"})
+        steps.append({"step": "Fallback provider selected", "detail": chosen_provider})
+    if attempts > 1:
+        steps.append({"step": "Automated retry", "detail": f"{attempts - 1} retr{'y' if attempts - 1 == 1 else 'ies'} attempted"})
+
+    if status in success_statuses:
+        steps.append({"step": "Document/data retrieved", "detail": chosen_provider or "Provider"})
+        steps.append({"step": "Validation passed", "detail": "Requirement fulfilled"})
+    elif status == "ACTION_REQUIRED":
+        steps.append({"step": "Retries exhausted", "detail": f"{attempts} attempt(s) made"})
+        steps.append({"step": "Moved to dead-letter", "detail": req.get("errorCategory") or "Automated retrieval unavailable"})
+        steps.append({"step": "Citizen notified", "detail": "Manual upload option presented"})
+    elif status == "FAILED":
+        steps.append({"step": "Retrieval failed", "detail": req.get("errorCategory") or "Non-retryable error"})
+    elif status == "WAITING":
+        steps.append({"step": "Automated retry in progress", "detail": f"Attempt {attempts} of {req.get('maxAttempts', 3)}"})
+    elif status == "REJECTED":
+        steps.append({"step": "Validation failed", "detail": "Retrieved data did not pass validation"})
+    return steps
+
+
 @router.get("/applications/{application_id}")
 def get_admin_application_detail(
     application_id: str,
@@ -256,36 +359,45 @@ def get_admin_application_detail(
         
         health_list = integration_health()
         registry_list = dependency_registry(health_list)
-        
+        open_incidents_by_provider = {i["providerSystem"]: i for i in provider_incidents_summary() if i["status"] == "OPEN"}
+
         requirements_detail = []
         for req in payload.get("requirements", []):
             code = req.get("code")
             candidates = [c for c in registry_list if c.get("requirementCode") == code]
             candidates_sorted = sorted(candidates, key=lambda c: (c.get("priority", 100), c.get("provider", "")))
-            
+
             chosen_provider = req.get("providerId")
             fulfillment_method = "MANUAL_UPLOAD" if req.get("documentId") or req.get("fulfillmentMethod") == "MANUAL_UPLOAD" else ("AUTO_FILL" if chosen_provider or req.get("canonical") else "PENDING")
-            
+
+            primary_candidate = candidates_sorted[0] if candidates_sorted else None
+            is_fallback = bool(primary_candidate) and fulfillment_method == "AUTO_FILL" and primary_candidate.get("providerId") != chosen_provider and primary_candidate.get("provider") != chosen_provider
+            primary_incident = open_incidents_by_provider.get(primary_candidate.get("providerId")) if primary_candidate else None
+
             decision_reason = None
             if fulfillment_method == "AUTO_FILL":
                 if candidates_sorted:
                     top = candidates_sorted[0]
-                    if top.get("providerId") == chosen_provider:
+                    if not is_fallback:
                         decision_reason = f"Primary authoritative source ({top.get('provider')}) selected based on healthy status ({top.get('healthStatus')}) and priority tier {top.get('priority', 10)}."
                     else:
-                        decision_reason = f"Fallback source ({chosen_provider}) selected because higher-priority provider was unavailable or non-responsive."
+                        decision_reason = f"Primary provider ({top.get('provider')}) was unavailable; fallback source ({chosen_provider}) selected because it is the next eligible, healthy provider for this requirement."
                 else:
                     decision_reason = f"Provider ({chosen_provider}) selected from capability catalog."
             elif fulfillment_method == "MANUAL_UPLOAD":
                 decision_reason = "Citizen provided document via direct manual upload."
-            
+
             related_entity_rev = next((er for er in entity_revs if er.get("requirementCode") == code), None)
             related_conflict_rev = next((cr for cr in conflict_revs if cr.get("requirementCode") == code), None)
-            
+
             requirements_detail.append({
                 **req,
                 "fulfillmentMethod": fulfillment_method,
                 "chosenProvider": chosen_provider,
+                "primaryProvider": primary_candidate.get("provider") if primary_candidate else None,
+                "isFallback": is_fallback,
+                "primaryProviderIncident": primary_incident,
+                "lineageSteps": _requirement_lineage_steps(req, fulfillment_method, is_fallback, primary_candidate, chosen_provider, len(candidates_sorted)),
                 "sourceCandidates": [
                     {
                         "provider": c.get("provider"),

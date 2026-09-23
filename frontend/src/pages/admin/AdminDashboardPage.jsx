@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react';
 
+const SYSTEM_STATE_LABEL = {
+  OPERATIONAL: 'Operational',
+  DEGRADED_LEDGER_INTEGRITY: 'Degraded — Ledger Integrity',
+  DEGRADED_PROVIDER_INCIDENT: 'Degraded — Provider Incident',
+};
+
 export default function AdminDashboardPage({ onNavigate, api, onReset }) {
   const [overview, setOverview] = useState(null);
   const [recentJobs, setRecentJobs] = useState([]);
@@ -62,11 +68,11 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
         <>
           {/* Top Operational Metrics */}
           <div className="summary-grid">
-            <div className="summary-card">
+            <div className={`summary-card ${overview.system.state !== 'OPERATIONAL' ? 'amber' : ''}`}>
               <span className="eyebrow">System State</span>
-              <b>{overview.system.postgres === 'CONNECTED' ? 'Operational' : 'Degraded'}</b>
+              <b>{SYSTEM_STATE_LABEL[overview.system.state] || overview.system.state}</b>
               <small>
-                Ledger Chain: {overview.system.auditChainValid ? '✓ Verified' : '⚠ Invalid'} · Zero Centralization: Enforced
+                Ledger Chain: {overview.system.auditChainValid ? '✓ Verified' : '⚠ Invalid'} · Federated Architecture (department systems remain independent)
               </small>
             </div>
 
@@ -74,23 +80,31 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
               <span className="eyebrow">Total Applications</span>
               <b>{overview.applications.total}</b>
               <small>
-                {overview.applications.automaticallyVerified} Verified Auto · {overview.applications.requiringAttention} Need Attention
+                {overview.applications.automaticallyVerified} Auto-Verified · {overview.applications.manuallyFulfilled} Manually Fulfilled · {overview.applications.retryInProgress} Retrying
               </small>
             </div>
 
             <div className="summary-card">
               <span className="eyebrow">Department Providers</span>
-              <b>{overview.providers.available} / {overview.providers.total}</b>
+              <b>{overview.providers.healthy} / {overview.providers.registered}</b>
               <small>
-                {overview.providers.degraded === 0 ? 'All 10 sandboxes available' : `${overview.providers.degraded} degraded/offline`}
+                Registered: {overview.providers.registered} · Healthy: {overview.providers.healthy}
+                {overview.providers.down > 0 && ` · Down: ${overview.providers.down}`}
+                {overview.providers.degraded > 0 && ` · Degraded: ${overview.providers.degraded}`}
               </small>
             </div>
 
+            <div className={`summary-card ${overview.exceptions.activeProviderIncidents > 0 ? 'amber' : ''}`}>
+              <span className="eyebrow">Active Provider Incidents</span>
+              <b>{overview.exceptions.activeProviderIncidents}</b>
+              <small>System/provider-level outages currently open</small>
+            </div>
+
             <div className={`summary-card ${overview.exceptions.totalAlerts > 0 ? 'amber' : ''}`}>
-              <span className="eyebrow">Active Exceptions</span>
+              <span className="eyebrow">Dead-Letter &amp; Reviews</span>
               <b>{overview.exceptions.totalAlerts}</b>
               <small>
-                {overview.exceptions.deadLetterJobs} Dead-letter · {overview.exceptions.entityReviews + overview.exceptions.conflictReviews} Reviews
+                {overview.exceptions.deadLetterJobs} Dead-letter jobs · {overview.exceptions.entityReviews + overview.exceptions.conflictReviews} Reviews pending
               </small>
             </div>
           </div>
@@ -106,15 +120,15 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
 
             <div className="card admin-nav-card" onClick={() => onNavigate('adminProviders')} style={{ cursor: 'pointer' }}>
               <p className="eyebrow">Integrations</p>
-              <h3>Department Providers ({overview.providers.total})</h3>
+              <h3>Department Providers ({overview.providers.registered})</h3>
               <p className="muted">Inspect department adapter health, capabilities, and test resilience simulation.</p>
               <button className="small outline" style={{ marginTop: '8px' }}>Inspect Providers →</button>
             </div>
 
             <div className="card admin-nav-card" onClick={() => onNavigate('adminAlerts')} style={{ cursor: 'pointer' }}>
               <p className="eyebrow">Interventions</p>
-              <h3>Exceptions & Alerts ({overview.exceptions.totalAlerts})</h3>
-              <p className="muted">Monitor dead-letter jobs, replay failed dispatches, and review ambiguities.</p>
+              <h3>Exceptions & Alerts ({overview.exceptions.activeProviderIncidents + overview.exceptions.totalAlerts})</h3>
+              <p className="muted">Provider incidents, fallback/recovery activity, dead-letter jobs, and reviews needing a person.</p>
               <button className="small outline" style={{ marginTop: '8px' }}>View Exceptions →</button>
             </div>
 

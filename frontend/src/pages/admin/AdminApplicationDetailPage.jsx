@@ -123,6 +123,11 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
                       <span className="tag" style={{ fontSize: '11px' }}>
                         Method: {req.fulfillmentMethod}
                       </span>
+                      {req.isFallback && (
+                        <span className="tag" style={{ fontSize: '11px', background: '#fff0df', color: '#a25a12' }}>
+                          ⇄ Fallback Provider Used
+                        </span>
+                      )}
                       {req.mandatory && (
                         <small style={{ color: '#F2542D', fontWeight: 600 }}>Mandatory</small>
                       )}
@@ -136,6 +141,34 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
                     </div>
                   )}
                 </div>
+
+                {/* Orchestration Lineage: the requirement's story as an ordered
+                    step trail, derived from its own persisted fields. */}
+                {req.lineageSteps && req.lineageSteps.length > 0 && (
+                  <div style={{ marginTop: '12px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px', fontSize: '12px' }}>
+                    {req.lineageSteps.map((step, idx) => (
+                      <span key={idx} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                        <span
+                          title={step.detail}
+                          style={{ padding: '3px 8px', borderRadius: '10px', background: '#F5DFDB', color: '#562C2C', whiteSpace: 'nowrap' }}
+                        >
+                          {step.step}
+                        </span>
+                        {idx < req.lineageSteps.length - 1 && <span style={{ color: '#C9A9A3' }}>→</span>}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Primary provider's open incident, when the fallback that
+                    fulfilled this requirement was triggered by one. */}
+                {req.primaryProviderIncident && (
+                  <div style={{ marginTop: '10px', padding: '8px 12px', background: '#fff0f0', borderLeft: '3px solid #F2542D', fontSize: '12px' }}>
+                    <b>Primary Provider Incident:</b> {req.primaryProvider} has been DOWN since{' '}
+                    {new Date(req.primaryProviderIncident.detectedAt).toLocaleString()}
+                    {req.primaryProviderIncident.errorCategory && <span> · [{req.primaryProviderIncident.errorCategory}]</span>}
+                  </div>
+                )}
 
                 {/* Source Selection & Explainable Decision */}
                 <div style={{ marginTop: '12px', padding: '10px 12px', background: '#FBF3F1', borderRadius: '4px', fontSize: '13px' }}>

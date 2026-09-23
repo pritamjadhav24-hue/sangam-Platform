@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from fastapi import HTTPException
 
-from app.api.admin_routes import router, operations_overview, list_admin_applications, get_admin_application_detail
+from app.api.admin_routes import router, operations_overview, operations_incidents, list_admin_applications, get_admin_application_detail
 from app.core.auth import require_roles
 from app.core.persistence import (
     Session, engine, ApplicationRow, initialize, create_application,
@@ -33,24 +33,53 @@ class AdminOperationsTests(unittest.TestCase):
         overview = operations_overview(admin_user)
         
         self.assertIn("system", overview)
-        self.assertIn("postgres", overview["system"])
-        self.assertTrue(overview["system"]["zeroDocumentCentralization"])
+        self.assertIn("state", overview["system"])
+        self.assertTrue(overview["system"]["postgresConnected"])
+        self.assertEqual(overview["system"]["architecture"], "FEDERATED")
         self.assertIn("auditChainValid", overview["system"])
-        
+
         self.assertIn("applications", overview)
         self.assertIn("total", overview["applications"])
         self.assertIn("automaticallyVerified", overview["applications"])
+        self.assertIn("manuallyFulfilled", overview["applications"])
+        self.assertIn("citizenActionRequired", overview["applications"])
+        self.assertIn("officerReviewRequired", overview["applications"])
+        self.assertIn("retryInProgress", overview["applications"])
         self.assertIn("requiringAttention", overview["applications"])
-        
+
         self.assertIn("providers", overview)
-        self.assertIn("total", overview["providers"])
-        self.assertIn("available", overview["providers"])
-        
+        self.assertIn("registered", overview["providers"])
+        self.assertIn("healthy", overview["providers"])
+        self.assertIn("down", overview["providers"])
+        self.assertIn("degraded", overview["providers"])
+
+        self.assertIn("exceptions", overview)
+        self.assertIn("activeProviderIncidents", overview["exceptions"])
+
         self.assertIn("jobs", overview)
         self.assertIn("counts", overview["jobs"])
-        
-        self.assertIn("exceptions", overview)
-        self.assertIn("totalAlerts", overview["exceptions"])
+
+    def test_operations_incidents_returns_list_and_lifecycle_is_tracked(self):
+        from app.core.persistence import record_provider_health_transition, open_provider_incident_count
+        admin_user = {"userId": "ADMIN_MH_01", "role": "ADMIN"}
+        res = operations_incidents(admin_user)
+        self.assertIn("incidents", res)
+        self.assertIsInstance(res["incidents"], list)
+
+        before = open_provider_incident_count()
+        record_provider_health_transition("TEST_INCIDENT_PROVIDER", "Test Dept", "Test Service", "AVAILABLE", "UNAVAILABLE", "UPSTREAM_UNAVAILABLE")
+        self.assertEqual(open_provider_incident_count(), before + 1)
+        res_open = operations_incidents(admin_user)
+        opened = next(i for i in res_open["incidents"] if i["providerSystem"] == "TEST_INCIDENT_PROVIDER")
+        self.assertEqual(opened["status"], "OPEN")
+        self.assertIsNone(opened["resolvedAt"])
+
+        record_provider_health_transition("TEST_INCIDENT_PROVIDER", "Test Dept", "Test Service", "UNAVAILABLE", "AVAILABLE", None)
+        self.assertEqual(open_provider_incident_count(), before)
+        res_resolved = operations_incidents(admin_user)
+        resolved = next(i for i in res_resolved["incidents"] if i["providerSystem"] == "TEST_INCIDENT_PROVIDER")
+        self.assertEqual(resolved["status"], "RESOLVED")
+        self.assertIsNotNone(resolved["resolvedAt"])
 
     def test_list_admin_applications_with_filters(self):
         admin_user = {"userId": "ADMIN_MH_01", "role": "ADMIN"}
@@ -85,10 +114,46 @@ class AdminOperationsTests(unittest.TestCase):
             for req in detail["requirements"]:
                 self.assertIn("fulfillmentMethod", req)
                 self.assertIn("sourceCandidates", req)
+                self.assertIn("isFallback", req)
+                self.assertIn("primaryProvider", req)
+                self.assertIn("primaryProviderIncident", req)
+                self.assertIn("lineageSteps", req)
+                self.assertIsInstance(req["lineageSteps"], list)
+                self.assertGreaterEqual(len(req["lineageSteps"]), 1)
+                self.assertIn("step", req["lineageSteps"][0])
 
         with self.assertRaises(HTTPException) as ctx:
             get_admin_application_detail("NONEXISTENT-APP-99999", user=admin_user)
         self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_requirement_lineage_labels_fallback_when_primary_provider_has_an_open_incident(self):
+        from app.core.persistence import record_provider_health_transition
+        admin_user = {"userId": "ADMIN_MH_01", "role": "ADMIN"}
+        res = list_admin_applications(status=None, search=None, limit=20, user=admin_user)
+        auto_fill_app_id = None
+        for summary in res["applications"]:
+            detail = get_admin_application_detail(summary["appId"], user=admin_user)
+            if any(r["fulfillmentMethod"] == "AUTO_FILL" and r.get("sourceCandidates") for r in detail["requirements"]):
+                auto_fill_app_id = summary["appId"]
+                break
+        if not auto_fill_app_id:
+            self.skipTest("No seeded application has an Auto-Fill requirement with eligible provider candidates.")
+
+        detail = get_admin_application_detail(auto_fill_app_id, user=admin_user)
+        req = next(r for r in detail["requirements"] if r["fulfillmentMethod"] == "AUTO_FILL" and r.get("sourceCandidates"))
+        primary_system = req["sourceCandidates"][0]["providerId"] or req["sourceCandidates"][0]["provider"]
+
+        record_provider_health_transition(primary_system, primary_system, None, "AVAILABLE", "UNAVAILABLE", "UPSTREAM_UNAVAILABLE")
+        try:
+            detail_after = get_admin_application_detail(auto_fill_app_id, user=admin_user)
+            req_after = next(r for r in detail_after["requirements"] if r["code"] == req["code"])
+            if req_after.get("chosenProvider") not in (None, primary_system):
+                # Only requirements still bound to the now-down primary
+                # provider are expected to surface its open incident.
+                self.assertIsNotNone(req_after["primaryProviderIncident"])
+                self.assertEqual(req_after["primaryProviderIncident"]["providerSystem"], primary_system)
+        finally:
+            record_provider_health_transition(primary_system, primary_system, None, "UNAVAILABLE", "AVAILABLE", None)
 
 
 if __name__ == "__main__":

@@ -493,10 +493,15 @@ def auto_fill_requirement(application_id: str, requirement_code: str, body: Auto
         raise HTTPException(status_code=409, detail="This application has already been submitted and can no longer be changed.")
 
     updated_requirement = requirement_fulfillment.find_requirement(application, requirement_code)
+    # Attribute the audit source to the actual department/provider SANGAM
+    # retrieved from (already recorded on the requirement as providerId),
+    # falling back to GovOrchestrator only when no provider was ever
+    # reached (e.g. rejected before discovery).
+    audit_source = (updated_requirement or {}).get("providerId") or "GovOrchestrator"
     audit_bus.append(
-        citizen_id, requirement_code, "Auto-Fill retrieval attempt completed", "GovOrchestrator",
+        citizen_id, requirement_code, "Auto-Fill retrieval attempt completed", audit_source,
         (updated_requirement or {}).get("status", "UNKNOWN"), receipt["consentId"],
-        payload={"appId": application_id, "requirementCode": requirement_code, "status": (updated_requirement or {}).get("status"), "actorRole": user["role"]},
+        payload={"appId": application_id, "requirementCode": requirement_code, "status": (updated_requirement or {}).get("status"), "providerId": (updated_requirement or {}).get("providerId"), "actorRole": user["role"]},
         correlation_id=application_id,
     )
     _notify_requirement_outcome(citizen_id, application_id, requirement_code, label, previous_status, (updated_requirement or {}).get("status"))

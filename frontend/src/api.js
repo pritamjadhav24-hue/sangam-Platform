@@ -57,6 +57,7 @@ export const api = {
   notifications: (role) => request(`/${role.toLowerCase()}/notifications`),
   markNotificationRead: (notificationId) => request(`/notifications/${notificationId}/read`, { method: 'POST' }),
   adminOverview: () => request('/admin/operations/overview'),
+  adminIncidents: () => request('/admin/operations/incidents'),
   adminApplications: (params = {}) => {
     const q = new URLSearchParams();
     if (params.status) q.set('status', params.status);
