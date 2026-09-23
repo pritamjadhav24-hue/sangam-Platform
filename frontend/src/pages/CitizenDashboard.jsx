@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { languageText, categoryLabel } from '../i18n';
 import { NEEDS_ATTENTION_STATUSES } from '../requirementState';
 import { applicationStateClass, applicationStateLabel } from '../applicationState';
@@ -35,6 +36,15 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
     }
   }
 
+  const [trackError, setTrackError] = useState('');
+  function trackApplication(rawValue) {
+    const value = (rawValue || '').trim();
+    if (!value) return;
+    const application = apps.find(item => item.appId === value);
+    if (application) { setTrackError(''); onOpenApplication?.(application); return; }
+    setTrackError(language === 'en' ? 'No application found with this ID.' : 'या क्रमांकाचा कोणताही अर्ज सापडला नाही.');
+  }
+
   return (
     <main className="container citizen-home">
       <section className="citizen-welcome">
@@ -55,9 +65,10 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
         <div className="track-box">
           <div><p className="eyebrow">{t.trackTitle}</p><label htmlFor="quick-track">{t.applicationId}</label></div>
           <div className="track-input">
-            <input id="quick-track" placeholder={t.applicationId} onKeyDown={event => { if (event.key === 'Enter' && event.currentTarget.value) navigate('tracking', event.currentTarget.value); }} />
-            <button className="primary" onClick={() => { const value = document.getElementById('quick-track')?.value; if (value) navigate('tracking', value); }}>{t.track}</button>
+            <input id="quick-track" placeholder={t.applicationId} onKeyDown={event => { if (event.key === 'Enter') trackApplication(event.currentTarget.value); }} />
+            <button className="primary" onClick={() => trackApplication(document.getElementById('quick-track')?.value)}>{t.track}</button>
           </div>
+          {trackError && <p className="muted" role="alert">{trackError}</p>}
         </div>
       </section>
 

@@ -34,14 +34,19 @@ describe('no hardcoded scheme/department data in the Phase 6A catalogue pages (r
     }
   });
 
-  it('SchemesPage and SchemeDetailPage source real scheme fields only from api.services()/api.service(), never from an inline literal object', () => {
+  it('SchemesPage and SchemeDetailPage source real scheme fields only from the shared catalogue (fetched once via api.services() in App.jsx and passed down as a prop), never from an inline literal object or their own per-page fetch', () => {
     for (const filename of ['SchemesPage.jsx', 'SchemeDetailPage.jsx']) {
       const source = readFileSync(join(HERE, filename), 'utf-8');
-      expect(source).toMatch(/api\.(services|service)\(/);
+      // Destructures a `schemes` prop -- the catalogue is data handed down,
+      // not fetched (again) or fabricated locally.
+      expect(source).toMatch(/schemes/);
+      expect(source).not.toMatch(/api\.(services|service)\(/);
       // No inline array/object literal assigned to a variable that looks like
       // static scheme data (e.g. `const schemes = [{ name: ...`).
       expect(source).not.toMatch(/const\s+\w*[Ss]chemes?\w*\s*=\s*\[\s*\{/);
     }
+    const appSource = readFileSync(join(HERE, '..', 'App.jsx'), 'utf-8');
+    expect(appSource).toMatch(/api\.services\(/);
   });
 });
 

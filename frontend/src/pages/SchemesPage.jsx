@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
-import { api } from '../api';
+import { useMemo, useState } from 'react';
 import { languageText, categoryLabel } from '../i18n';
 import { applicationStateLabel } from '../applicationState';
 
-export default function SchemesPage({ applications, onViewScheme, language = 'en' }) {
+// Schemes are fetched once (in App.jsx, per signed-in citizen) and passed
+// down here -- this page used to re-fetch the whole catalogue itself every
+// time the citizen navigated to it, which was pure duplicate traffic since
+// the scheme catalogue doesn't change during a session.
+export default function SchemesPage({ schemes: schemesProp, applications, onViewScheme, language = 'en' }) {
   const t = languageText(language);
-  const [schemes, setSchemes] = useState(null); // null while loading
-  const [error, setError] = useState(null);
+  const schemes = schemesProp || [];
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('ALL');
   const appliedByScheme = useMemo(() => {
@@ -14,16 +16,6 @@ export default function SchemesPage({ applications, onViewScheme, language = 'en
     for (const application of applications || []) map.set(application.serviceId, application);
     return map;
   }, [applications]);
-
-  useEffect(() => {
-    let active = true;
-    setSchemes(null);
-    setError(null);
-    api.services()
-      .then(result => { if (active) setSchemes(result.services || []); })
-      .catch(err => { if (active) setError(err.message || (language === 'en' ? 'Unable to load schemes right now.' : 'सध्या योजना लोड करता आल्या नाहीत.')); });
-    return () => { active = false; };
-  }, [language]);
 
   const categories = useMemo(() => {
     const found = new Set((schemes || []).map(scheme => scheme.category).filter(Boolean));
@@ -68,10 +60,9 @@ export default function SchemesPage({ applications, onViewScheme, language = 'en
         )}
       </div>
 
-      {schemes === null && !error && <p className="loading-state" role="status">{language === 'en' ? 'Loading schemes…' : 'योजना लोड होत आहेत…'}</p>}
-      {error && <div className="alert danger" role="alert">{error}</div>}
+      {schemes.length === 0 && <p className="loading-state" role="status">{language === 'en' ? 'Loading schemes…' : 'योजना लोड होत आहेत…'}</p>}
 
-      {schemes !== null && !error && (
+      {schemes.length > 0 && (
         filtered.length ? (
           <div className="scheme-grid">
             {filtered.map(scheme => {

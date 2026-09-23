@@ -1,35 +1,18 @@
-import { useEffect, useState } from 'react';
-import { api } from '../api';
 import { categoryLabel } from '../i18n';
 
-export default function SchemeDetailPage({ schemeId, navigate, onApply, language = 'en' }) {
-  const [scheme, setScheme] = useState(null);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
+// The scheme catalogue (fetched once in App.jsx) already carries every field
+// a scheme's detail view needs, so this page looks the scheme up there
+// instead of making its own per-scheme request on every visit.
+export default function SchemeDetailPage({ schemeId, schemes, navigate, onApply, language = 'en' }) {
+  const scheme = (schemes || []).find(item => item.serviceId === schemeId || item.schemeId === schemeId);
 
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError(null);
-    setScheme(null);
-    if (!schemeId) {
-      setLoading(false);
-      setError(language === 'en' ? 'No scheme was selected.' : 'कोणतीही योजना निवडलेली नाही.');
-      return undefined;
-    }
-    api.service(schemeId)
-      .then(result => { if (active) { setScheme(result); setLoading(false); } })
-      .catch(err => { if (active) { setError(err.message || (language === 'en' ? 'Unable to load this scheme right now.' : 'ही योजना सध्या लोड करता आली नाही.')); setLoading(false); } });
-    return () => { active = false; };
-  }, [schemeId, language]);
-
-  if (loading) {
+  if (!schemes || schemes.length === 0) {
     return <main className="container narrow"><p className="loading-state" role="status">{language === 'en' ? 'Loading scheme…' : 'योजना लोड होत आहे…'}</p></main>;
   }
-  if (error || !scheme) {
+  if (!schemeId || !scheme) {
     return (
       <main className="container narrow">
-        <div className="alert danger" role="alert">{error || (language === 'en' ? 'Scheme not found.' : 'योजना सापडली नाही.')}</div>
+        <div className="alert danger" role="alert">{language === 'en' ? 'Scheme not found.' : 'योजना सापडली नाही.'}</div>
         <button className="outline" onClick={() => navigate('schemes')}>{language === 'en' ? 'Back to schemes' : 'योजनांकडे परत जा'}</button>
       </main>
     );

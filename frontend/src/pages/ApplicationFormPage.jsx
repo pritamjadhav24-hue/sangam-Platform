@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { NEEDS_ATTENTION_STATUSES, requirementStateClass, requirementStateIcon, requirementStateLabel } from '../requirementState';
 import { categoryLabel, userActionLabel } from '../i18n';
+import { useDismiss } from '../useDismiss';
 
 function RequirementCard({ requirement, applicationId, language, onChange, locked }) {
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -11,6 +12,13 @@ function RequirementCard({ requirement, applicationId, language, onChange, locke
   const [busy, setBusy] = useState(null); // 'auto-fill' | 'upload' | 'download' | null
   const [error, setError] = useState(null);
   const [viewedDocument, setViewedDocument] = useState(null);
+
+  const closeConsent = useCallback(() => setConsentOpen(false), []);
+  const closeUpload = useCallback(() => setUploadOpen(false), []);
+  const closeViewedDocument = useCallback(() => setViewedDocument(null), []);
+  const consentRef = useDismiss(consentOpen, closeConsent);
+  const uploadRef = useDismiss(uploadOpen, closeUpload);
+  const viewedDocumentRef = useDismiss(Boolean(viewedDocument), closeViewedDocument);
 
   const isDocumentLike = requirement.dataType === 'DOCUMENT' || requirement.dataType === 'CERTIFICATE';
   const hasViewableDocument = isDocumentLike && requirement.status === 'VALIDATED';
@@ -106,7 +114,7 @@ function RequirementCard({ requirement, applicationId, language, onChange, locke
       {needsAttention && requirement.userAction && <div className="notice">{userActionLabel(requirement.userAction, language)}</div>}
 
       {consentOpen && !locked && (
-        <div className="notice consent-prompt">
+        <div className="notice consent-prompt" ref={consentRef}>
           <p>{language === 'en'
             ? 'Allow SANGAM to retrieve and verify this information for your application?'
             : 'आपल्या अर्जासाठी ही माहिती पुनर्प्राप्त व पडताळण्याची SANGAM ला परवानगी द्यायची का?'}</p>
@@ -148,17 +156,17 @@ function RequirementCard({ requirement, applicationId, language, onChange, locke
       )}
 
       {viewedDocument && (
-        <div className="notice document-preview">
+        <div className="notice document-preview" ref={viewedDocumentRef}>
           <div className="document-preview-heading">
             <b>{viewedDocument.title}</b>
-            <button className="link" onClick={() => setViewedDocument(null)}>{language === 'en' ? 'Close' : 'बंद करा'}</button>
+            <button className="link" onClick={closeViewedDocument}>{language === 'en' ? 'Close' : 'बंद करा'}</button>
           </div>
           <pre>{viewedDocument.content}</pre>
         </div>
       )}
 
       {isDocumentLike && uploadOpen && (
-        <form className="upload-form" onSubmit={handleUploadSubmit}>
+        <form className="upload-form" ref={uploadRef} onSubmit={handleUploadSubmit}>
           <label htmlFor={`title-${requirement.requirementCode}`}>{language === 'en' ? 'Document title' : 'दस्तऐवजाचे शीर्षक'}</label>
           <input id={`title-${requirement.requirementCode}`} required value={title} onChange={event => setTitle(event.target.value)} placeholder={language === 'en' ? requirement.displayLabel : (requirement.displayLabelMr || requirement.displayLabel)} />
           <label htmlFor={`content-${requirement.requirementCode}`}>{language === 'en' ? 'Document details (demo upload)' : 'दस्तऐवज तपशील (नमुना अपलोड)'}</label>

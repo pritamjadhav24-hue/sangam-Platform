@@ -24,6 +24,15 @@
 .notification-item small { margin-top: 5px; color: #7A6360; }
 @media (max-width: 760px) { .dependency-grid { grid-template-columns: 1fr; gap: 4px; } }
 
+/* Notifications page (Phase 6G3) */
+.notification-list { display: grid; gap: 10px; }
+.notification-list-item { display: flex; align-items: flex-start; gap: 14px; width: 100%; text-align: left; border: 0; cursor: pointer; padding: 16px; position: relative; font: inherit; }
+.notification-list-item.unread { background: #F5DFDB; }
+.notification-list-body { display: grid; gap: 3px; flex: 1; min-width: 0; }
+.notification-list-body b { color: #562C2C; }
+.notification-list-dot { width: 9px; height: 9px; border-radius: 50%; background: #F2542D; flex: 0 0 auto; margin-top: 6px; }
+.nav-notification-badge { display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin-left: 6px; border-radius: 9px; background: #F2542D; color: #fff; font-size: 10px; font-weight: 700; vertical-align: middle; }
+
 /* UI 2.0 command-centre refinements */
 .container{animation:pageIn .35s ease-out}.eyebrow{letter-spacing:.12em}.card h2{letter-spacing:-.01em}.card table tbody tr{transition:background .18s ease}.card table tbody tr:hover{background:#FBF3F1}.status{letter-spacing:.03em}.workflow-step{border-left-width:4px;transition:transform .18s ease,box-shadow .18s ease}.workflow-step:hover{transform:translateX(3px);box-shadow:0 3px 12px #562C2C12}.workflow-step i{box-shadow:0 0 0 4px #0E959418}.workflow-step:last-child i{animation:currentPulse 2.8s ease-in-out infinite}.review-box{border-radius:5px;padding:12px;transition:box-shadow .18s ease}.review-box:hover{box-shadow:0 3px 12px #562C2C14}.button-stack .small{transition:background .18s ease,transform .18s ease}.button-stack .small:hover{transform:translateY(-1px);background:#F5DFDB}.notification-badge{animation:badgeIn .25s ease-out}.notification-item{transition:background .18s ease;padding:12px}.notification-item:hover{background:#FBF3F1}.gov-strip{display:flex;justify-content:space-between;padding:6px max(24px,calc((100% - 1200px)/2));background:#562C2C;color:#dce8f2;font-size:11px;letter-spacing:.02em}.gov-strip span:last-child{color:#b8ccdd}@keyframes pageIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}@keyframes currentPulse{50%{box-shadow:0 0 0 7px #0E959422}}@keyframes badgeIn{from{transform:scale(.75);opacity:.4}to{transform:scale(1);opacity:1}}@media(max-width:760px){.gov-strip{padding:5px 16px;font-size:10px}.gov-strip span:last-child{display:none}}@media(prefers-reduced-motion:reduce){.container,.workflow-step:last-child i,.notification-badge{animation:none}.workflow-step{transition:none}}
  .tricolor{height:28px!important;background:#562C2C!important;position:relative}.tricolor:after{content:'🇮🇳  Government Digital Services    ·    Maharashtra · SIH 2026 Prototype';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#dce8f2;font-size:11px;letter-spacing:.02em}

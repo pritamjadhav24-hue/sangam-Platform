@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { requirementStateClass, requirementStateLabel } from '../requirementState';
 import { categoryLabel, translateNotification } from '../i18n';
 import ApplicationTimeline from '../components/ApplicationTimeline';
+import { useDismiss } from '../useDismiss';
 
-export default function ReviewApplicationPage({ schemeId, citizen, navigate, language = 'en' }) {
+export default function ReviewApplicationPage({ schemeId, citizen, navigate, language = 'en', notifications }) {
   const [application, setApplication] = useState(null);
   const [scheme, setScheme] = useState(null);
   const [error, setError] = useState(null);
@@ -12,7 +13,7 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
-  const [relatedNotifications, setRelatedNotifications] = useState([]);
+  const relatedNotifications = (notifications || []).filter(item => item.applicationId === application?.appId);
 
   useEffect(() => {
     let active = true;
@@ -41,15 +42,8 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
     return () => { active = false; };
   }, [schemeId, language]);
 
-  useEffect(() => {
-    if (!application?.appId) return undefined;
-    let active = true;
-    api.notifications('citizen').then(result => {
-      if (!active) return;
-      setRelatedNotifications((result.notifications || []).filter(item => item.applicationId === application.appId));
-    }).catch(() => {});
-    return () => { active = false; };
-  }, [application?.appId]);
+  const closeConfirm = useCallback(() => setConfirmOpen(false), []);
+  const confirmRef = useDismiss(confirmOpen && !submitting, closeConfirm);
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -136,7 +130,7 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
 
         <div className="requirement-actions">
           <button className="outline" onClick={() => navigate('dashboard')}>{language === 'en' ? 'Back to dashboard' : 'डॅशबोर्डवर परत जा'}</button>
-          <button className="primary" onClick={() => navigate('tracking', application.appId)}>{language === 'en' ? 'Track Application' : 'अर्जाचा मागोवा घ्या'}</button>
+          <button className="primary" onClick={() => navigate('myApplications')}>{language === 'en' ? 'My Applications' : 'माझे अर्ज'}</button>
         </div>
       </main>
     );
@@ -219,12 +213,12 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
       )}
 
       {confirmOpen && (
-        <div className="notice consent-prompt">
+        <div className="notice consent-prompt" ref={confirmRef}>
           <p>{language === 'en'
             ? 'Submit this application? You will not be able to change your answers afterwards.'
             : 'हा अर्ज सादर करायचा का? त्यानंतर आपण उत्तरे बदलू शकणार नाही.'}</p>
           <div className="actions">
-            <button className="outline" disabled={submitting} onClick={() => setConfirmOpen(false)}>{language === 'en' ? 'Cancel' : 'रद्द करा'}</button>
+            <button className="outline" disabled={submitting} onClick={closeConfirm}>{language === 'en' ? 'Cancel' : 'रद्द करा'}</button>
             <button className="primary" disabled={submitting} onClick={handleSubmit}>
               {submitting ? (language === 'en' ? 'Submitting…' : 'सादर होत आहे…') : (language === 'en' ? 'Confirm & Submit' : 'निश्चित करा व सादर करा')}
             </button>

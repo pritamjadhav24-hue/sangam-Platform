@@ -1,10 +1,7 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Navbar from './Navbar';
-import { api } from '../api';
-
-vi.mock('../api', () => ({ api: { notifications: vi.fn(), markNotificationRead: vi.fn() } }));
 
 const CITIZEN = { role: 'CITIZEN', userId: 'SYN-CIT-00001', citizenId: 'SYN-CIT-00001', name: 'Amit Kale' };
 
@@ -15,10 +12,6 @@ const DEMO_CITIZENS = [
 ];
 
 describe('Navbar demo citizen switcher', () => {
-  beforeEach(() => {
-    api.notifications.mockResolvedValue({ notifications: [] });
-  });
-
   it('does not render the switcher when the backend returns no demo citizens', () => {
     render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
     expect(screen.queryByLabelText('Switch demo citizen')).not.toBeInTheDocument();
@@ -52,5 +45,38 @@ describe('Navbar demo citizen switcher', () => {
   it('never renders the switcher for a non-citizen role', () => {
     render(<Navbar page="officer" setPage={() => {}} citizen={{ role: 'OFFICER', userId: 'OFFICER_MH_01', name: 'Officer' }} demoCitizens={DEMO_CITIZENS} onDemoSwitch={vi.fn()} />);
     expect(screen.queryByLabelText('Switch demo citizen')).not.toBeInTheDocument();
+  });
+});
+
+describe('Navbar notifications entry (Phase 6G3 Task 2)', () => {
+  it('has exactly one Notifications entry, and no separate bell/popup', () => {
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={[]} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    expect(screen.getAllByText('Notifications')).toHaveLength(1);
+    expect(document.querySelector('.notification-panel')).not.toBeInTheDocument();
+    expect(document.querySelector('.notification-wrap')).not.toBeInTheDocument();
+  });
+
+  it('shows an unread-count badge on the Notifications nav item, derived from the notifications prop', () => {
+    const notifications = [
+      { notificationId: 'CN-1', read: false, title: 'Action needed', message: 'x', createdAt: '2026-09-23T00:00:00Z' },
+      { notificationId: 'CN-2', read: true, title: 'Document verified', message: 'y', createdAt: '2026-09-23T00:00:00Z' },
+    ];
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={notifications} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    const navItem = screen.getByRole('button', { name: /Notifications/ });
+    expect(navItem).toHaveTextContent('1');
+  });
+
+  it('shows no badge when every notification is read', () => {
+    const notifications = [{ notificationId: 'CN-1', read: true, title: 'Document verified', message: 'y', createdAt: '2026-09-23T00:00:00Z' }];
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={notifications} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    expect(document.querySelector('.nav-notification-badge')).not.toBeInTheDocument();
+  });
+
+  it('clicking the Notifications nav item navigates to the notifications page', async () => {
+    const setPage = vi.fn();
+    render(<Navbar page="dashboard" setPage={setPage} citizen={CITIZEN} notifications={[]} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Notifications' }));
+    expect(setPage).toHaveBeenCalledWith('notificationsPage');
   });
 });
