@@ -111,7 +111,7 @@ export default function App() {
     health: <IntegrationHealthPage onHealth={api.integrationHealth} onReset={api.resetDemo} />,
     audit: <AuditLineagePage onAudit={api.audit} />,
   }[page] || null;
-  return <><Navbar page={page} setPage={setPage} citizen={user} language={language} onLanguageChange={changeLanguage} onLogout={logout} notifications={notifications} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} />{content}<Footer language={language} /></>;
+  return <><Navbar page={page} setPage={setPage} citizen={user} language={language} onLanguageChange={changeLanguage} onLogout={logout} onNotificationSelect={onNotificationSelect} notifications={notifications} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} />{content}<Footer language={language} /></>;
 }
 
 function Footer({ language = 'en' }) {

@@ -80,3 +80,52 @@ describe('Navbar notifications entry (Phase 6G3 Task 2)', () => {
     expect(setPage).toHaveBeenCalledWith('notificationsPage');
   });
 });
+
+describe('Navbar Officer/Admin notification bell (regression fix)', () => {
+  const OFFICER = { role: 'OFFICER', userId: 'OFFICER_MH_01', name: 'Officer One' };
+  const ADMIN = { role: 'ADMIN', userId: 'ADMIN_MH_01', name: 'Admin One' };
+  const NOTIFICATIONS = [
+    { notificationId: 'NTF-1', read: false, title: 'Application needs review', message: 'x', createdAt: '2026-09-24T00:00:00Z' },
+  ];
+
+  it('Officer sees a notification bell with an unread badge, not a nav-item badge', () => {
+    render(<Navbar page="officer" setPage={() => {}} citizen={OFFICER} notifications={NOTIFICATIONS} onNotificationSelect={vi.fn()} />);
+    expect(document.querySelector('.notification-wrap')).toBeInTheDocument();
+    expect(document.querySelector('.notification-badge')).toHaveTextContent('1');
+    // Officer/Admin never get the citizen-style nav-item badge.
+    expect(document.querySelector('.nav-notification-badge')).not.toBeInTheDocument();
+  });
+
+  it('Admin also sees the restored notification bell', () => {
+    render(<Navbar page="health" setPage={() => {}} citizen={ADMIN} notifications={NOTIFICATIONS} onNotificationSelect={vi.fn()} />);
+    expect(document.querySelector('.notification-wrap')).toBeInTheDocument();
+  });
+
+  it('opening the bell shows the notification list and clicking one calls onNotificationSelect', async () => {
+    const onNotificationSelect = vi.fn();
+    render(<Navbar page="officer" setPage={() => {}} citizen={OFFICER} notifications={NOTIFICATIONS} onNotificationSelect={onNotificationSelect} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /Notifications/ }));
+    expect(screen.getByText('Application needs review')).toBeInTheDocument();
+    await user.click(screen.getByText('Application needs review'));
+    expect(onNotificationSelect).toHaveBeenCalledWith(NOTIFICATIONS[0]);
+  });
+
+  it('clicking outside the open bell closes it', async () => {
+    render(<>
+      <Navbar page="officer" setPage={() => {}} citizen={OFFICER} notifications={NOTIFICATIONS} onNotificationSelect={vi.fn()} />
+      <button>elsewhere</button>
+    </>);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /Notifications/ }));
+    expect(document.querySelector('.notification-panel')).toBeInTheDocument();
+    await user.click(screen.getByText('elsewhere'));
+    expect(document.querySelector('.notification-panel')).not.toBeInTheDocument();
+  });
+
+  it('Citizens still never render the bell popup, only Officer/Admin do', () => {
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={NOTIFICATIONS} onNotificationSelect={vi.fn()} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    expect(document.querySelector('.notification-wrap')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Notifications/ })).toHaveTextContent('1');
+  });
+});
