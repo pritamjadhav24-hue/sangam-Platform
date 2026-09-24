@@ -109,3 +109,13 @@ def snapshot_provider_catalog() -> list[tuple]:
     into and cleans up afterwards."""
     from app.core.persistence import DepartmentRow, ProviderCapabilityRow, ProviderRow, SchemaMappingRow, ServiceCatalogRow
     return snapshot_tables(DepartmentRow, ProviderRow, ServiceCatalogRow, ProviderCapabilityRow, SchemaMappingRow, RequirementCatalogRow)
+
+
+def non_demo_citizens(session):
+    """Synthetic citizens tests may borrow and clean up freely: the pool minus
+    the persona accounts the demo citizen switcher signs in as, so running
+    the suite never touches a presenter's demo applications."""
+    from app.core.persistence import CitizenRow, select_demo_switchable_citizen_ids
+    return (session.query(CitizenRow)
+            .filter(CitizenRow.citizen_id.notin_(select_demo_switchable_citizen_ids()))
+            .order_by(CitizenRow.citizen_id))

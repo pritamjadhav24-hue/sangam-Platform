@@ -132,7 +132,7 @@ export default function App() {
     setAdminSchemeId(schemeId);
     setPage('adminSchemeDetail');
   }
-  if (!user) return <><Navbar page={page} setPage={setPage} language={language} onLanguageChange={changeLanguage} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} /><LoginPage onLogin={login} language={language} /></>;
+  if (!user) return <><Navbar page={page} setPage={setPage} language={language} onLanguageChange={changeLanguage} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} /><LoginPage onLogin={login} language={language} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} /></>;
   const props = { navigate, language, notifications, schemes };
   const content = {
     dashboard: <CitizenDashboard applications={applications} citizen={user} onViewScheme={viewScheme} onOpenApplication={openApplication} {...props} />,

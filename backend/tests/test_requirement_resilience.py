@@ -263,6 +263,17 @@ class RequirementResilienceTests(unittest.TestCase):
             self.assertIn(requirement["status"], requirement_fulfillment.SUCCESS_STATUSES)
             self.assertEqual(requirement["userAction"], "No action required")
 
+    def test_exhausted_retries_guidance_does_not_claim_the_citizen_declined(self):
+        from app.api.citizen_routes import _safe_application
+        safe = _safe_application({"appId": "APP-X", "status": "IN_PROGRESS", "requirements": [
+            {"code": "DOMICILE_PROOF", "status": "ACTION_REQUIRED", "errorCategory": "UPSTREAM_UNAVAILABLE"},
+            {"code": "INCOME_PROOF", "status": "ACTION_REQUIRED"},
+        ]})
+        by_code = {item["requirementCode"]: item for item in safe["requirements"]}
+        self.assertEqual(by_code["DOMICILE_PROOF"]["userAction"], "Automatic retrieval could not complete. You can provide this manually.")
+        self.assertEqual(by_code["INCOME_PROOF"]["userAction"], "Automatic retrieval was not allowed. You can provide this manually.")
+        self.assertNotIn("errorCategory", by_code["DOMICILE_PROOF"])
+
     def test_rejected_requirement_guidance_survives_refresh_without_local_state(self):
         application = self._apply("CITIZEN_6D_009")
         code = application["requirements"][0]["requirementCode"]

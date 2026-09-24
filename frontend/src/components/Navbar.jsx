@@ -96,6 +96,11 @@ export default function Navbar({ page, setPage, citizen, language = 'en', onLang
           {onLogout && <button className="logout" onClick={onLogout}>{t.signOut}</button>}
         </div>
       )}
+      {!citizen && onLanguageChange && (
+        <div className="nav-tools">
+          <button className="language-switch" onClick={() => onLanguageChange(language === 'en' ? 'mr' : 'en')} aria-label="Change language">{language === 'en' ? 'मराठी' : 'English'}</button>
+        </div>
+      )}
     </nav>
   </>;
 }

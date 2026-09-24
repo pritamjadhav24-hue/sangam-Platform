@@ -191,6 +191,16 @@ _REQUIREMENT_USER_ACTION = {
 _NEEDS_ATTENTION_REQUIREMENT_STATUSES = frozenset({"ACTION_REQUIRED", "FAILED"})
 
 
+def _requirement_user_action(requirement: dict) -> str:
+    """ACTION_REQUIRED after exhausted retries carries the failure's error
+    category; after a declined consent it does not. Only the wording differs
+    -- no provider or failure detail ever reaches the citizen."""
+    status = requirement.get("status")
+    if status == "ACTION_REQUIRED" and requirement.get("errorCategory"):
+        return _REQUIREMENT_USER_ACTION["FAILED"]
+    return _REQUIREMENT_USER_ACTION.get(status, "Retry verification or request help")
+
+
 def _notify_requirement_outcome(citizen_id: str, application_id: str, requirement_code: str, label: str, previous_status: str | None, new_status: str | None) -> None:
     """Phase 6F2 Task E: a persisted citizen notification for exactly the
     two requirement outcomes that need one -- Auto-Fill/upload needing
@@ -217,7 +227,7 @@ def _safe_application(app: dict) -> dict:
             "displayLabel": requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title(),
             "displayLabelMr": requirement.get("labelMr") or requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title(),
             "status": requirement.get("status"),
-            "userAction": requirement.get("action") or _REQUIREMENT_USER_ACTION.get(requirement.get("status"), "Retry verification or request help"),
+            "userAction": requirement.get("action") or _requirement_user_action(requirement),
             **({"verifiedOn": requirement.get("verifiedOn")} if requirement.get("verifiedOn") else {}),
             # Phase 6B dynamic form fields -- present only on applications created
             # through the new /apply boundary; never exposes provider/department/

@@ -165,3 +165,12 @@ describe('Navbar Officer/Admin notification bell (regression fix)', () => {
     expect(screen.getByRole('button', { name: /Notifications/ })).toHaveTextContent('1');
   });
 });
+
+describe('Navbar language switch when signed out', () => {
+  it('lets a signed-out visitor change the language', async () => {
+    const onLanguageChange = vi.fn();
+    render(<Navbar page="dashboard" setPage={() => {}} language="mr" onLanguageChange={onLanguageChange} />);
+    await userEvent.click(screen.getByLabelText('Change language'));
+    expect(onLanguageChange).toHaveBeenCalledWith('en');
+  });
+});

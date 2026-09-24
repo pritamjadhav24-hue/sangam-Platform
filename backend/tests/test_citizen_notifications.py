@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 from sqlalchemy.orm import Session
 
+from tests.catalog_fixture import non_demo_citizens
 from app.api.citizen_routes import ApplySchemeRequest, AutoFillDecision, RequirementUpload, apply_to_scheme, auto_fill_requirement, submit_citizen_application, upload_requirement_document
 from app.api.notification_routes import citizen_notifications, mark_notification_read
 from app.core.persistence import ApplicationRow, CitizenNotificationRow, CitizenRow, DocumentRow, engine, seed_catalog, seed_requirement_catalog
@@ -40,7 +41,7 @@ _citizen_offsets = itertools.count(30)
 
 def _real_citizen_id() -> str:
     with Session(engine) as session:
-        return session.query(CitizenRow).order_by(CitizenRow.citizen_id).offset(next(_citizen_offsets)).limit(1).first().citizen_id
+        return non_demo_citizens(session).offset(next(_citizen_offsets)).limit(1).first().citizen_id
 
 
 def setUpModule():
@@ -56,7 +57,7 @@ def setUpModule():
     with Session(engine) as session:
         offset_citizen_ids = [
             row.citizen_id for row in
-            session.query(CitizenRow).order_by(CitizenRow.citizen_id).offset(30).limit(20).all()
+            non_demo_citizens(session).offset(30).limit(20).all()
         ]
         if offset_citizen_ids:
             session.query(DocumentRow).filter(DocumentRow.citizen_id.in_(offset_citizen_ids)).delete(synchronize_session=False)

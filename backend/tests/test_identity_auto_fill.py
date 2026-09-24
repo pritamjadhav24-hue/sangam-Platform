@@ -27,6 +27,7 @@ from unittest.mock import patch
 from sqlalchemy.orm import Session
 
 from tests.catalog_fixture import remove_test_vocabulary, seed_test_vocabulary
+from tests.catalog_fixture import non_demo_citizens
 from app.api.citizen_routes import AutoFillDecision, auto_fill_requirement, get_citizen_application, submit_citizen_application
 from app.core.persistence import (
     ApplicationRow, CitizenNotificationRow, CitizenRow, DocumentRow, RequirementCatalogRow, REQUIREMENT_CATALOG,
@@ -57,7 +58,7 @@ _citizen_offsets = itertools.count(0)  # this module claims offsets 0-14
 
 def _real_citizen_id() -> str:
     with Session(engine) as session:
-        row = session.query(CitizenRow).order_by(CitizenRow.citizen_id).offset(next(_citizen_offsets)).limit(1).first()
+        row = non_demo_citizens(session).offset(next(_citizen_offsets)).limit(1).first()
         if row is None:
             raise RuntimeError("no synthetic citizen is seeded -- run seed_platform_citizens() first")
         return row.citizen_id
@@ -74,7 +75,7 @@ def setUpModule():
     # shared fixtures across separate full-suite runs -- an interrupted
     # earlier run can leave a leftover application behind.
     with Session(engine) as session:
-        offset_citizen_ids = [row.citizen_id for row in session.query(CitizenRow).order_by(CitizenRow.citizen_id).offset(0).limit(15).all()]
+        offset_citizen_ids = [row.citizen_id for row in non_demo_citizens(session).offset(0).limit(15).all()]
         if offset_citizen_ids:
             session.query(DocumentRow).filter(DocumentRow.citizen_id.in_(offset_citizen_ids)).delete(synchronize_session=False)
             session.query(ApplicationRow).filter(ApplicationRow.citizen_id.in_(offset_citizen_ids)).delete(synchronize_session=False)

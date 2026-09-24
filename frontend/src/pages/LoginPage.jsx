@@ -1,8 +1,11 @@
 import { useState } from 'react';
 import SangamMark from '../components/SangamMark';
 
-export default function LoginPage({ onLogin, language = 'en' }) {
+export default function LoginPage({ onLogin, language = 'en', demoCitizens = [], onDemoSwitch }) {
   const [citizenId, setCitizenId] = useState('CITIZEN_001'); const [password, setPassword] = useState(''); const [error, setError] = useState(''); const [loading, setLoading] = useState(false);
+  // DEMO ONLY: the backend lists demo citizens only when demo switching is
+  // enabled (never in production), so this panel simply doesn't render otherwise.
+  async function demoSignIn(event) { const id = event.target.value; if (!id) return; setLoading(true); setError(''); try { await onDemoSwitch(id); } catch (err) { setError(err.message); setLoading(false); } }
   async function submit(event) { event.preventDefault(); setLoading(true); setError(''); try { await onLogin(citizenId, password); } catch (err) { setError(err.message); } finally { setLoading(false); } }
   const isMr = language === 'mr';
   return (
@@ -51,6 +54,15 @@ export default function LoginPage({ onLogin, language = 'en' }) {
         <button className="primary" disabled={loading}>
           {loading ? (isMr ? 'ओळख पडताळत आहे…' : 'Verifying identity…') : (isMr ? 'पडताळणी करा व पुढे जा' : 'Verify & continue')}
         </button>
+        {demoCitizens.length > 0 && onDemoSwitch && (
+          <label className="demo-switcher login-demo-switcher">
+            <span className="demo-switcher-badge">DEMO</span>
+            <select aria-label={isMr ? 'डेमो नागरिक म्हणून पुढे जा' : 'Continue as a demo citizen'} defaultValue="" disabled={loading} onChange={demoSignIn}>
+              <option value="" disabled>{isMr ? 'डेमो नागरिक म्हणून पुढे जा' : 'Continue as a demo citizen'}</option>
+              {demoCitizens.map(item => <option key={item.citizenId} value={item.citizenId}>{item.name}{item.persona ? ` · ${item.persona.replace(/_/g, ' ')}` : ''}</option>)}
+            </select>
+          </label>
+        )}
         <div className="demo-credentials">
           <b>{isMr ? 'नमुना ओळख (डेमो)' : 'Demo identities'}</b>
           {/* Account IDs only: passwords are set per deployment (.env) and are never shipped in the UI. */}

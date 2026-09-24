@@ -209,11 +209,11 @@ PostgreSQL is the only state that must be backed up (`pg_dump --format=custom`).
 |---|---|---|
 | `CITIZEN_001` (Rahul Kumar) | Citizen | Original demo citizen |
 | `CITIZEN_002` | Citizen | |
-| `SYN-CIT-00001` … (10 personas) | Citizen | Reachable through the demo citizen switcher on the login page |
+| `SYN-CIT-00001` … (10 personas) | Citizen | Password-less **Continue as a demo citizen** on the login page, and the switcher in the navbar (only when demo switching is enabled) |
 | `OFFICER_MH_01` | Officer | Review queue |
 | `ADMIN_MH_01` | Admin | Admin console |
 
-Passwords are whatever you set in `.env` (`SANGAM_*_PASSWORD`, `SANGAM_DEMO_CITIZEN_PASSWORD`). Sessions are JWTs kept in memory only, so a browser refresh requires signing in again (Admin returns to the page it was on, per tab).
+Passwords are whatever you set in `.env` (`SANGAM_*_PASSWORD`, `SANGAM_DEMO_CITIZEN_PASSWORD`); the UI never displays or pre-fills them. Sessions are JWTs kept in memory only, so a browser refresh requires signing in again (Admin returns to the page it was on, per tab).
 
 ## 9. Main demo scenario (citizen)
 
@@ -252,7 +252,7 @@ Passwords are whatever you set in `.env` (`SANGAM_*_PASSWORD`, `SANGAM_DEMO_CITI
 
 - All department systems and providers are synthetic sandboxes; no real government API is integrated.
 - Manual upload stores a text/JSON representation of a document, not binary files.
-- Rate limiting is per process; the in-memory legacy compatibility state assumes a single backend replica.
+- Rate limiting is per process; the in-memory legacy compatibility state (snapshotted to PostgreSQL after each request) assumes a single backend replica.
 - Automatic dead-letter replay applies to async provider jobs (`ASYNC_PROVIDER_JOBS=true` with Redis). The synchronous per-requirement Auto-Fill path cascades providers within the request and, if all fail, leaves the requirement retryable / action-required rather than creating a queued job.
 - Only one requirement (`INCOME_PROOF`) has a configured alternate provider; others have a single provider.
 - Analytics trends are limited by the amount of demo activity; fulfilment is dated by the application's last update.
@@ -266,4 +266,4 @@ cd backend && python -m unittest discover -s tests      # needs a migrated Postg
 cd frontend && npm test && npm run build
 ```
 
-Tests clean up the rows they create and never remove the seeded demo vocabulary, providers or citizens.
+Tests clean up the rows they create and never remove the seeded demo vocabulary, providers, citizens or the demo personas' applications. Prefer a dedicated test database (set `DATABASE_URL` for the test run); if you run the suite against the database a live backend is using, restart that backend and use **Reset Demo** afterwards so its in-memory audit ledger re-syncs with PostgreSQL.
