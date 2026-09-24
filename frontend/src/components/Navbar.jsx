@@ -20,7 +20,8 @@ export default function Navbar({ page, setPage, citizen, language = 'en', onLang
     ? [['dashboard', t.homeNav], ['schemes', t.schemesNav], ['myApplications', t.myApplicationsNav], ['notificationsPage', t.notificationsNav, unread], ['profile', t.profileNav]]
     : role === 'OFFICER' ? [['officer', 'Officer Desk']]
     : role === 'ADMIN' ? [['adminDashboard', 'Dashboard'], ['adminApplications', 'Applications'], ['adminProviders', 'Providers'], ['adminAlerts', 'Alerts'], ['audit', 'Audit Lineage']] : [];
-  const adminActivePage = page === 'adminApplicationDetail' ? 'adminApplications' : page;
+  const adminActivePage = page === 'adminApplicationDetail' ? 'adminApplications'
+    : page === 'adminProviderDetail' || page === 'health' ? 'adminProviders' : page;
 
   function selectBellNotification(notification) {
     setBellOpen(false);

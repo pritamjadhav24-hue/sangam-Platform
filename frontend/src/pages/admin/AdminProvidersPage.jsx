@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
-export default function AdminProvidersPage({ api }) {
+export default function AdminProvidersPage({ api, onOpenProvider }) {
   const [providers, setProviders] = useState([]);
   const [integrations, setIntegrations] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -15,7 +15,7 @@ export default function AdminProvidersPage({ api }) {
     setLoading(true);
     setError('');
     Promise.all([
-      api.adminProviders(),
+      api.adminProviderRegistry(),
       api.integrationHealth(),
     ])
       .then(([provRes, healthRes]) => {
@@ -28,6 +28,16 @@ export default function AdminProvidersPage({ api }) {
       .catch(err => setError(err.message || 'Failed to load provider registry.'))
       .finally(() => setLoading(false));
   };
+
+  // Provider <-> Requirement capability matrix, built client-side from the
+  // same registry data (no separate backend endpoint / no second
+  // provider-selection algorithm) -- every provider already lists its own
+  // real capabilities from the existing capability catalog.
+  const requirementCodes = useMemo(() => {
+    const codes = new Set();
+    providers.forEach(p => (p.capabilities || []).forEach(c => codes.add(c.requirementCode)));
+    return Array.from(codes).sort();
+  }, [providers]);
 
   useEffect(() => {
     loadProviders();
@@ -74,40 +84,56 @@ export default function AdminProvidersPage({ api }) {
       <div className="card" style={{ marginBottom: '24px' }}>
         <div className="section-heading">
           <div>
-            <h2>Integrated Department Providers</h2>
-            <p>Simulated Maharashtra state department databases connected via REST & catalog adapters.</p>
+            <h2>Provider / Integration Registry</h2>
+            <p>Every registered department provider: department, capabilities, adapter, health and active incidents.</p>
           </div>
           <span className="count-badge">Total Providers: {providers.length}</span>
         </div>
 
         {loading ? (
-          <p className="loading-state">Loading provider status…</p>
+          <p className="loading-state">Loading provider registry…</p>
+        ) : providers.length === 0 ? (
+          <div className="empty-state">
+            <span>○</span>
+            <h3>No providers registered</h3>
+            <p className="muted">The provider capability catalog is empty.</p>
+          </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
             <table>
               <thead>
                 <tr>
-                  <th>Department / System</th>
-                  <th>Adapter Type</th>
-                  <th>Contract</th>
+                  <th>Department / Provider</th>
+                  <th>Capabilities (Requirements)</th>
+                  <th>Adapter</th>
                   <th>Auth</th>
                   <th>Status</th>
-                  <th>Reliability Metrics</th>
-                  <th>Last Failure Category</th>
+                  <th>Incident</th>
+                  <th>Reliability</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
                 {providers.map(p => {
-                  const status = p.health?.status || (p.enabled ? 'AVAILABLE' : 'UNAVAILABLE');
+                  const status = p.health?.status || (p.active ? 'AVAILABLE' : 'UNAVAILABLE');
                   const isAvailable = status === 'AVAILABLE' || status === 'HEALTHY';
                   return (
                     <tr key={p.providerId || p.name}>
                       <td>
-                        <b>{p.name}</b>
-                        <small>{p.providerId || 'Provider ID not assigned'}</small>
+                        <b>{p.department || p.name}</b>
+                        <small>{p.providerId}</small>
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', maxWidth: '220px' }}>
+                          {(p.capabilities || []).map(c => (
+                            <span key={c.requirementCode} className="tag" style={{ fontSize: '10px' }} title={`Priority ${c.priority}`}>
+                              {c.requirementCode}
+                            </span>
+                          ))}
+                          {(p.capabilities || []).length === 0 && <small className="muted">None</small>}
+                        </div>
                       </td>
                       <td><code>{p.adapterType}</code></td>
-                      <td>{p.contractVersion || 'v1'}</td>
                       <td><span className="tag" style={{ fontSize: '11px' }}>{p.authType || 'NONE'}</span></td>
                       <td>
                         <span className={`status ${isAvailable ? 'found' : 'exception'}`}>
@@ -115,17 +141,22 @@ export default function AdminProvidersPage({ api }) {
                         </span>
                       </td>
                       <td>
-                        <small style={{ color: '#0E9594' }}>✓ {p.successCount || 0} succeeded</small>
-                        {p.failureCount > 0 && (
-                          <small style={{ color: '#F2542D', display: 'block' }}>⚠ {p.failureCount} failed</small>
+                        {p.activeIncident ? (
+                          <span className="status exception" title={`Detected ${new Date(p.activeIncident.detectedAt).toLocaleString()}`}>DOWN</span>
+                        ) : (
+                          <span style={{ color: '#7A6360' }}>—</span>
                         )}
                       </td>
                       <td>
-                        {p.errorCategory ? (
-                          <span style={{ color: '#a25a12' }}>[{p.errorCategory}]</span>
-                        ) : (
-                          <span style={{ color: '#7A6360' }}>None</span>
+                        <small style={{ color: '#0E9594' }}>✓ {p.successCount || 0}</small>
+                        {p.failureCount > 0 && (
+                          <small style={{ color: '#F2542D', display: 'block' }}>⚠ {p.failureCount}</small>
                         )}
+                      </td>
+                      <td>
+                        <button className="small outline" onClick={() => onOpenProvider?.(p.providerId)}>
+                          View Detail →
+                        </button>
                       </td>
                     </tr>
                   );
@@ -135,6 +166,57 @@ export default function AdminProvidersPage({ api }) {
           </div>
         )}
       </div>
+
+      {/* Provider <-> Requirement Capability Matrix */}
+      {!loading && providers.length > 0 && requirementCodes.length > 0 && (
+        <div className="card" style={{ marginBottom: '24px' }}>
+          <div className="section-heading">
+            <div>
+              <h2>Provider ↔ Requirement Capability Matrix</h2>
+              <p>Which providers are capable of fulfilling each requirement, and their fallback priority tier.</p>
+            </div>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Requirement</th>
+                  <th>Eligible Providers (priority order)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {requirementCodes.map(code => {
+                  const eligible = providers
+                    .map(p => ({ p, cap: (p.capabilities || []).find(c => c.requirementCode === code) }))
+                    .filter(item => item.cap)
+                    .sort((a, b) => (a.cap.priority || 100) - (b.cap.priority || 100));
+                  return (
+                    <tr key={code}>
+                      <td><code>{code}</code></td>
+                      <td>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          {eligible.map(({ p, cap }, idx) => {
+                            const healthy = (p.health?.status === 'AVAILABLE' || p.health?.status === 'HEALTHY');
+                            return (
+                              <span
+                                key={p.providerId}
+                                className="tag"
+                                style={{ fontSize: '11px', background: healthy ? '#F5DFDB' : '#fff0df', color: healthy ? '#127475' : '#a25a12' }}
+                              >
+                                {idx === 0 ? '★ ' : ''}{p.name} (P{cap.priority})
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Protected Resilience Demonstration Controls */}
       <div className="card" style={{ borderLeft: '4px solid #F2542D' }}>

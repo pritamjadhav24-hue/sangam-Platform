@@ -22,6 +22,7 @@ import AdminDashboardPage from './pages/admin/AdminDashboardPage';
 import AdminApplicationsPage from './pages/admin/AdminApplicationsPage';
 import AdminApplicationDetailPage from './pages/admin/AdminApplicationDetailPage';
 import AdminProvidersPage from './pages/admin/AdminProvidersPage';
+import AdminProviderDetailPage from './pages/admin/AdminProviderDetailPage';
 import AdminAlertsPage from './pages/admin/AdminAlertsPage';
 import SangamMark from './components/SangamMark';
 
@@ -31,6 +32,7 @@ export default function App() {
   const [notifications, setNotifications] = useState([]);
   const [demoCitizens, setDemoCitizens] = useState([]);
   const [adminApplicationId, setAdminApplicationId] = useState(null);
+  const [adminProviderId, setAdminProviderId] = useState(null);
   useEffect(() => { setAuthFailureHandler(() => { setSessionToken(null); setUser(null); setAppId(null); setDiscovery(null); setPage('dashboard'); }); return () => setAuthFailureHandler(null); }, []);
   useEffect(() => {
     if (user?.role !== 'CITIZEN') return undefined;
@@ -100,6 +102,10 @@ export default function App() {
     if (applicationId) setAdminApplicationId(applicationId);
     setPage(nextPage);
   }
+  function openProviderDetail(providerId) {
+    setAdminProviderId(providerId);
+    setPage('adminProviderDetail');
+  }
   if (!user) return <><Navbar page={page} setPage={setPage} language={language} onLanguageChange={changeLanguage} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} /><LoginPage onLogin={login} language={language} /></>;
   const props = { navigate, language, notifications, schemes };
   const content = {
@@ -120,9 +126,10 @@ export default function App() {
     adminDashboard: <AdminDashboardPage onNavigate={navigateAdmin} api={api} onReset={api.resetDemo} />,
     adminApplications: <AdminApplicationsPage onSelectApplication={id => navigateAdmin('adminApplicationDetail', id)} api={api} />,
     adminApplicationDetail: <AdminApplicationDetailPage applicationId={adminApplicationId} onBack={() => navigateAdmin('adminApplications')} api={api} />,
-    adminProviders: <AdminProvidersPage api={api} />,
+    adminProviders: <AdminProvidersPage onOpenProvider={openProviderDetail} api={api} />,
+    adminProviderDetail: <AdminProviderDetailPage providerId={adminProviderId} onBack={() => navigateAdmin('adminProviders')} onNavigateToApplication={id => navigateAdmin('adminApplicationDetail', id)} api={api} />,
     adminAlerts: <AdminAlertsPage onNavigateToApplication={id => navigateAdmin('adminApplicationDetail', id)} api={api} />,
-    health: <AdminProvidersPage api={api} />,
+    health: <AdminProvidersPage onOpenProvider={openProviderDetail} api={api} />,
     audit: <AuditLineagePage onAudit={api.audit} />,
   }[page] || null;
   return <><Navbar page={page} setPage={setPage} citizen={user} language={language} onLanguageChange={changeLanguage} onLogout={logout} onNotificationSelect={onNotificationSelect} notifications={notifications} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} />{content}<Footer language={language} /></>;

@@ -1476,6 +1476,146 @@ def open_provider_incident_count() -> int:
         return session.query(ProviderIncidentRow).filter(ProviderIncidentRow.status == "OPEN").count()
 
 
+def _provider_job_counts(session, provider: "ProviderRow") -> tuple[int, int]:
+    related = session.query(ProviderJobRow).filter(
+        ProviderJobRow.provider_id.in_({provider.provider_id, provider.name})
+    ).all()
+    success = sum(1 for j in related if j.status == "COMPLETED")
+    failure = sum(1 for j in related if j.status in {"FAILED", "DEAD_LETTER"})
+    return success, failure
+
+
+def provider_registry_snapshot() -> list[dict]:
+    """Admin Provider Registry: every provider joined with its department,
+    capabilities/requirement mappings, current health and active incident.
+    Built entirely from the existing capability catalog
+    (provider_capability_snapshot/dependency_registry), the existing health
+    detector (integration_health), and the existing incident model
+    (provider_incidents_summary) -- no second selection or health system.
+    """
+    from app.engine.adapters import integration_health
+    from app.engine.registry import dependency_registry
+
+    with Session(engine) as session:
+        providers = session.query(ProviderRow).all()
+        departments = {d.department_id: d.name for d in session.query(DepartmentRow).all()}
+        health_list = integration_health()
+        registry_list = dependency_registry(health_list)
+        open_incidents = {i["providerSystem"]: i for i in provider_incidents_summary() if i["status"] == "OPEN"}
+
+        result = []
+        for provider in providers:
+            caps = [c for c in registry_list if c.get("providerId") == provider.provider_id or c.get("provider") == provider.name]
+            health_item = next((h for h in health_list if h["system"] == provider.name), {})
+            success_count, failure_count = _provider_job_counts(session, provider)
+            result.append({
+                "providerId": provider.provider_id,
+                "name": provider.name,
+                "department": departments.get(provider.department_id, provider.department_id),
+                "adapterType": provider.adapter_type,
+                "contractVersion": provider.contract_version,
+                "environment": provider.environment,
+                "authType": provider.auth_type,
+                "active": provider.active,
+                "timeoutSeconds": provider.timeout_seconds,
+                "maxAttempts": provider.max_attempts,
+                "health": {
+                    "status": health_item.get("status", "UNKNOWN"),
+                    "lastCheckedAt": health_item.get("lastCheckedAt"),
+                    "lastSuccessAt": health_item.get("lastSuccessAt"),
+                    "lastFailureAt": health_item.get("lastFailureAt"),
+                    "errorCategory": health_item.get("errorCategory"),
+                },
+                "capabilities": [
+                    {"requirementCode": c["requirementCode"], "priority": c.get("priority", 100),
+                     "serviceId": c["serviceId"], "serviceName": c["serviceName"]}
+                    for c in caps
+                ],
+                "supportedRequirements": sorted({c["requirementCode"] for c in caps}),
+                "activeIncident": open_incidents.get(provider.name),
+                "successCount": success_count,
+                "failureCount": failure_count,
+            })
+        return result
+
+
+def provider_registry_detail(provider_id: str) -> dict | None:
+    """Full Admin Provider Detail: overview, capabilities, requirement
+    mappings, schema mapping status, reliability/job information and
+    provider incidents -- every piece reused from an existing model, joined
+    here for one Admin read rather than duplicated.
+    """
+    from app.engine.adapters import integration_health
+    from app.engine.registry import dependency_registry
+    from app.core.audit_bus import audit_bus
+
+    with Session(engine) as session:
+        provider = session.get(ProviderRow, provider_id)
+        if provider is None:
+            return None
+        department = session.get(DepartmentRow, provider.department_id)
+        health_list = integration_health()
+        registry_list = dependency_registry(health_list)
+        caps = [c for c in registry_list if c.get("providerId") == provider.provider_id or c.get("provider") == provider.name]
+        health_item = next((h for h in health_list if h["system"] == provider.name), {})
+
+        mapping_rows = session.query(SchemaMappingRow).filter(
+            SchemaMappingRow.provider_id == provider_id, SchemaMappingRow.active.is_(True)
+        ).all()
+        schema_mappings = [
+            {"departmentField": m.department_field, "canonicalField": m.canonical_field,
+             "dataType": m.data_type, "serviceId": m.service_id}
+            for m in mapping_rows
+        ]
+
+        job_rows = session.query(ProviderJobRow).filter(
+            ProviderJobRow.provider_id.in_({provider.provider_id, provider.name})
+        ).order_by(ProviderJobRow.created_at.desc()).limit(50).all()
+        recent_jobs = [_safe_job_view(j) for j in job_rows]
+        success_count, failure_count = _provider_job_counts(session, provider)
+
+        incidents = [i for i in provider_incidents_summary() if i["providerSystem"] == provider.name]
+
+        # Reuses the exact same live ledger the global Audit & Data Lineage
+        # page already reads (audit_bus.entries) -- not a second audit
+        # source -- filtered to entries this provider was the source of.
+        audit_events = [entry for entry in audit_bus.entries if entry.get("source") == provider.name][-50:]
+
+        return {
+            "providerId": provider.provider_id,
+            "name": provider.name,
+            "department": department.name if department else provider.department_id,
+            "adapterType": provider.adapter_type,
+            "contractVersion": provider.contract_version,
+            "environment": provider.environment,
+            "authType": provider.auth_type,
+            "endpointRef": provider.endpoint_ref,
+            "active": provider.active,
+            "timeoutSeconds": provider.timeout_seconds,
+            "maxAttempts": provider.max_attempts,
+            "health": {
+                "status": health_item.get("status", "UNKNOWN"),
+                "lastCheckedAt": health_item.get("lastCheckedAt"),
+                "lastSuccessAt": health_item.get("lastSuccessAt"),
+                "lastFailureAt": health_item.get("lastFailureAt"),
+                "errorCategory": health_item.get("errorCategory"),
+            },
+            "capabilities": [
+                {"requirementCode": c["requirementCode"], "priority": c.get("priority", 100),
+                 "serviceId": c["serviceId"], "serviceName": c["serviceName"], "healthStatus": c.get("healthStatus")}
+                for c in caps
+            ],
+            "schemaMappings": schema_mappings,
+            "reliability": {
+                "successCount": success_count,
+                "failureCount": failure_count,
+                "recentJobs": recent_jobs,
+            },
+            "incidents": incidents,
+            "auditEvents": audit_events,
+        }
+
+
 def replay_dead_letter_job(job_id: str, redis_service, *, trigger: str = "MANUAL") -> dict:
     """Reset and enqueue a dead-letter job, rolling back if Redis cannot
     accept it. ``trigger`` is ``"MANUAL"`` for the existing admin-initiated

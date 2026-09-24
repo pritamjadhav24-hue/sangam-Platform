@@ -68,6 +68,8 @@ export const api = {
   },
   adminApplicationDetail: (appId) => request(`/admin/applications/${encodeURIComponent(appId)}`),
   adminProviders: () => request('/admin/operations/providers'),
+  adminProviderRegistry: () => request('/admin/operations/providers/registry'),
+  adminProviderDetail: (providerId) => request(`/admin/operations/providers/registry/${encodeURIComponent(providerId)}`),
   adminDeadLetterJobs: (limit = 50) => request(`/admin/operations/jobs/dead-letter?limit=${limit}`),
   adminRecentJobs: (limit = 50) => request(`/admin/operations/jobs/recent?limit=${limit}`),
   adminReplayJob: (jobId) => request(`/admin/operations/jobs/${encodeURIComponent(jobId)}/replay`, { method: 'POST' }),

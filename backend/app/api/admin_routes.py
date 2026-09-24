@@ -15,7 +15,7 @@ from app.core.persistence import (
     provider_operational_summary, replay_dead_letter_job, worker_operational_status,
     _safe_job_view, ApplicationRow, DependencyRow, ProviderJobRow, EntityReviewRow,
     ConflictReviewRow, AuditEntryRow, engine, provider_incidents_summary,
-    open_provider_incident_count,
+    open_provider_incident_count, provider_registry_snapshot, provider_registry_detail,
 )
 from app.core.redis_service import RedisService, RedisUnavailable
 from app.core.rate_limit import enforce
@@ -77,6 +77,19 @@ def reset_demo(user: dict = Depends(require_roles("ADMIN"))):
 @router.get("/operations/providers")
 def provider_operations(user: dict = Depends(require_roles("ADMIN"))):
     return {"providers": provider_operational_summary()}
+
+
+@router.get("/operations/providers/registry")
+def provider_registry(user: dict = Depends(require_roles("ADMIN"))):
+    return {"providers": provider_registry_snapshot()}
+
+
+@router.get("/operations/providers/registry/{provider_id}")
+def provider_registry_detail_route(provider_id: str, user: dict = Depends(require_roles("ADMIN"))):
+    detail = provider_registry_detail(provider_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Provider not found.")
+    return detail
 
 
 @router.get("/operations/worker")
