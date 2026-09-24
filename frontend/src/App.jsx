@@ -11,11 +11,6 @@ import ReviewApplicationPage from './pages/ReviewApplicationPage';
 import MyApplicationsPage from './pages/MyApplicationsPage';
 import ProfilePage from './pages/ProfilePage';
 import NotificationsPage from './pages/NotificationsPage';
-import ServiceDiscoveryPage from './pages/ServiceDiscoveryPage';
-import ConsentModalPage from './pages/ConsentModalPage';
-import DependencyResolutionPage from './pages/DependencyResolutionPage';
-import ReviewSubmitPage from './pages/ReviewSubmitPage';
-import TrackingPage from './pages/TrackingPage';
 import OfficerDashboard from './pages/OfficerDashboard';
 import AuditLineagePage from './pages/AuditLineagePage';
 import AdminDashboardPage from './pages/admin/AdminDashboardPage';
@@ -44,7 +39,7 @@ function writeAdminRoute(route) {
 import SangamMark from './components/SangamMark';
 
 export default function App() {
-  const [user, setUser] = useState(null), [page, setPage] = useState('dashboard'), [schemes, setSchemes] = useState([]), [discovery, setDiscovery] = useState(null), [appId, setAppId] = useState(null), [schemeId, setSchemeId] = useState(null), [language, setLanguage] = useState(initialLanguage);
+  const [user, setUser] = useState(null), [page, setPage] = useState('dashboard'), [schemes, setSchemes] = useState([]), [appId, setAppId] = useState(null), [schemeId, setSchemeId] = useState(null), [language, setLanguage] = useState(initialLanguage);
   const [applications, setApplications] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [demoCitizens, setDemoCitizens] = useState([]);
@@ -56,7 +51,7 @@ export default function App() {
       writeAdminRoute({ page, applicationId: adminApplicationId, providerId: adminProviderId, schemeId: adminSchemeId });
     }
   }, [user, page, adminApplicationId, adminProviderId, adminSchemeId]);
-  useEffect(() => { setAuthFailureHandler(() => { setSessionToken(null); setUser(null); setAppId(null); setDiscovery(null); setPage('dashboard'); }); return () => setAuthFailureHandler(null); }, []);
+  useEffect(() => { setAuthFailureHandler(() => { setSessionToken(null); setUser(null); setAppId(null); setPage('dashboard'); }); return () => setAuthFailureHandler(null); }, []);
   useEffect(() => {
     if (user?.role !== 'CITIZEN') return undefined;
     let active = true;
@@ -94,7 +89,7 @@ export default function App() {
   function changeLanguage(next) { setLanguage(next); localStorage.setItem(LANGUAGE_KEY, next); }
   async function login(id, pw) {
     const result = await api.login(id, pw);
-    setSessionToken(result.token); setUser(result.user); setApplications([]); setNotifications([]); setAppId(null); setDiscovery(null); setSchemeId(null);
+    setSessionToken(result.token); setUser(result.user); setApplications([]); setNotifications([]); setAppId(null); setSchemeId(null);
     if (result.user.role === 'ADMIN') {
       const saved = readAdminRoute();
       if (saved && ADMIN_PAGES.has(saved.page)) {
@@ -107,17 +102,13 @@ export default function App() {
   }
   async function demoSwitch(citizenId) {
     const result = await api.demoLogin(citizenId);
-    setSessionToken(result.token); setUser(result.user); setApplications([]); setNotifications([]); setAppId(null); setDiscovery(null); setSchemeId(null); setPage('dashboard');
+    setSessionToken(result.token); setUser(result.user); setApplications([]); setNotifications([]); setAppId(null); setSchemeId(null); setPage('dashboard');
   }
-  async function discover(timeout = false) { const result = await api.discover(user.citizenId, timeout, schemeId); setDiscovery(result); if (result.schemeId) setSchemeId(result.schemeId); return result; }
-  async function consent(allow) { const result = await api.consent(user.citizenId, allow, schemeId); if (result.appId) setAppId(result.appId); return result; }
-  async function domicile(id = appId) { const result = await api.domicile(user.citizenId, id); if (result.appId) setAppId(result.appId); return result; }
-  async function submit() { const result = await api.submit(user.citizenId, appId); setAppId(result.appId); return result; }
   const navigate = (nextPage, id) => { setPage(nextPage); if (id) setAppId(id); };
   function viewScheme(id) { setSchemeId(id); setPage('schemeDetail'); }
   function openApplicationForm(scheme) { const id = scheme?.serviceId || scheme?.schemeId || scheme; if (id) setSchemeId(id); setPage('applicationForm'); }
   function openApplication(application) { if (application?.serviceId) setSchemeId(application.serviceId); setPage(application?.status === 'SUBMITTED' ? 'reviewApplication' : 'applicationForm'); }
-  function logout() { try { sessionStorage.removeItem(ADMIN_ROUTE_KEY); } catch { /* ignore */ } setSessionToken(null); setUser(null); setApplications([]); setNotifications([]); setAppId(null); setDiscovery(null); setSchemeId(null); setPage('dashboard'); }
+  function logout() { try { sessionStorage.removeItem(ADMIN_ROUTE_KEY); } catch { /* ignore */ } setSessionToken(null); setUser(null); setApplications([]); setNotifications([]); setAppId(null); setSchemeId(null); setPage('dashboard'); }
   async function onNotificationSelect(notification) {
     if (!notification.read) {
       setNotifications(items => items.map(item => item.notificationId === notification.notificationId ? { ...item, read: true } : item));
@@ -152,11 +143,6 @@ export default function App() {
     myApplications: <MyApplicationsPage applications={applications} onOpenApplication={openApplication} {...props} />,
     notificationsPage: <NotificationsPage onSelect={onNotificationSelect} {...props} />,
     profile: <ProfilePage citizen={user} applications={applications} {...props} />,
-    discovery: <ServiceDiscoveryPage discovery={discovery} onDiscover={discover} {...props} />,
-    consent: <ConsentModalPage service={schemes.find(item => item.serviceId === schemeId || item.schemeId === schemeId)} onConsent={consent} {...props} />,
-    dependency: <DependencyResolutionPage onDomicile={domicile} {...props} />,
-    review: <ReviewSubmitPage discovery={discovery} onDiscover={discover} onSubmit={submit} {...props} />,
-    tracking: <TrackingPage appId={appId} onTrack={api.track} onDomicile={domicile} {...props} />,
     officer: <OfficerDashboard onQueue={api.queue} onAction={api.action} />,
     adminDashboard: <AdminDashboardPage onNavigate={navigateAdmin} api={api} onReset={api.resetDemo} />,
     adminApplications: <AdminApplicationsPage onSelectApplication={id => navigateAdmin('adminApplicationDetail', id)} api={api} />,

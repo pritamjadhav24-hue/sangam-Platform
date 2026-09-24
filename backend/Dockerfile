@@ -8,9 +8,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY main.py .
+COPY alembic ./alembic
+COPY alembic.ini main.py ./
 
+# /app/data/sandboxes holds the department sandbox databases. Creating it
+# here (owned by the runtime user) means a fresh named volume mounted on it
+# inherits a writable directory instead of a root-owned one.
 RUN addgroup --system sangam && adduser --system --ingroup sangam sangam \
+    && mkdir -p /app/data/sandboxes \
     && chown -R sangam:sangam /app
 USER sangam
 

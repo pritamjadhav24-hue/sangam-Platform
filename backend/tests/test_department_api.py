@@ -90,6 +90,23 @@ class DepartmentAPIDataAccessTests(unittest.TestCase):
         self.assertEqual(body["correlationId"], "corr-1")
         self.assertIn("survey_number", body["data"])
 
+    def test_revenue_income_certificate_lookup_returns_only_issued_certificates(self):
+        models = _reseed("revenue")
+        with session_scope(models.ENGINE) as session:
+            issued = session.query(models.ResidentIndex).join(
+                models.IncomeCertificate, models.IncomeCertificate.resident_id == models.ResidentIndex.resident_id
+            ).filter(models.IncomeCertificate.status == "ISSUED").first()
+            pending = session.query(models.ResidentIndex).join(
+                models.IncomeCertificate, models.IncomeCertificate.resident_id == models.ResidentIndex.resident_id
+            ).filter(models.IncomeCertificate.status != "ISSUED").first()
+            issued_ref, pending_ref = issued.citizen_ref, pending.citizen_ref
+        status, body = _get(f"/departments/revenue/income-certificates/{issued_ref}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "ISSUED")
+        self.assertIsInstance(body["data"]["annual_income"], float)
+        status, body = _get(f"/departments/revenue/income-certificates/{pending_ref}")
+        self.assertEqual(status, 404)
+
     def test_unknown_citizen_returns_not_found_envelope(self):
         _reseed("revenue")
         status, body = _get("/departments/revenue/land-records/SYN-CIT-DOES-NOT-EXIST")
@@ -134,7 +151,7 @@ class DepartmentAPISchemaIndependenceTests(unittest.TestCase):
         self.assertIn("/departments/food-civil-supplies/ration-cards/{citizen_ref}", routes)
         revenue_resource_routes = [p for p in routes if p.startswith("/departments/revenue/") and "{citizen_ref}" in p]
         transport_resource_routes = [p for p in routes if p.startswith("/departments/transport/") and "{citizen_ref}" in p]
-        self.assertEqual(len(revenue_resource_routes), 1)
+        self.assertEqual(len(revenue_resource_routes), 2)
         self.assertEqual(len(transport_resource_routes), 2)
 
 

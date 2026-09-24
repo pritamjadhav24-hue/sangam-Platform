@@ -42,7 +42,7 @@ from app.engine import retry_policy
 from app.engine.adapters import AdapterResult, integration_health, request_registered_service
 from app.engine.artifact_retrieval import _source_category_for_provider, is_document_requirement
 from app.engine.consent_manager import CONSUMER, execute_with_persisted_authorization
-from app.engine.registry import select_dependency_provider
+from app.engine.registry import dependency_registry, select_dependency_provider
 from app.engine.validation_engine import validate
 
 # Hard ceiling on providers tried within one cascade, purely as a defensive
@@ -108,8 +108,38 @@ def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_i
     """
     tried_provider_ids: set[str] = set()
     attempt_log: list[dict] = []
-    selected = select_dependency_provider(requirement_code, integration_health())
+    health = integration_health()
+    selected = select_dependency_provider(requirement_code, health)
     result: Optional[AdapterResult] = None
+
+    # Higher-priority providers that discovery passed over because their
+    # current health excluded them (e.g. an open outage) are part of this
+    # operation's real lineage: without them, a provider selected only
+    # because the primary was down would be reported as if it were the
+    # primary. Same registry + ordering select_dependency_provider uses.
+    def rank(item: dict) -> tuple:
+        return (item.get("priority", 100), item.get("provider") or "")
+
+    ranked = sorted((item for item in dependency_registry(health) if item["requirementCode"] == requirement_code), key=rank)
+    for candidate in ranked:
+        if selected and rank(candidate) >= rank(selected):
+            break
+        if candidate.get("healthStatus") in {"AVAILABLE", "HEALTHY"}:
+            continue
+        attempt_log.append({
+            "providerId": candidate.get("providerId"), "provider": candidate.get("provider"), "isFallback": bool(attempt_log),
+            "success": False, "skipped": True, "healthStatus": candidate.get("healthStatus"), "errorCategory": "UPSTREAM_UNAVAILABLE",
+        })
+        audit_bus.append(
+            "SYSTEM", requirement_code, "Provider skipped: currently unavailable", candidate.get("provider"), "SKIPPED", consent_id,
+            payload={"appId": application_id, "requirementCode": requirement_code, "providerId": candidate.get("providerId"),
+                     "healthStatus": candidate.get("healthStatus")},
+            correlation_id=application_id,
+        )
+    if selected is None and attempt_log:
+        # Providers exist for this requirement but none is currently
+        # healthy: a transient outage (retryable), not a configuration gap.
+        return AdapterResult(None, correlation_id=correlation_id, error_category="UPSTREAM_UNAVAILABLE", success=False, retryable=True), attempt_log
 
     while selected and len(attempt_log) < MAX_CASCADE_ATTEMPTS:
         provider_id = selected.get("providerId") or selected.get("provider")
@@ -190,7 +220,7 @@ def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult], a
         # precise than inferring "was this a fallback" from the provider
         # currently ranked first, which can drift after a later recovery.
         requirement["fallbackAttempts"] = attempt_log
-        requirement["isFallback"] = attempt_log[-1]["isFallback"]
+        requirement["isFallback"] = attempt_log[-1]["isFallback"] and not attempt_log[-1].get("skipped")
     record = adapter_result.record if adapter_result else None
     if record:
         # Prefer the adapter's own schema_mappings-derived canonical view

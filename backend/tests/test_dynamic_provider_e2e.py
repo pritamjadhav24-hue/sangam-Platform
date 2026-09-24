@@ -21,6 +21,7 @@ from unittest.mock import patch
 import uvicorn
 from sqlalchemy.orm import Session
 
+from tests.catalog_fixture import restore_tables, snapshot_provider_catalog
 from app.core.demo_state import reset_demo_state
 from app.core.persistence import (
     DEPARTMENT_SANDBOX_PROVIDERS, DepartmentRow, ProviderCapabilityRow, ProviderRow,
@@ -42,8 +43,12 @@ _server = None
 _server_thread = None
 
 
+_CATALOG_SNAPSHOT: list = []
+
+
 def setUpModule():
     global _server, _server_thread
+    _CATALOG_SNAPSHOT.extend(snapshot_provider_catalog())
     spec = SANDBOXES_BY_KEY["revenue"]
     models = importlib.import_module(spec.models_module)
     seed = importlib.import_module(spec.seed_module)
@@ -72,16 +77,9 @@ def tearDownModule():
     if _server is not None:
         _server.should_exit = True
         _server_thread.join(timeout=5)
-    provider_ids = [item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-    department_ids = list({item["departmentId"] for item in DEPARTMENT_SANDBOX_PROVIDERS})
-    service_ids = [item["serviceId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-    with Session(engine) as session:
-        session.query(SchemaMappingRow).filter(SchemaMappingRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(ProviderCapabilityRow).filter(ProviderCapabilityRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(ServiceCatalogRow).filter(ServiceCatalogRow.service_id.in_(service_ids)).delete(synchronize_session=False)
-        session.query(ProviderRow).filter(ProviderRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(DepartmentRow).filter(DepartmentRow.department_id.in_(department_ids)).delete(synchronize_session=False)
-        session.commit()
+    # Only rows this module added are removed; a demo environment's own
+    # department providers and mappings survive the test run.
+    restore_tables(_CATALOG_SNAPSHOT)
 
 
 def _citizen_with_land_record():
@@ -147,6 +145,12 @@ class DynamicProviderEndToEndTest(unittest.TestCase):
         # The provider that actually served this requirement was never named
         # by this test -- only read back from the dynamic selection decision.
         self.assertEqual(dependency["provider"], selected["provider"])
+
+
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
 
 
 if __name__ == "__main__":

@@ -170,5 +170,11 @@ class ProfileAccessTests(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 403)
 
 
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
+
+
 if __name__ == "__main__":
     unittest.main()

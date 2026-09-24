@@ -147,5 +147,24 @@ class RedisJobTests(unittest.TestCase):
         self.assertEqual(len(memory.lists[queue.queue_name]), 1)
 
 
+# Some tests here clear the whole provider_jobs table to make recovery
+# assertions deterministic; put any pre-existing jobs back afterwards.
+from tests.catalog_fixture import restore_tables, snapshot_tables  # noqa: E402
+_JOB_SNAPSHOT: list = []
+
+
+def setUpModule():
+    _JOB_SNAPSHOT[:] = snapshot_tables(ProviderJobRow)
+
+
+def tearDownModule():
+    restore_tables(_JOB_SNAPSHOT)
+
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
+
+
 if __name__ == "__main__":
     unittest.main()

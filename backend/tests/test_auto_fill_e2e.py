@@ -32,9 +32,11 @@ from types import SimpleNamespace
 import uvicorn
 from sqlalchemy.orm import Session
 
+from tests.catalog_fixture import remove_test_vocabulary, seed_test_vocabulary
 from app.api.citizen_routes import AutoFillDecision, RequirementUpload, auto_fill_requirement, get_citizen_application, upload_requirement_document
 from app.core.demo_state import reset_demo_state
 from app.core.persistence import (
+    CitizenNotificationRow,
     DEPARTMENT_SANDBOX_PROVIDERS, REQUIREMENT_CATALOG, ApplicationRow, DepartmentRow, DocumentRow,
     ProviderCapabilityRow, ProviderRow, RequirementCatalogRow, SchemaMappingRow, ServiceCatalogRow,
     create_application as create_application_authoritative,
@@ -59,10 +61,14 @@ def _user(citizen_id: str) -> dict:
     return {"userId": citizen_id, "citizenId": citizen_id, "name": "Test Citizen", "role": "CITIZEN"}
 
 
+_VOCABULARY_ADDED: set[str] = set()
+_PREEXISTING: dict[str, set] = {}
+_PREVIOUS_ENV: dict[str, str | None] = {}
+
+
 def setUpModule():
     global _server, _server_thread
-    with patch.dict(os.environ, {"SANGAM_SEED_CATALOG": "true"}):
-        seed_requirement_catalog()
+    _VOCABULARY_ADDED.update(seed_test_vocabulary())
     for key in ("revenue", "food_civil_supplies"):
         spec = SANDBOXES_BY_KEY[key]
         models = importlib.import_module(spec.models_module)
@@ -81,8 +87,20 @@ def setUpModule():
         if getattr(_server, "started", False):
             break
         time.sleep(0.05)
+    _PREVIOUS_ENV["DEPARTMENT_API_BASE_URL"] = os.environ.get("DEPARTMENT_API_BASE_URL")
     os.environ["DEPARTMENT_API_BASE_URL"] = f"http://127.0.0.1:{TEST_PORT}"
 
+    # Only rows this module adds are removed afterwards: when the demo
+    # environment already registered the department sandbox providers, they
+    # (and their mappings) must survive this test module.
+    with Session(engine) as session:
+        _PREEXISTING.update(
+            providers={row.provider_id for row in session.query(ProviderRow.provider_id)},
+            departments={row.department_id for row in session.query(DepartmentRow.department_id)},
+            services={row.service_id for row in session.query(ServiceCatalogRow.service_id)},
+            mappings={row.mapping_id for row in session.query(SchemaMappingRow.mapping_id)},
+            capabilities={row.capability_id for row in session.query(ProviderCapabilityRow.capability_id)},
+        )
     with patch.dict(os.environ, {"SANGAM_SEED_DEPARTMENT_PROVIDERS": "true"}):
         seed_department_sandbox_providers()
         seed_department_sandbox_schema_mappings()
@@ -92,17 +110,25 @@ def tearDownModule():
     if _server is not None:
         _server.should_exit = True
         _server_thread.join(timeout=5)
+    remove_test_vocabulary(_VOCABULARY_ADDED)
+    if _PREVIOUS_ENV.get("DEPARTMENT_API_BASE_URL") is None:
+        os.environ.pop("DEPARTMENT_API_BASE_URL", None)
+    else:
+        os.environ["DEPARTMENT_API_BASE_URL"] = _PREVIOUS_ENV["DEPARTMENT_API_BASE_URL"]
+    if not _PREEXISTING:
+        return
+    provider_ids = [item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS if item["providerId"] not in _PREEXISTING["providers"]]
+    department_ids = list({item["departmentId"] for item in DEPARTMENT_SANDBOX_PROVIDERS} - _PREEXISTING["departments"])
+    service_ids = [item["serviceId"] for item in DEPARTMENT_SANDBOX_PROVIDERS if item["serviceId"] not in _PREEXISTING["services"]]
     with Session(engine) as session:
-        session.query(RequirementCatalogRow).filter(
-            RequirementCatalogRow.requirement_code.in_([item["code"] for item in REQUIREMENT_CATALOG])
+        session.query(SchemaMappingRow).filter(
+            SchemaMappingRow.provider_id.in_([item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]),
+            SchemaMappingRow.mapping_id.notin_(_PREEXISTING["mappings"]),
         ).delete(synchronize_session=False)
-        session.commit()
-    provider_ids = [item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-    department_ids = list({item["departmentId"] for item in DEPARTMENT_SANDBOX_PROVIDERS})
-    service_ids = [item["serviceId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-    with Session(engine) as session:
-        session.query(SchemaMappingRow).filter(SchemaMappingRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(ProviderCapabilityRow).filter(ProviderCapabilityRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
+        session.query(ProviderCapabilityRow).filter(
+            ProviderCapabilityRow.provider_id.in_([item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]),
+            ProviderCapabilityRow.capability_id.notin_(_PREEXISTING["capabilities"]),
+        ).delete(synchronize_session=False)
         session.query(ServiceCatalogRow).filter(ServiceCatalogRow.service_id.in_(service_ids)).delete(synchronize_session=False)
         session.query(ProviderRow).filter(ProviderRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
         session.query(DepartmentRow).filter(DepartmentRow.department_id.in_(department_ids)).delete(synchronize_session=False)
@@ -159,6 +185,7 @@ class AutoFillEndToEndTest(unittest.TestCase):
             return
         with Session(engine) as session:
             session.query(DocumentRow).filter(DocumentRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
+            session.query(CitizenNotificationRow).filter(CitizenNotificationRow.application_id.in_(self._created_app_ids)).delete(synchronize_session=False)
             session.query(ApplicationRow).filter(ApplicationRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
             session.commit()
 
@@ -381,6 +408,7 @@ class ApplicationSubmissionEndToEndTest(unittest.TestCase):
             return
         with Session(engine) as session:
             session.query(DocumentRow).filter(DocumentRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
+            session.query(CitizenNotificationRow).filter(CitizenNotificationRow.application_id.in_(self._created_app_ids)).delete(synchronize_session=False)
             session.query(ApplicationRow).filter(ApplicationRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
             session.commit()
 
@@ -471,6 +499,12 @@ class ApplicationSubmissionEndToEndTest(unittest.TestCase):
         auto_fill_requirement(application["appId"], "RATION_CARD", AutoFillDecision(decision="ACCEPT"), user=_user(citizen_id))
         final_review = get_citizen_application(application["appId"], user=_user(citizen_id))
         self.assertTrue(final_review["readyForSubmission"], final_review)
+
+
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
 
 
 if __name__ == "__main__":

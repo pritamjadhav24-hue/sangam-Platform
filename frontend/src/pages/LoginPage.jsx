@@ -2,7 +2,7 @@ import { useState } from 'react';
 import SangamMark from '../components/SangamMark';
 
 export default function LoginPage({ onLogin, language = 'en' }) {
-  const [citizenId, setCitizenId] = useState('CITIZEN_001'); const [password, setPassword] = useState('rahul@2026'); const [error, setError] = useState(''); const [loading, setLoading] = useState(false);
+  const [citizenId, setCitizenId] = useState('CITIZEN_001'); const [password, setPassword] = useState(''); const [error, setError] = useState(''); const [loading, setLoading] = useState(false);
   async function submit(event) { event.preventDefault(); setLoading(true); setError(''); try { await onLogin(citizenId, password); } catch (err) { setError(err.message); } finally { setLoading(false); } }
   const isMr = language === 'mr';
   return (
@@ -53,10 +53,10 @@ export default function LoginPage({ onLogin, language = 'en' }) {
         </button>
         <div className="demo-credentials">
           <b>{isMr ? 'नमुना ओळख (डेमो)' : 'Demo identities'}</b>
-          <span>{isMr ? 'नागरिक' : 'Citizen'} · <code>CITIZEN_001</code> / <code>rahul@2026</code></span>
-          <span>{isMr ? 'नागरिक' : 'Citizen'} · <code>CITIZEN_002</code> / <code>asha@2026</code></span>
-          <span>{isMr ? 'अधिकारी' : 'Officer'} · <code>OFFICER_MH_01</code> / <code>officer@2026</code></span>
-          <span>{isMr ? 'प्रशासक' : 'Admin'} · <code>ADMIN_MH_01</code> / <code>admin@2026</code></span>
+          {/* Account IDs only: passwords are set per deployment (.env) and are never shipped in the UI. */}
+          <span>{isMr ? 'नागरिक' : 'Citizen'} · <code>CITIZEN_001</code> · <code>CITIZEN_002</code></span>
+          <span>{isMr ? 'अधिकारी' : 'Officer'} · <code>OFFICER_MH_01</code></span>
+          <span>{isMr ? 'प्रशासक' : 'Admin'} · <code>ADMIN_MH_01</code></span>
         </div>
       </form>
     </main>

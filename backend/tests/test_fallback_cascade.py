@@ -17,6 +17,7 @@ from unittest.mock import patch
 from app.api.citizen_routes import ApplySchemeRequest, apply_to_scheme
 from app.core.audit_bus import audit_bus
 from app.core.persistence import (
+    CitizenNotificationRow,
     ApplicationRow, ConsentRow, DocumentRow, RequirementCatalogRow,
     Session, engine, get_application as get_application_raw, seed_requirement_catalog,
 )
@@ -84,6 +85,7 @@ class FallbackCascadeTests(unittest.TestCase):
         with Session(engine) as session:
             if self._app_ids:
                 session.query(DocumentRow).filter(DocumentRow.app_id.in_(self._app_ids)).delete(synchronize_session=False)
+                session.query(CitizenNotificationRow).filter(CitizenNotificationRow.application_id.in_(self._app_ids)).delete(synchronize_session=False)
                 session.query(ApplicationRow).filter(ApplicationRow.app_id.in_(self._app_ids)).delete(synchronize_session=False)
             if self._citizen_ids:
                 session.query(ConsentRow).filter(ConsentRow.citizen_id.in_(self._citizen_ids)).delete(synchronize_session=False)
@@ -246,6 +248,51 @@ class FallbackCascadeTests(unittest.TestCase):
         self.assertEqual(requirement["status"], "FAILED")
         self.assertEqual(len(requirement["fallbackAttempts"]), 1)
         mock_fallback.assert_not_called()
+
+    # 10. Primary excluded by health (open outage) -> lineage records it as
+    # skipped and the provider actually used is reported as a fallback.
+    def test_unavailable_primary_is_recorded_as_skipped_and_selection_is_a_fallback(self):
+        application = self._apply("CITIZEN_FB_010")
+        code = application["requirements"][0]["requirementCode"]
+        registry = [
+            {**PROVIDER_A, "requirementCode": code, "healthStatus": "UNAVAILABLE"},
+            {**PROVIDER_B, "requirementCode": code, "healthStatus": "AVAILABLE"},
+        ]
+        before = len(audit_bus.entries)
+        with patch.object(requirement_fulfillment, "dependency_registry", return_value=registry), \
+             patch.object(requirement_fulfillment, "select_dependency_provider", return_value=PROVIDER_B), \
+             patch.object(requirement_fulfillment, "request_registered_service", return_value=_success(provider_id="PROV-B")) as mock_call:
+            result = self._fulfill(application["appId"], code, "CITIZEN_FB_010")
+        requirement = requirement_fulfillment.find_requirement(result, code)
+        self.assertIn(requirement["status"], requirement_fulfillment.SUCCESS_STATUSES)
+        self.assertTrue(requirement["isFallback"])
+        self.assertEqual([a["providerId"] for a in requirement["fallbackAttempts"]], ["PROV-A", "PROV-B"])
+        self.assertTrue(requirement["fallbackAttempts"][0]["skipped"])
+        self.assertEqual(requirement["fallbackAttempts"][0]["healthStatus"], "UNAVAILABLE")
+        self.assertTrue(requirement["fallbackAttempts"][1]["isFallback"])
+        mock_call.assert_called_once()  # the unavailable primary is never called
+        self.assertIn("SKIPPED", [entry["action"] for entry in audit_bus.entries[before:]])
+
+    # 11. Every eligible provider down -> a retryable outage, not a config error.
+    def test_all_providers_unavailable_is_a_retryable_outage(self):
+        application = self._apply("CITIZEN_FB_011")
+        code = application["requirements"][0]["requirementCode"]
+        registry = [{**PROVIDER_A, "requirementCode": code, "healthStatus": "UNAVAILABLE"}]
+        with patch.object(requirement_fulfillment, "dependency_registry", return_value=registry), \
+             patch.object(requirement_fulfillment, "select_dependency_provider", return_value=None), \
+             patch.object(requirement_fulfillment, "request_registered_service") as mock_call:
+            result = self._fulfill(application["appId"], code, "CITIZEN_FB_011")
+        requirement = requirement_fulfillment.find_requirement(result, code)
+        self.assertEqual(requirement["status"], "WAITING")
+        self.assertEqual(requirement["errorCategory"], "UPSTREAM_UNAVAILABLE")
+        self.assertFalse(requirement["isFallback"])
+        mock_call.assert_not_called()
+
+
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
 
 
 if __name__ == "__main__":

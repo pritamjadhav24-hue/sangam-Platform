@@ -7,6 +7,11 @@ if not exist "%~dp0backend\venv\Scripts\python.exe" python -m venv "%~dp0backend
 set PYTHON="%~dp0backend\venv\Scripts\python.exe"
 %PYTHON% -c "import fastapi, uvicorn, rapidfuzz" >nul 2>&1 || %PYTHON% -m pip install -r "%~dp0backend\requirements.txt"
 if not exist "%~dp0frontend\node_modules" npm --prefix "%~dp0frontend" ci
+if not defined DEPARTMENT_API_PORT set DEPARTMENT_API_PORT=9101
+echo Applying database migrations
+pushd "%~dp0backend" && %PYTHON% -m alembic upgrade head & popd
+echo Starting department sandbox APIs on http://127.0.0.1:%DEPARTMENT_API_PORT%
+start "SANGAM Department APIs" cmd /k "cd /d %~dp0backend && %PYTHON% -m uvicorn app.department_api.main:app --port %DEPARTMENT_API_PORT%"
 echo Starting GovOrchestrator backend on http://127.0.0.1:%BACKEND_PORT%
 start "GovOrchestrator Backend" cmd /k "cd /d %~dp0backend && %PYTHON% -m uvicorn main:app --reload --port %BACKEND_PORT%"
 echo Starting citizen portal on http://127.0.0.1:5173

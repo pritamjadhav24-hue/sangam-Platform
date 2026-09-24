@@ -10,8 +10,14 @@
     {
       "name": "sangam-backend",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "uvicorn", "main:app", "--app-dir", "backend", "--host", "127.0.0.1", "--port", "8010", "--reload", "--reload-dir", "backend/app", "--reload-dir", "backend/main.py"],
-      "port": 8010
+      "runtimeArgs": ["-m", "uvicorn", "main:app", "--app-dir", "backend", "--host", "127.0.0.1", "--port", "8001"],
+      "port": 8001
+    },
+    {
+      "name": "sangam-department-api",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "app.department_api.main:app", "--app-dir", "backend", "--host", "127.0.0.1", "--port", "9101"],
+      "port": 9101
     }
   ]
 }

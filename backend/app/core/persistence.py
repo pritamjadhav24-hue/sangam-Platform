@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select, update as sql_update
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select, text, update as sql_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -1061,6 +1061,9 @@ def validate_production_configuration() -> None:
             or os.getenv("SANGAM_SEED_SYNTHETIC_DATA", "false").lower() in {"1", "true", "yes"}
             or os.getenv("SANGAM_SEED_DEPARTMENT_PROVIDERS", "false").lower() in {"1", "true", "yes"}):
         raise RuntimeError("Demo catalog/user seeding (including synthetic data) must be disabled in production.")
+    secret = os.getenv("JWT_SECRET", "")
+    if len(secret) < 32 or "replace" in secret.lower() or "change-me" in secret.lower():
+        raise RuntimeError("Production requires a high-entropy JWT_SECRET of at least 32 characters.")
     origins = [item.strip().lower() for item in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if item.strip()]
     if not origins or "*" in origins or any("localhost" in item or "127.0.0.1" in item for item in origins):
         raise RuntimeError("Production requires explicit non-local CORS_ALLOWED_ORIGINS.")
@@ -1703,6 +1706,39 @@ def replay_eligible_dead_letter_jobs_for_provider(provider_system: str, redis_se
     return {"provider": provider_system, "replayedJobIds": replayed, "skipped": skipped}
 
 
+DEMO_RUNTIME_TABLES = (
+    ProviderJobRow, ProviderIncidentRow, DocumentRow, CitizenNotificationRow, ConsentRow,
+    WorkflowHistoryRow, DependencyRow, EntityReviewRow, ConflictReviewRow, NotificationRow,
+    EventRow, AuditEntryRow, ApplicationRow, SessionRow, IntegrationStateRow, MockStateRow,
+)
+
+
+def reset_demo_database() -> dict:
+    """Return the platform database to its freshly-seeded demo state.
+
+    Clears only runtime/demo activity -- applications (including
+    PostgreSQL-authoritative ones) and everything hanging off them, citizen
+    notifications, consents, documents, provider jobs and incidents, events
+    and the audit ledger. Reference data is never touched: accounts,
+    citizens, schemes, requirement vocabulary, providers, capabilities,
+    services, schema mappings and departments stay exactly as seeded.
+    Department sandbox databases are separate systems and are not affected.
+
+    Only ever invoked by the admin Demo Reset endpoint, which refuses to run
+    in production mode.
+    """
+    removed = {}
+    with Session(engine) as session:
+        # persist_state() begins by row-locking applications; taking this
+        # table lock first makes a concurrent snapshot and this reset
+        # strictly serialize instead of deadlocking on the tables both touch.
+        session.execute(text("LOCK TABLE applications IN ACCESS EXCLUSIVE MODE"))
+        for model in DEMO_RUNTIME_TABLES:
+            removed[model.__tablename__] = session.execute(delete(model)).rowcount or 0
+        session.commit()
+    return removed
+
+
 def catalog_seeded() -> bool:
     with Session(engine) as session:
         return session.query(SchemeCatalogRow).count() > 0
@@ -1804,6 +1840,28 @@ def seed_requirement_catalog() -> None:
         session.commit()
 
 
+# Department-field -> canonical-field mappings of the in-process demo
+# providers, mirroring exactly what semantic_mapper.map_record produces at
+# runtime so the registry never describes a mapping that is not applied.
+IN_PROCESS_SCHEMA_MAPPINGS = [
+    {"provider": "REVENUE-DEPARTMENT", "service": "REV-INCOME-102", "field": "annual_income", "canonical": "incomeAmount", "type": "number"},
+    {"provider": "REVENUE-DEPARTMENT", "service": "REV-MAHA-101", "field": "state", "canonical": "state", "type": "string"},
+    {"provider": "REVENUE-DEPARTMENT", "service": "REV-MAHA-101", "field": "recordId", "canonical": "sourceRecordId", "type": "string"},
+    {"provider": "SOCIAL-WELFARE-DEPARTMENT", "service": "SW-CASTE-301", "field": "category", "canonical": "category", "type": "string"},
+    {"provider": "EDUCATION-DEPARTMENT", "service": "EDU-ACA-201", "field": "studentId", "canonical": "sourceRecordId", "type": "string"},
+    {"provider": "EDUCATION-DEPARTMENT", "service": "EDU-ACA-201", "field": "qualifying_marks", "canonical": "percentage", "type": "number"},
+    {"provider": "AUTHORIZED-DBT", "service": "DBT-BANK-401", "field": "accountStatus", "canonical": "bankStatus", "type": "string"},
+]
+STALE_SEEDED_SCHEMA_MAPPINGS = {
+    "REVENUE-DEPARTMENT:annual_income": "annualIncome",
+    "REVENUE-DEPARTMENT:state": "domicileState",
+    "REVENUE-DEPARTMENT:recordId": "certificateReference",
+    "SOCIAL-WELFARE-DEPARTMENT:caste": "casteCategory",
+    "EDUCATION-DEPARTMENT:studentId": "academicRecordReference",
+    "AUTHORIZED-DBT:accountStatus": "bankLinkageStatus",
+}
+
+
 def seed_schema_mappings() -> None:
     """Bootstrap department-field -> canonical-field mappings for existing providers.
 
@@ -1813,16 +1871,22 @@ def seed_schema_mappings() -> None:
     """
     if os.getenv("SANGAM_SEED_CATALOG", "false").lower() not in {"1", "true", "yes"}:
         return
-    mappings = [
-        {"provider": "REVENUE-DEPARTMENT", "service": "REV-INCOME-102", "field": "annual_income", "canonical": "annualIncome", "type": "number"},
-        {"provider": "REVENUE-DEPARTMENT", "service": "REV-MAHA-101", "field": "state", "canonical": "domicileState", "type": "string"},
-        {"provider": "REVENUE-DEPARTMENT", "service": "REV-MAHA-101", "field": "recordId", "canonical": "certificateReference", "type": "string"},
-        {"provider": "SOCIAL-WELFARE-DEPARTMENT", "service": "SW-CASTE-301", "field": "caste", "canonical": "casteCategory", "type": "string"},
-        {"provider": "EDUCATION-DEPARTMENT", "service": "EDU-ACA-201", "field": "studentId", "canonical": "academicRecordReference", "type": "string"},
-        {"provider": "AUTHORIZED-DBT", "service": "DBT-BANK-401", "field": "accountStatus", "canonical": "bankLinkageStatus", "type": "string"},
-    ]
     with Session(engine) as session:
-        for mapping in mappings:
+        # Earlier seeds described canonical names the runtime mapper
+        # (semantic_mapper.map_record) never produces. Correct only rows
+        # still holding exactly that stale seeded value -- anything an
+        # operator changed since is DB-owned and left alone.
+        for mapping_id, stale_canonical in STALE_SEEDED_SCHEMA_MAPPINGS.items():
+            row = session.get(SchemaMappingRow, mapping_id)
+            if row is None or row.canonical_field != stale_canonical:
+                continue
+            replacement = next((m for m in IN_PROCESS_SCHEMA_MAPPINGS if f"{m['provider']}:{m['field']}" == mapping_id), None)
+            if replacement is None:
+                row.active = False
+            else:
+                row.canonical_field = replacement["canonical"]
+                row.payload = replacement
+        for mapping in IN_PROCESS_SCHEMA_MAPPINGS:
             provider_id = mapping["provider"]
             if session.get(ProviderRow, provider_id) is None:
                 continue
@@ -1874,6 +1938,11 @@ def seed_platform_citizens() -> None:
 
 DEPARTMENT_SANDBOX_PROVIDERS = [
     {"departmentId": "REVENUE-SANDBOX", "departmentName": "Revenue Sandbox", "providerId": "REVENUE-SANDBOX-LAND", "providerName": "Revenue Sandbox API - Land Records", "requirementCode": "LAND_HOLDING", "serviceId": "REV-SANDBOX-LAND-001", "serviceName": "Land Record Lookup", "httpPath": "/departments/revenue/land-records/{citizenRef}", "mapping": ("survey_number", "landSurveyNumber")},
+    # Alternate (priority 20) provider for the same INCOME_PROOF capability the
+    # in-process Revenue Department (priority 10) serves: discovery selects it
+    # only when the primary is unavailable or fails -- the live,
+    # registry-driven fallback path shown in the demo.
+    {"departmentId": "REVENUE-SANDBOX", "departmentName": "Revenue Sandbox", "providerId": "REVENUE-SANDBOX-INCOME", "providerName": "Revenue Sandbox API - Income Certificates", "requirementCode": "INCOME_PROOF", "serviceId": "REV-SANDBOX-INCOME-001", "serviceName": "Income Certificate Lookup", "httpPath": "/departments/revenue/income-certificates/{citizenRef}", "priority": 20, "mappings": [("annual_income", "incomeAmount"), ("financial_year", "financialYear")]},
     {"departmentId": "EDUCATION-SANDBOX", "departmentName": "Education Sandbox", "providerId": "EDUCATION-SANDBOX-SCHOLARSHIP", "providerName": "Education Sandbox API - Scholarship Eligibility", "requirementCode": "SCHOLARSHIP_ELIGIBILITY", "serviceId": "EDU-SANDBOX-SCHOLARSHIP-001", "serviceName": "Scholarship Eligibility Lookup", "httpPath": "/departments/education/scholarship-eligibility/{citizenRef}", "mapping": ("eligible", "scholarshipEligible")},
     {"departmentId": "SOCIAL-WELFARE-SANDBOX", "departmentName": "Social Welfare Sandbox", "providerId": "SOCIAL-WELFARE-SANDBOX-ENROLLMENT", "providerName": "Social Welfare Sandbox API - Scheme Enrollment", "requirementCode": "SCHEME_ENROLLMENT_STATUS", "serviceId": "SW-SANDBOX-ENROLL-001", "serviceName": "Scheme Enrollment Lookup", "httpPath": "/departments/social-welfare/scheme-enrollments/{citizenRef}", "mapping": ("scheme_name", "welfareSchemeName")},
     {"departmentId": "AGRICULTURE-SANDBOX", "departmentName": "Agriculture Sandbox", "providerId": "AGRICULTURE-SANDBOX-FARMER", "providerName": "Agriculture Sandbox API - Farmer Registration", "requirementCode": "FARMER_REGISTRATION", "serviceId": "AGR-SANDBOX-FARMER-001", "serviceName": "Farmer Registration Lookup", "httpPath": "/departments/agriculture/farmers/{citizenRef}", "mapping": ("farmer_name", "name")},
@@ -1900,8 +1969,9 @@ def seed_department_sandbox_providers() -> None:
     """Register the 10 department sandboxes as PostgreSQL-owned providers.
 
     Additive only: distinct department/provider/service ids from the existing
-    4 in-process demo providers, no scheme currently lists these requirement
-    codes, so this cannot change existing dependency selection or workflows.
+    in-process demo providers. Most serve requirement codes no in-process
+    provider covers; REVENUE-SANDBOX-INCOME deliberately shares INCOME_PROOF
+    at a lower priority so it is only ever selected as a fallback.
     Each provider uses the new "Department Sandbox API" adapter, which always
     calls that department's REST API over HTTP (see app.department_api) --
     never the sandbox database directly.
@@ -1927,7 +1997,7 @@ def seed_department_sandbox_providers() -> None:
                 session.add(ServiceCatalogRow(service_id=entry["serviceId"], provider_id=provider_id, name=entry["serviceName"], requirement_code=entry["requirementCode"], payload={"serviceId": entry["serviceId"], "requirementCode": entry["requirementCode"], "requiredService": entry["serviceName"]}))
             capability_id = f"{provider_id}:{entry['requirementCode']}"
             if session.get(ProviderCapabilityRow, capability_id) is None:
-                session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=entry["requirementCode"], service_id=entry["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": entry["requirementCode"], "providerId": provider_id, "serviceId": entry["serviceId"]}))
+                session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=entry["requirementCode"], service_id=entry["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": entry["requirementCode"], "providerId": provider_id, "serviceId": entry["serviceId"], **({"priority": entry["priority"]} if "priority" in entry else {})}))
         session.commit()
     from app.core.redis_service import RedisService
     RedisService().delete("sangam:cache:catalog:v1")
@@ -1944,15 +2014,15 @@ def seed_department_sandbox_schema_mappings() -> None:
             provider_id = entry["providerId"]
             if session.get(ProviderRow, provider_id) is None:
                 continue
-            department_field, canonical_field = entry["mapping"]
-            mapping_id = f"{provider_id}:{department_field}"
-            if session.get(SchemaMappingRow, mapping_id) is not None:
-                continue
-            session.add(SchemaMappingRow(
-                mapping_id=mapping_id, provider_id=provider_id, service_id=entry["serviceId"],
-                department_field=department_field, canonical_field=canonical_field, data_type="string",
-                payload={"provider": provider_id, "departmentField": department_field, "canonicalField": canonical_field},
-            ))
+            for department_field, canonical_field in entry.get("mappings") or [entry["mapping"]]:
+                mapping_id = f"{provider_id}:{department_field}"
+                if session.get(SchemaMappingRow, mapping_id) is not None:
+                    continue
+                session.add(SchemaMappingRow(
+                    mapping_id=mapping_id, provider_id=provider_id, service_id=entry["serviceId"],
+                    department_field=department_field, canonical_field=canonical_field, data_type="string",
+                    payload={"provider": provider_id, "departmentField": department_field, "canonicalField": canonical_field},
+                ))
         session.commit()
 
 
@@ -2228,6 +2298,7 @@ def persist_state() -> None:
             consent_id = receipt.get("consentId") if isinstance(receipt, dict) else None
             if consent_id:
                 consent_manager.CONSENTS_BY_ID[consent_id] = receipt
+        consent_candidates = []
         for consent_id, receipt in consent_manager.CONSENTS_BY_ID.items():
             citizen_id = receipt["citizenId"]
             app = next((candidate for candidate in workflow_engine.APPLICATIONS.values() if candidate.get("consentId") == receipt.get("consentId")), None) or workflow_engine.find_active_application(citizen_id)
@@ -2236,9 +2307,18 @@ def persist_state() -> None:
             source_version = receipt.get("_source_version")
             if not isinstance(source_version, int) or isinstance(source_version, bool):
                 continue
-            row = session.execute(
-                select(ConsentRow).where(ConsentRow.consent_id == receipt["consentId"]).with_for_update()
-            ).scalar_one_or_none()
+            consent_candidates.append((receipt, citizen_id, app, source_version))
+        # One ordered SELECT ... FOR UPDATE for every row compared below,
+        # rather than a round trip per consent: the same rows are locked
+        # for the same CAS checks, in a consistent (consent_id) order.
+        consent_rows = {}
+        if consent_candidates:
+            consent_rows = {row.consent_id: row for row in session.execute(
+                select(ConsentRow).where(ConsentRow.consent_id.in_(sorted({item[0]["consentId"] for item in consent_candidates})))
+                .order_by(ConsentRow.consent_id).with_for_update()
+            ).scalars()}
+        for receipt, citizen_id, app, source_version in consent_candidates:
+            row = consent_rows.get(receipt["consentId"])
             if row is None:
                 continue
             payload = {key: value for key, value in receipt.items() if key != "_source_version"}

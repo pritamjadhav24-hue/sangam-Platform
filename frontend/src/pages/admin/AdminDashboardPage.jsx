@@ -244,8 +244,8 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
             <p className="eyebrow">Admin Action</p>
             <h2 id="admin-reset-title">Reset demonstration environment?</h2>
             <p>
-              This clears all in-memory applications, consent receipts, notifications, events, and audit history,
-              restoring clean deterministic defaults.
+              This clears all applications, documents, consent receipts, notifications, provider jobs, incidents,
+              events and audit history. Seeded accounts, citizens, schemes and providers are kept.
             </p>
             <div className="actions">
               <button className="outline" onClick={() => setResetOpen(false)}>Cancel</button>

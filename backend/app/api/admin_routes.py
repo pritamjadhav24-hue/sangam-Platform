@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections import Counter
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -22,6 +23,7 @@ from app.core.persistence import (
     _safe_job_view, ApplicationRow, DependencyRow, ProviderJobRow, EntityReviewRow,
     ConflictReviewRow, AuditEntryRow, engine, provider_incidents_summary,
     open_provider_incident_count, provider_registry_snapshot, provider_registry_detail,
+    reset_demo_database,
 )
 from app.core.redis_service import RedisService, RedisUnavailable
 from app.core.rate_limit import enforce
@@ -76,8 +78,11 @@ def simulate_conflict(body: ConflictSimulation, user: dict = Depends(require_rol
 
 @router.post("/demo/reset")
 def reset_demo(user: dict = Depends(require_roles("ADMIN"))):
+    if os.getenv("SANGAM_ENV", "development").strip().lower() in {"production", "prod"}:
+        raise HTTPException(status_code=403, detail="Demo reset is disabled in production.")
+    removed = reset_demo_database()
     reset_demo_state()
-    return {"success": True, "message": "In-memory demo state reset to deterministic defaults.", "sessionReset": True}
+    return {"success": True, "message": "Demo activity cleared; seeded reference data retained.", "sessionReset": True, "removed": removed}
 
 
 @router.get("/operations/providers")
@@ -362,6 +367,9 @@ def _requirement_lineage_steps(req: dict, fulfillment_method: str, is_fallback: 
         steps.append({"step": "Provider discovery evaluated", "detail": f"{candidate_count} eligible provider(s) considered"})
         for attempt in fallback_attempts:
             role = "FALLBACK" if attempt.get("isFallback") else "PRIMARY"
+            if attempt.get("skipped"):
+                steps.append({"step": f"{attempt.get('provider')} ({role})", "detail": f"Skipped: provider {str(attempt.get('healthStatus') or 'unavailable').lower()}"})
+                continue
             steps.append({"step": f"{attempt.get('provider')} ({role})", "detail": "Attempt started"})
             if attempt.get("success"):
                 steps.append({"step": "Retrieval succeeded", "detail": attempt.get("provider")})
@@ -385,7 +393,7 @@ def _requirement_lineage_steps(req: dict, fulfillment_method: str, is_fallback: 
         steps.append({"step": "Validation passed", "detail": "Requirement fulfilled"})
     elif status == "ACTION_REQUIRED":
         steps.append({"step": "Retries exhausted", "detail": f"{attempts} attempt(s) made"})
-        steps.append({"step": "Moved to dead-letter", "detail": req.get("errorCategory") or "Automated retrieval unavailable"})
+        steps.append({"step": "Automatic retrieval stopped", "detail": req.get("errorCategory") or "Automated retrieval unavailable"})
         steps.append({"step": "Citizen notified", "detail": "Manual upload option presented"})
     elif status == "FAILED":
         steps.append({"step": "Retrieval failed", "detail": req.get("errorCategory") or "Non-retryable error"})
@@ -456,7 +464,8 @@ def get_admin_application_detail(
                     else:
                         failed_providers = ", ".join(a.get("provider") for a in fallback_attempts[:-1])
                         successful_provider = fallback_attempts[-1].get("provider")
-                        decision_reason = f"Primary provider ({failed_providers}) failed; fallback source ({successful_provider}) was evaluated and succeeded within the same operation -- no repeat citizen action required."
+                        how = "was unavailable" if all(a.get("skipped") for a in fallback_attempts[:-1]) else "failed"
+                        decision_reason = f"Primary provider ({failed_providers}) {how}; fallback source ({successful_provider}) was evaluated and succeeded within the same operation -- no repeat citizen action required."
                 elif candidates_sorted:
                     top = candidates_sorted[0]
                     if not is_fallback:

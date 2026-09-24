@@ -19,6 +19,7 @@ import uvicorn
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from tests.catalog_fixture import restore_tables, snapshot_provider_catalog
 from app.core.persistence import (
     DEPARTMENT_SANDBOX_PROVIDERS, DepartmentRow, ProviderCapabilityRow, ProviderRow,
     SchemaMappingRow, ServiceCatalogRow, engine, seed_department_sandbox_providers,
@@ -49,8 +50,12 @@ def _reseed(dept_key: str, citizens=CITIZENS):
     return models
 
 
+_CATALOG_SNAPSHOT: list = []
+
+
 def setUpModule():
     global _server, _server_thread
+    _CATALOG_SNAPSHOT.extend(snapshot_provider_catalog())
     for dept_key in ("revenue", "transport", "agriculture", "education", "labour"):
         _reseed(dept_key)
 
@@ -74,16 +79,9 @@ def tearDownModule():
     if _server is not None:
         _server.should_exit = True
         _server_thread.join(timeout=5)
-    provider_ids = [item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-    department_ids = list({item["departmentId"] for item in DEPARTMENT_SANDBOX_PROVIDERS})
-    service_ids = [item["serviceId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-    with Session(engine) as session:
-        session.query(SchemaMappingRow).filter(SchemaMappingRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(ProviderCapabilityRow).filter(ProviderCapabilityRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(ServiceCatalogRow).filter(ServiceCatalogRow.service_id.in_(service_ids)).delete(synchronize_session=False)
-        session.query(ProviderRow).filter(ProviderRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(DepartmentRow).filter(DepartmentRow.department_id.in_(department_ids)).delete(synchronize_session=False)
-        session.commit()
+    # Only rows this module added are removed; a demo environment's own
+    # department providers and mappings survive the test run.
+    restore_tables(_CATALOG_SNAPSHOT)
 
 
 def _find_citizen_with_record(dept_key: str, model_attr: str, join_model_attr: str, join_fk: str):
@@ -220,8 +218,13 @@ class NoHardcodedRoutingTests(unittest.TestCase):
         itself is not a routing decision -- WHO serves a requirement is still
         resolved dynamically via select_dependency_provider), so requirement
         codes are checked only against the actual control-flow files."""
+        from app.engine.registry import DEPENDENCY_SERVICES
         provider_literals = [item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-        requirement_literals = [item["requirementCode"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
+        # A sandbox provider may be an alternate for a requirement the
+        # original in-process catalog already served (INCOME_PROOF); those
+        # pre-existing codes are not new department routing.
+        pre_existing_codes = {item["requirementCode"] for item in DEPENDENCY_SERVICES}
+        requirement_literals = [item["requirementCode"] for item in DEPARTMENT_SANDBOX_PROVIDERS if item["requirementCode"] not in pre_existing_codes]
         control_flow_files = [
             BACKEND_ROOT / "app" / "engine" / "dependency_orchestrator.py",
             BACKEND_ROOT / "app" / "engine" / "workflow_engine.py",

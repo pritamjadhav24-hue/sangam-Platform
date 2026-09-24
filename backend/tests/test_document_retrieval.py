@@ -15,6 +15,7 @@ from unittest.mock import patch
 import uvicorn
 from sqlalchemy.orm import Session
 
+from tests.catalog_fixture import restore_tables, snapshot_provider_catalog
 from app.core.demo_state import reset_demo_state
 from app.core.persistence import (
     DEPARTMENT_SANDBOX_PROVIDERS, DepartmentRow, DocumentRow, ProviderCapabilityRow, ProviderRow,
@@ -39,8 +40,12 @@ _server = None
 _server_thread = None
 
 
+_CATALOG_SNAPSHOT: list = []
+
+
 def setUpModule():
     global _server, _server_thread
+    _CATALOG_SNAPSHOT.extend(snapshot_provider_catalog())
     for dept_key in ("municipal_health", "revenue"):
         spec = SANDBOXES_BY_KEY[dept_key]
         models = importlib.import_module(spec.models_module)
@@ -71,19 +76,13 @@ def tearDownModule():
     if _server is not None:
         _server.should_exit = True
         _server_thread.join(timeout=5)
-    from app.core.persistence import REQUIREMENT_CATALOG
-    provider_ids = [item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-    department_ids = list({item["departmentId"] for item in DEPARTMENT_SANDBOX_PROVIDERS})
-    service_ids = [item["serviceId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
     with Session(engine) as session:
         session.query(DocumentRow).filter(DocumentRow.app_id.like("PHASE4-%")).delete(synchronize_session=False)
-        session.query(SchemaMappingRow).filter(SchemaMappingRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(ProviderCapabilityRow).filter(ProviderCapabilityRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(ServiceCatalogRow).filter(ServiceCatalogRow.service_id.in_(service_ids)).delete(synchronize_session=False)
-        session.query(ProviderRow).filter(ProviderRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-        session.query(DepartmentRow).filter(DepartmentRow.department_id.in_(department_ids)).delete(synchronize_session=False)
-        session.query(RequirementCatalogRow).filter(RequirementCatalogRow.requirement_code.in_([i["code"] for i in REQUIREMENT_CATALOG])).delete(synchronize_session=False)
         session.commit()
+    # Put the provider registry and vocabulary back exactly as they were:
+    # only rows this module added are removed, so a demo environment's own
+    # department providers and vocabulary survive the test run.
+    restore_tables(_CATALOG_SNAPSHOT)
 
 
 def _app(app_id, citizen_id, requirement_code):
@@ -270,6 +269,12 @@ class NoDirectDepartmentAccessAndNoHardcodedRoutingTests(unittest.TestCase):
         ]
         offenders = [literal for literal in forbidden_literals if literal in source]
         self.assertEqual(offenders, [], f"document retrieval must stay requirement/capability-driven, not department-specific: {offenders}")
+
+
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
 
 
 if __name__ == "__main__":

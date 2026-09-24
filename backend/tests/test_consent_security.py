@@ -123,5 +123,11 @@ class ConsentSecurityTests(unittest.TestCase):
         self.assertEqual(consent_manager.CONSENTS_BY_ID[receipt["consentId"]]["consentId"], receipt["consentId"])
 
 
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
+
+
 if __name__ == "__main__":
     unittest.main()

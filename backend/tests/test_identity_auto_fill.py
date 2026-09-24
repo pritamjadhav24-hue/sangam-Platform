@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 from sqlalchemy.orm import Session
 
+from tests.catalog_fixture import remove_test_vocabulary, seed_test_vocabulary
 from app.api.citizen_routes import AutoFillDecision, auto_fill_requirement, get_citizen_application, submit_citizen_application
 from app.core.persistence import (
     ApplicationRow, CitizenNotificationRow, CitizenRow, DocumentRow, RequirementCatalogRow, REQUIREMENT_CATALOG,
@@ -62,11 +63,13 @@ def _real_citizen_id() -> str:
         return row.citizen_id
 
 
+_VOCABULARY_ADDED: set[str] = set()
+
+
 def setUpModule():
     with patch.dict(os.environ, {"SANGAM_SEED_CATALOG": "true"}):
         seed_catalog()
-    with patch.dict(os.environ, {"SANGAM_SEED_CATALOG": "true"}):
-        seed_requirement_catalog()
+    _VOCABULARY_ADDED.update(seed_test_vocabulary())
     # Defensive cleanup: this module's real citizens (offsets 0-14) are
     # shared fixtures across separate full-suite runs -- an interrupted
     # earlier run can leave a leftover application behind.
@@ -80,11 +83,7 @@ def setUpModule():
 
 
 def tearDownModule():
-    with Session(engine) as session:
-        session.query(RequirementCatalogRow).filter(
-            RequirementCatalogRow.requirement_code.in_([item["code"] for item in REQUIREMENT_CATALOG])
-        ).delete(synchronize_session=False)
-        session.commit()
+    remove_test_vocabulary(_VOCABULARY_ADDED)
 
 
 class IdentityProviderDiscoveryTests(unittest.TestCase):
@@ -208,6 +207,12 @@ class NoHardcodedIdentityProviderTests(unittest.TestCase):
         source = (BACKEND_ROOT / "app" / "engine" / "requirement_fulfillment.py").read_text(encoding="utf-8")
         for literal in ("State Resident Registry", "identity_verify", "SRR-IDENTITY-001"):
             self.assertNotIn(literal, source)
+
+
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
 
 
 if __name__ == "__main__":

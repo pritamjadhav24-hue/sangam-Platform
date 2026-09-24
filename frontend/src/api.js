@@ -1,15 +1,36 @@
-const BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8001/api';
+// Explicit VITE_API_BASE_URL wins. Otherwise the dev server talks to the
+// local backend, and a production build uses the same origin it is served
+// from (the bundled nginx config proxies /api to the backend).
+const BASE = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://127.0.0.1:8001/api' : '/api');
+const GENERIC_ERROR = 'The service could not complete this request.';
 let sessionToken = null;
 let onUnauthorized = () => {};
 export const setSessionToken = token => { sessionToken = token; };
 export const setAuthFailureHandler = handler => { onUnauthorized = handler || (() => {}); };
+
+// FastAPI error bodies carry `detail` as a string, an object with a
+// `message`, or a validation-error array; a proxy error may not be JSON at
+// all. Always surface a readable message and keep the structured detail.
+export function errorMessage(detail, fallback = GENERIC_ERROR) {
+  if (typeof detail === 'string' && detail) return detail;
+  if (detail && typeof detail === 'object' && !Array.isArray(detail) && typeof detail.message === 'string') return detail.message;
+  if (detail && Array.isArray(detail.reasons) && detail.reasons.every(reason => typeof reason === 'string') && detail.reasons.length) return detail.reasons.join(' ');
+  if (Array.isArray(detail) && detail.length) return 'Some of the information provided is not valid.';
+  return fallback;
+}
+
 async function request(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
   const res = await fetch(`${BASE}${path}`, { ...options, headers });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
   if (res.status === 401) { sessionToken = null; onUnauthorized(); }
-  if (!res.ok) throw new Error(data.detail || 'The service could not complete this request.');
+  if (!res.ok) {
+    const error = new Error(errorMessage(data.detail));
+    error.status = res.status;
+    error.detail = data.detail;
+    throw error;
+  }
   return data;
 }
 export const api = {
@@ -36,7 +57,7 @@ export const api = {
     const res = await fetch(`${BASE}/citizen/applications/${encodeURIComponent(applicationId)}/requirements/${encodeURIComponent(requirementCode)}/document/download`, { headers });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.detail || 'The document could not be downloaded.');
+      throw new Error(errorMessage(data.detail, 'The document could not be downloaded.'));
     }
     const blob = await res.blob();
     const match = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '');

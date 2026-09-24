@@ -14,19 +14,21 @@ from app.core.persistence import (
     seed_requirement_catalog, seed_schema_mappings,
 )
 from app.seeds.synthetic_identity_pool import generate_citizen_pool
+from tests.catalog_fixture import restore_tables, snapshot_tables
 
 
 class DatabaseFoundationTests(unittest.TestCase):
+    """The seeding tests need these reference tables empty, but they share the
+    development database with the running demo -- so the original rows are
+    snapshotted first and restored exactly afterwards."""
+
     def setUp(self):
         initialize()
-
-    def tearDown(self):
+        self._snapshot = snapshot_tables(RequirementCatalogRow, CitizenRow, SchemaMappingRow)
+        self.addCleanup(restore_tables, self._snapshot)
         with Session(engine) as session:
-            session.execute(RequirementCatalogRow.__table__.delete().where(
-                RequirementCatalogRow.requirement_code.in_([item["code"] for item in REQUIREMENT_CATALOG])
-            ))
-            session.execute(CitizenRow.__table__.delete().where(CitizenRow.citizen_id.like("SYN-CIT-%")))
-            session.execute(SchemaMappingRow.__table__.delete().where(SchemaMappingRow.mapping_id.like("%:%")))
+            for model in (RequirementCatalogRow, CitizenRow, SchemaMappingRow):
+                session.execute(model.__table__.delete())
             session.commit()
 
     def test_new_tables_exist(self):

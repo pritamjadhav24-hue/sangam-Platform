@@ -62,11 +62,12 @@ class DynamicProviderDiscoveryTests(unittest.TestCase):
         eligibility filtering is generic, not special-cased per provider."""
         from unittest.mock import patch as _patch
         from app.core.persistence import (
-            DEPARTMENT_SANDBOX_PROVIDERS, DepartmentRow, ProviderCapabilityRow, ProviderRow,
-            SchemaMappingRow, ServiceCatalogRow, Session, engine, seed_department_sandbox_providers,
+            DEPARTMENT_SANDBOX_PROVIDERS, ProviderCapabilityRow, Session, engine, seed_department_sandbox_providers,
         )
         from app.engine.adapters import request_registered_service
+        from tests.catalog_fixture import restore_tables, snapshot_provider_catalog
         entry = next(item for item in DEPARTMENT_SANDBOX_PROVIDERS if item["providerId"] == "REVENUE-SANDBOX-LAND")
+        snapshot = snapshot_provider_catalog()
         with _patch.dict("os.environ", {"SANGAM_SEED_DEPARTMENT_PROVIDERS": "true"}):
             seed_department_sandbox_providers()
         try:
@@ -78,16 +79,9 @@ class DynamicProviderDiscoveryTests(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertEqual(result.error_category, "CONFIGURATION_ERROR")
         finally:
-            provider_ids = [item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-            department_ids = list({item["departmentId"] for item in DEPARTMENT_SANDBOX_PROVIDERS})
-            service_ids = [item["serviceId"] for item in DEPARTMENT_SANDBOX_PROVIDERS]
-            with Session(engine) as session:
-                session.query(SchemaMappingRow).filter(SchemaMappingRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-                session.query(ProviderCapabilityRow).filter(ProviderCapabilityRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-                session.query(ServiceCatalogRow).filter(ServiceCatalogRow.service_id.in_(service_ids)).delete(synchronize_session=False)
-                session.query(ProviderRow).filter(ProviderRow.provider_id.in_(provider_ids)).delete(synchronize_session=False)
-                session.query(DepartmentRow).filter(DepartmentRow.department_id.in_(department_ids)).delete(synchronize_session=False)
-                session.commit()
+            # Back to exactly the prior registry: rows this test added are
+            # removed and the capability it disabled is re-enabled.
+            restore_tables(snapshot)
 
     def test_no_hardcoded_department_names_inside_selection_functions(self):
         """Discovery functions must only branch on requirement/capability data.

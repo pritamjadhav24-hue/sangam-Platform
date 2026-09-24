@@ -1,169 +1,269 @@
-# SANGAM / GovOrchestrator
+# SANGAM — Connecting Government Services, Seamlessly
 
-SANGAM is a local prototype for purpose-bound government service orchestration. It includes JWT authentication, PostgreSQL persistence, workflow orchestration, dependency handling, schema mapping, entity/conflict review, notifications, and audit correlation.
+**SANGAM** (internal/backend name **GovOrchestrator**) is a federated interoperability and orchestration layer for government digital services, built for **Smart India Hackathon 2026, Problem Statement 26129 — "System Integration and Interoperability Among Government Digital Platforms"**.
 
-The production-upgrade foundation adds PostgreSQL-backed departments, providers, services, schemes, and scheme requirements. `GET /api/catalog` exposes the configured catalog. Demo users and initial catalog rows are isolated in the development seed modules and are inserted only when the corresponding database tables are empty and seeding is enabled (`SANGAM_SEED_CATALOG=true`).
+SANGAM does **not** replace existing department systems and never reads their databases. It sits between citizen-facing portals and independent department systems, discovers which system can satisfy each requirement of a service, fetches verified data through reusable adapters (with the citizen's consent), maps it into one canonical representation, validates it and tracks the whole application — with a full audit trail.
 
-Integrations use a provider adapter contract with health checks, discovery, submission, status, retrieval, normalization, bounded retries, error categories, correlation IDs, and idempotency keys. REST, SOAP-ready, file/CSV-ready, and webhook-ready implementations can share this contract; the current adapters are sandbox/mock implementations only.
+> **Synthetic-data disclaimer.** Every department system, provider, citizen and document in this repository is **synthetic sandbox data** built for the prototype. No live Maharashtra/Government of India system is connected, and no real personal data is used.
 
-Redis is an explicit, non-authoritative platform dependency. When enabled, it is used only for short-lived catalog metadata caching, rate/coordination primitives, and the generic job queue. PostgreSQL remains authoritative for applications, requirements, dependencies, workflow state, audit, events, notifications, providers, and capabilities. Set `REDIS_ENABLED=false` for local tests or a no-Redis development run; set `REDIS_ENABLED=true` with a valid `REDIS_URL` when Redis is required. An enabled but unavailable Redis instance fails readiness rather than silently degrading.
+---
 
-The worker is started by Compose as a separate process and consumes generic jobs containing job type, correlation ID, application/dependency IDs, attempt, timestamps, status, and a safe payload. The current application path remains synchronous by default so the existing golden path is preserved; provider operations can be moved behind the same queue as handlers are introduced. No credentials or citizen payloads are cached in Redis, and Redis is not exposed on a host port.
+## 1. Architecture
 
-Set `ASYNC_PROVIDER_JOBS=true` to route provider dependency retrieval through the durable PostgreSQL-backed job record and Redis transport. The worker claims jobs atomically in PostgreSQL, invokes the configured adapter factory, and lets the existing dependency engine perform the canonical workflow transition and event/audit/notification side effects. `ASYNC_PROVIDER_JOBS=false` retains synchronous compatibility for local tests.
-
-Administrators can inspect safe operational views through `/api/admin/operations/providers`, `/api/admin/operations/worker`, `/api/admin/operations/jobs/summary`, `/api/admin/operations/jobs/recent`, `/api/admin/operations/jobs/dead-letter`, and `/api/admin/operations/jobs/{job_id}`. Dead-letter replay is available at `/api/admin/operations/jobs/{job_id}/replay`; it requires Redis and rolls back the PostgreSQL replay transaction if Redis cannot accept the job. Payloads are intentionally omitted from operational responses.
-
-Provider metadata and capabilities are stored in PostgreSQL. Sensitive runtime values are referenced through environment variables such as `PROVIDER_<ID>_BASE_URL`, `PROVIDER_<ID>_CLIENT_ID`, and `PROVIDER_<ID>_CLIENT_SECRET`. Catalog APIs expose only whether a referenced value is configured, never the value itself. No real government credentials or live government API integrations are included.
-
-To onboard a provider, create its department/provider records, assign a `provider_capabilities` row pointing to the service and requirement code, set the adapter type/protocol and non-secret retry metadata, configure secret references in the deployment environment, then enable the provider. The dependency engine and requirement analyzer discover the capability from PostgreSQL; no provider-specific branch is required. Sandbox implementations use configuration-only handler names and the same adapter factory used by future real integrations.
-
-## Run locally with Docker Compose
-
-Prerequisites:
-
-- Docker Desktop with Compose support
-
-Configure local secrets without committing them:
-
-```text
-copy .env.example .env
+```
+Citizen portal (React)          Officer desk            Admin console
+        │                            │                        │
+        └──────────────┬─────────────┴────────────────────────┘
+                       ▼
+             SANGAM API  (FastAPI, JWT + role guards)
+                       │
+     ┌─────────────────┼───────────────────────────────────────────┐
+     │  Scheme catalogue → requirement vocabulary → capability     │
+     │  Provider registry (PostgreSQL) → health + priority → select│
+     │  Consent (per requirement, versioned) → policy check        │
+     │  Reusable adapter (REST / SOAP-wrapper / CSV / Dept. API)   │
+     └─────────────────┼───────────────────────────────────────────┘
+                       ▼  HTTP only
+      Independent department REST APIs (app.department_api)
+                       │
+      Independent department databases (one per department)
+                       │
+     response → adapter normalisation → schema mapping (PostgreSQL)
+              → canonical record → validation / entity resolution
+              → authoritative application state (PostgreSQL)
+              → citizen notification + audit ledger + Admin lineage
 ```
 
-Edit `.env` and replace the placeholder PostgreSQL password, JWT secret, and demo bootstrap passwords. The Compose backend connects to the PostgreSQL service as `postgres`, not to a developer-installed database on `localhost`.
+Key rules the implementation enforces:
 
-For Compose, use `REDIS_URL=redis://redis:6379/0` (or leave `REDIS_URL` unset so the Compose default is used). The `localhost` value in `.env.example` is for a backend running directly on the host.
+- **PostgreSQL is authoritative** for applications, requirements, consents, documents, provider jobs, incidents, notifications and the provider/capability registry. Redis is optional and non-authoritative (queue, cache, rate limits).
+- **Provider selection is data-driven**: requirement code → enabled capabilities → provider health → priority. No requirement → department mapping is hard-coded in the engine.
+- **Department systems stay independent**: SANGAM only reaches them over HTTP through the adapter layer; each department sandbox has its own database.
+- **Citizens never see internals**: provider, department, adapter, API and fallback details are stripped from every citizen response.
 
-Production defaults do not seed demo users or catalog data. For a development/demo environment, explicitly set `SANGAM_SEED_CATALOG=true` and `SANGAM_SEED_DEMO_USERS=true` in `.env`.
+## 2. Key features
 
-Start the complete local stack:
+**Citizen portal** (English/मराठी)
+- Dashboard, scheme catalogue (10 schemes), scheme detail, dynamic application form generated from the scheme's requirements.
+- Per-requirement **Auto-Fill** with a per-requirement consent dialog (Accept/Reject); requirements are fulfilled independently and concurrently — one failure never blocks another.
+- Per-requirement **manual upload** for document/certificate requirements.
+- Review → submit (readiness enforced server-side; submitted applications are immutable), tracking, notifications, verified document view/download.
+- Demo citizen switcher (persona-diverse synthetic citizens), enabled only outside production.
 
-```text
-docker compose up --build
+**Orchestration engine**
+- Dynamic provider discovery, in-request **fallback cascade** to the next eligible provider, retry classification, action-required hand-off to manual upload.
+- Provider **incidents** (one per provider outage, not per citizen), provider jobs with dead-letter handling and **automatic recovery replay** of eligible dead-letter jobs when a provider recovers (async job mode).
+- Canonical schema mapping (PostgreSQL `schema_mappings` for department APIs, deterministic canonical rules for the original providers), validation, entity resolution with officer review for ambiguous matches, local metadata-only mapping suggestions with human review.
+- Idempotency keys, optimistic concurrency (`applications.version`), row locking, hash-chained audit ledger.
+
+**Officer desk** — review queue (entity/conflict/mapping reviews), decisions with mandatory remarks, notifications.
+
+**Admin console** — Dashboard, Applications, Application Detail (execution lineage incl. fallback), Providers, Provider Detail, Capability Matrix, Analytics/Reports, Schemes/Requirements, Alerts/Exceptions, Audit Lineage, Profile/Access, controlled provider-outage simulation and Demo Reset.
+
+## 3. Technology stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React + Vite, plain CSS, Vitest + Testing Library; served by nginx in containers |
+| Backend | Python, FastAPI, SQLAlchemy 2, Alembic, psycopg 3, RapidFuzz |
+| Data | PostgreSQL (platform, authoritative); SQLite per department sandbox (or PostgreSQL via `SANDBOX_DB_URL_<DEPT>`) |
+| Queue/cache | Redis (optional; required only for async provider jobs) |
+| Deployment | Docker Compose (postgres, redis, migrate, department-api, backend, worker, frontend) |
+
+## 4. Repository structure
+
+```
+backend/
+  main.py                    SANGAM API entry point (startup: migration check, seeding, hydration)
+  alembic/                   PostgreSQL migrations (head: 0016_provider_incidents)
+  app/api/                   auth, citizen, officer, admin, notification, catalog routes
+  app/core/                  persistence (models, seeds, reset), auth, audit bus, admin insights, Redis, jobs
+  app/engine/                registry, adapters, requirement fulfillment, retry policy, consent,
+                             schema/semantic mapping, validation, entity resolution, workflow
+  app/department_api/        independent department REST APIs (separate service)
+  app/sandbox/               per-department sandbox models + deterministic synthetic seeds
+  app/mocks/                 original in-process demo providers (Revenue, Education, Social Welfare, DBT, Identity)
+  app/seeds/                 demo accounts + synthetic citizen identity pool
+  app/worker.py              async provider-job worker
+  tests/                     unittest suite (runs against a PostgreSQL database)
+frontend/
+  src/api.js                 single API client (all backend contracts)
+  src/pages/, src/pages/admin/, src/components/
+  nginx.conf, Dockerfile     production image (proxies /api to the backend)
+docker-compose.yml, .env.example
 ```
 
-Open:
+## 5. Configuration (environment variables)
 
-- Frontend: http://localhost:5173
-- Backend health: http://localhost:8001/
+Two example files exist:
 
-Stop the stack normally with:
+- **`.env.example`** (repository root) — Docker Compose.
+- **`backend/.env.example`** — running the backend directly on a host. The backend loads `backend/.env` automatically; real environment variables always win.
 
-```text
-docker compose down
-```
+| Variable | Purpose |
+|---|---|
+| `SANGAM_ENV` | `development` (demo profile) or `production` (refuses demo seeding, sandbox providers, local CORS, weak `JWT_SECRET`; hides `/docs`; disables Demo Reset) |
+| `DATABASE_URL` | PostgreSQL URL (`postgresql+psycopg://…`); Compose builds it from `POSTGRES_*` |
+| `JWT_SECRET`, `JWT_EXPIRES_SECONDS` | Token signing secret (≥32 random chars) and lifetime |
+| `CORS_ALLOWED_ORIGINS`, `CORS_ALLOW_CREDENTIALS` | Cross-origin callers (the Vite dev server). The Compose frontend is same-origin |
+| `VITE_API_BASE_URL` | Frontend build-time API URL. Empty → production build calls same-origin `/api` |
+| `SANGAM_SEED_CATALOG`, `SANGAM_SEED_DEMO_USERS`, `SANGAM_SEED_SYNTHETIC_DATA`, `SANGAM_SEED_DEPARTMENT_PROVIDERS` | Idempotent demo seeding (schemes/vocabulary/in-process providers, accounts, synthetic citizens, department sandbox providers) |
+| `SANGAM_*_PASSWORD`, `SANGAM_DEMO_CITIZEN_PASSWORD` | Bootstrap passwords for demo accounts (hashed with scrypt on first start) |
+| `SANGAM_ALLOW_DEMO_CITIZEN_SWITCH` | Enables the demo citizen switcher (never in production) |
+| `DEPARTMENT_API_BASE_URL` | Base URL of the department API service used by the Department Sandbox API adapter |
+| `DEPARTMENT_SANDBOX_AUTO_SEED` | Department API creates + seeds its sandbox databases on first start |
+| `DEPARTMENT_API_KEY_TRANSPORT`, `PROVIDER_TRANSPORT_SANDBOX_*_API_KEY` | API key for the Transport sandbox providers (API-key auth demo). Must be set, otherwise those providers report `MISCONFIGURED` and are never selected |
+| `REDIS_ENABLED`, `REDIS_URL`, `ASYNC_PROVIDER_JOBS` | Redis + async provider jobs (worker). Off on a plain host setup |
+| `RATE_LIMIT_*` | Login / application / consent / replay rate limits |
 
-PostgreSQL data is stored in the named volume `sangam-postgres-data`, so normal shutdown does not remove applications, workflow history, events, notifications, or audit data. The SANGAM admin Demo Reset clears deterministic application/demo state while retaining the database volume. Removing the volume is a separate destructive operation and is not required for normal resets.
+Never commit a real `.env`; both are git-ignored.
 
-The PostgreSQL container is available only on the Compose network; it is not exposed as a public host port. The backend is exposed on host port `BACKEND_PORT` (8001 by default) and the frontend on 5173. Set `VITE_API_BASE_URL` when the frontend must reach a backend at another URL.
+## 6. Local setup (without Docker)
 
-## Existing local scripts
+Prerequisites: Python 3.9+ (3.12 in containers), Node.js 20+, PostgreSQL 14+.
 
-Without containers, the existing `run_platform.bat` and `run_platform.sh` scripts start the local backend on `BACKEND_PORT` (8001 by default) and configure Vite to use the matching API URL. Override `BACKEND_PORT` and `VITE_API_BASE_URL` through the environment when needed. The local backend still requires a PostgreSQL `DATABASE_URL` and JWT/bootstrap environment configuration.
+```bash
+# 1. Database
+createdb sangam_db
+cp backend/.env.example backend/.env        # then edit DATABASE_URL, JWT_SECRET and the passwords
 
-## Validation
-
-Database migrations are managed with Alembic:
-
-```text
+# 2. Backend dependencies + migrations
 cd backend
+pip install -r requirements.txt
 alembic upgrade head
-alembic downgrade base
-alembic upgrade head
-```
 
-Backend tests use the existing Python `unittest` suite:
+# 3. Department sandbox APIs (separate service; creates and seeds its own databases)
+python -m uvicorn app.department_api.main:app --port 9101
 
-```text
-cd backend
-python -m unittest discover -s tests -v
-```
+# 4. SANGAM backend (new terminal, from backend/) — seeds demo data on first start
+python -m uvicorn main:app --port 8001
 
-Frontend production build:
-
-```text
+# 5. Frontend (new terminal)
 cd frontend
-npm run build
+npm ci
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-Do not place real passwords, JWT secrets, database URLs containing credentials, or access tokens in source control or documentation.
+Open http://127.0.0.1:5173. `run_platform.bat` / `run_platform.sh` perform steps 2–5 in one go. Department sandboxes can also be managed by hand: `python -m app.sandbox.manage create-all | seed-all | reset-all | status`.
 
-## Deployment readiness
+### Migrations
 
-### Configuration and startup order
+```bash
+cd backend
+alembic upgrade head      # apply
+alembic current           # show revision
+```
 
-Required deployment settings are `DATABASE_URL`, `JWT_SECRET`, `CORS_ALLOWED_ORIGINS`, `REDIS_URL` when Redis is enabled, and `SANGAM_ENV`. `JWT_SECRET` must be a high-entropy deployment secret; placeholders in the example files are not valid production values. `ASYNC_PROVIDER_JOBS`, rate-limit settings, and worker identity are optional operational settings. Provider endpoints and credentials are configured by authorized deployment owners through PostgreSQL metadata and environment secret references; no live government credentials or contracts are included here.
+The backend refuses to start unless the database is exactly at the expected head revision.
 
-For Compose, the startup order is PostgreSQL and Redis health, backend migration-state/configuration validation, worker heartbeat, then frontend. The backend intentionally refuses to start when PostgreSQL is unavailable, Alembic is not at `head`, or production-mode configuration contains demo/local defaults. The worker exits if PostgreSQL or Redis is unavailable and its healthcheck requires a fresh PostgreSQL-backed heartbeat.
+### Seed / demo data
 
-Production deployment should use an explicit non-local origin and mode:
+With the seed flags enabled, the backend seeds on every start (each step only inserts what is missing):
 
-```text
-copy .env.example .env
-# Set SANGAM_ENV=production, replace every placeholder, and provide authorized provider references.
-docker compose up -d postgres redis
-docker compose run --rm backend alembic upgrade head
-docker compose up -d backend worker frontend
+- 10 schemes and their 24 scheme requirements; 21-code requirement vocabulary.
+- 5 original in-process providers (Revenue, Social Welfare, Education, Authorized DBT, State Resident Registry) and 16 department sandbox providers across 10 departments, with capabilities and schema mappings.
+- 60 synthetic citizens; demo accounts (below).
+
+The department API seeds each department database deterministically (fixed RNG), so the same citizen always has the same records.
+
+### Resetting the demo
+
+Admin → Dashboard → **Reset Demo** clears all runtime activity — applications, documents, consents, notifications, provider jobs, incidents, events and the audit ledger — while keeping accounts, citizens, schemes, vocabulary, providers, capabilities and mappings. It is refused in production mode.
+
+## 7. Production / container deployment
+
+```bash
+cp .env.example .env      # replace every "replace-…" value
+docker compose up -d --build
 docker compose ps
 ```
 
-The frontend API URL is a build-time value (`VITE_API_BASE_URL`). Set it to the externally reachable backend API before building the frontend image. Do not put JWTs, provider credentials, or database URLs in frontend variables.
+Start order is enforced by health checks: PostgreSQL + Redis → `migrate` (runs `alembic upgrade head` once) → department API (auto-seeds sandboxes) → backend + worker → frontend.
 
-### Health, restart, and recovery
+- Frontend: `http://<host>:${FRONTEND_PORT:-5173}` (nginx serves the SPA and proxies `/api` and `/health` to the backend, so no CORS is needed).
+- Backend (diagnostics): `http://<host>:${BACKEND_PORT:-8001}`.
+- PostgreSQL and Redis are only on the internal network. Data persists in the `sangam-postgres-data` and `sangam-sandbox-data` volumes.
+- Put TLS termination (a reverse proxy or load balancer) in front of the frontend port for any public deployment; the containers speak plain HTTP.
 
-- `/health/live` reports process liveness only.
-- `/health/ready` checks PostgreSQL migration state, Redis when enabled, and worker availability when Redis jobs are enabled.
-- The worker healthcheck verifies PostgreSQL, Redis, and a fresh heartbeat.
-- PostgreSQL is authoritative. Redis queues/cache/locks can be rebuilt from PostgreSQL state.
-- Restarting the worker reclaims abandoned `RUNNING` provider jobs from PostgreSQL.
-- If Redis restarts while PostgreSQL remains available, queued transport messages are rebuilt from durable provider-job state by worker recovery. A disabled/unavailable Redis instance makes async job operations unavailable rather than falsely successful.
+The repository targets no specific cloud. Any host that runs Docker Compose works; for a managed platform, run the same images with the same environment variables.
 
-Useful checks:
+`SANGAM_ENV=production` is intended only for a deployment with real, authorized `PRODUCTION` providers — it deliberately refuses to start with the sandbox providers, demo seeding or demo accounts. A hosted **demo** therefore runs with `SANGAM_ENV=development` and strong secrets.
 
-```text
-curl http://localhost:8001/health/live
-curl http://localhost:8001/health/ready
-docker compose logs --no-color backend worker postgres redis frontend
+### Health checks
+
+| Endpoint | Meaning |
+|---|---|
+| `GET /health/live` | Backend process is alive |
+| `GET /health/ready` | PostgreSQL reachable and at migration head; Redis and a fresh worker heartbeat when Redis is enabled |
+| `GET /` (department API) `GET /health` | Department API alive |
+
+Health responses contain status only — no configuration values or secrets.
+
+### Backup
+
+PostgreSQL is the only state that must be backed up (`pg_dump --format=custom`). Redis is rebuildable; department sandboxes are reproducible from their deterministic seeds.
+
+## 8. Demo accounts and roles
+
+| Account | Role | Notes |
+|---|---|---|
+| `CITIZEN_001` (Rahul Kumar) | Citizen | Original demo citizen |
+| `CITIZEN_002` | Citizen | |
+| `SYN-CIT-00001` … (10 personas) | Citizen | Reachable through the demo citizen switcher on the login page |
+| `OFFICER_MH_01` | Officer | Review queue |
+| `ADMIN_MH_01` | Admin | Admin console |
+
+Passwords are whatever you set in `.env` (`SANGAM_*_PASSWORD`, `SANGAM_DEMO_CITIZEN_PASSWORD`). Sessions are JWTs kept in memory only, so a browser refresh requires signing in again (Admin returns to the page it was on, per tab).
+
+## 9. Main demo scenario (citizen)
+
+1. Sign in as a citizen → Dashboard → **Schemes** → *Post-Matric Higher Education Scholarship* → **Apply**.
+2. The form lists the scheme's requirements. For each one, click **Auto-Fill** → accept the consent dialog. Requirements resolve independently (in parallel if clicked together).
+3. Use **Upload manually** for any document the citizen prefers to provide themselves.
+4. **Review** → **Submit** (only enabled once every mandatory requirement is satisfied) → Tracking and Notifications update.
+5. Officer: sign in as `OFFICER_MH_01` to see the review queue. Admin: open the application in **Applications** to see the full lineage.
+
+## 10. Failure / fallback scenario
+
+`INCOME_PROOF` has two registered providers for the same capability:
+
+| Priority | Provider | Path |
+|---|---|---|
+| 10 (primary) | Revenue Department | in-process demo provider |
+| 20 (alternate) | Revenue Sandbox API – Income Certificates | HTTP → department API → Revenue sandbox database |
+
+1. Admin → **Providers** → simulate **Revenue Department** unavailable. An incident opens (Alerts).
+2. Sign in as a synthetic citizen that holds an issued income certificate in the Revenue sandbox (e.g. **SYN-CIT-00002 Neha Kale**, SYN-CIT-00003, -00004, -00005, -00012 or -00028) and Auto-Fill **Income proof**.
+3. Discovery skips the unavailable primary, selects the alternate, retrieves over HTTP and maps `annual_income → incomeAmount`. The citizen simply sees *Verified*.
+4. Admin → Application Detail shows the lineage: *Revenue Department (PRIMARY) — skipped: unavailable → Revenue Sandbox API (FALLBACK) → retrieval succeeded*.
+5. *Maharashtra domicile* has no alternate provider: during the outage it stays *retrieval in progress* (retryable), and after repeated failures becomes *action required* with manual upload offered.
+6. Restore the provider in Admin → Providers: the incident resolves, eligible dead-letter provider jobs are replayed automatically (async job mode), and the next Auto-Fill uses the primary again. A requirement already satisfied by the fallback or by a manual upload is never overwritten.
+
+## 11. Security notes
+
+- Passwords hashed with scrypt; HS256 JWTs with expiry and unique `jti`; tokens are not persisted server-side or in browser storage.
+- Role guards on every route: Admin APIs are Admin-only, Officer APIs Officer-only (mapping reviews Officer/Admin); anonymous → 401, wrong role → 403. Citizens can only read and mutate their own applications (others return 404).
+- Input validation with Pydantic (ID patterns, length limits). Manual uploads accept only `text/plain` / `application/json` content up to 200 KB; download filenames are sanitised; nothing is written to the filesystem from uploads.
+- Unhandled errors return a generic message (no stack traces); security headers on every API and frontend response; CORS allow-list (wildcard + credentials rejected).
+- ORM/parameterised queries only. Provider secrets are referenced by environment-variable name, never stored or returned.
+- Rate limits on login, application creation, consent and replay (in-process; not shared across replicas).
+
+## 12. Known limitations
+
+- All department systems and providers are synthetic sandboxes; no real government API is integrated.
+- Manual upload stores a text/JSON representation of a document, not binary files.
+- Rate limiting is per process; the in-memory legacy compatibility state assumes a single backend replica.
+- Automatic dead-letter replay applies to async provider jobs (`ASYNC_PROVIDER_JOBS=true` with Redis). The synchronous per-requirement Auto-Fill path cascades providers within the request and, if all fail, leaves the requirement retryable / action-required rather than creating a queued job.
+- Only one requirement (`INCOME_PROOF`) has a configured alternate provider; others have a single provider.
+- Analytics trends are limited by the amount of demo activity; fulfilment is dated by the application's last update.
+- Roles are fixed (Citizen / Officer / Admin); there is no fine-grained permission editor.
+- TLS termination, secret management and backups must be provided by the hosting environment.
+
+## 13. Tests
+
+```bash
+cd backend && python -m unittest discover -s tests      # needs a migrated PostgreSQL database
+cd frontend && npm test && npm run build
 ```
 
-### Backup and restore
-
-Back up PostgreSQL using a custom-format dump:
-
-```text
-pg_dump --format=custom --file=sangam-$(Get-Date -Format yyyyMMdd-HHmmss).dump "$env:DATABASE_URL"
-```
-
-Restore only into a separate test database first; never overwrite the development or production database during validation:
-
-```text
-createdb sangam_restore_test
-pg_restore --clean --if-exists --dbname="$env:RESTORE_DATABASE_URL" sangam-backup.dump
-set ALEMBIC_DATABASE_URL=%RESTORE_DATABASE_URL%
-cd backend
-alembic current
-alembic check
-```
-
-Successful `pg_dump` or `pg_restore` is not proof of a usable backup. Validate that the restored database reaches the expected Alembic head, passes application readiness, and can read persisted applications and workflow state. Redis is non-authoritative and is intentionally excluded from backup/restore requirements.
-
-### Demo, sandbox, and provider boundaries
-
-Demo users and catalog seeding require explicit `SANGAM_SEED_DEMO_USERS=true` and `SANGAM_SEED_CATALOG=true`; both must remain disabled in production. Production startup rejects active non-`PRODUCTION` providers and local CORS origins. Mock/sandbox adapters are for development/demo only. Real provider credentials, endpoints, contracts, and authorization remain deployment-owner responsibilities.
-
-### Troubleshooting and known limitations
-
-- `Database schema is at migration ...; run 'alembic upgrade head'`: apply migrations before starting backend/worker.
-- Redis readiness failure: verify `REDIS_ENABLED`, `REDIS_URL`, and Redis health; do not switch Redis to an in-memory fallback in deployment.
-- Worker `UNAVAILABLE` or `STALE`: inspect worker logs and PostgreSQL/Redis readiness; abandoned jobs remain recoverable from PostgreSQL.
-- Production configuration rejection: remove demo seeding, use explicit non-local CORS origins, and ensure active providers are marked `PRODUCTION` with authorized secret references.
-- This repository does not include real government integrations, production secret management, distributed rate-limit coordination, TLS termination, WAF policy, or an executed backup restore test.
-
-Shutdown and restart without deleting data:
-
-```text
-docker compose stop
-docker compose start
-```
-
-Do not use `docker compose down -v` unless intentional destruction of the PostgreSQL volume has been approved.
+Tests clean up the rows they create and never remove the seeded demo vocabulary, providers or citizens.

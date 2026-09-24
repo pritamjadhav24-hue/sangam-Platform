@@ -19,12 +19,14 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from tests.catalog_fixture import remove_test_vocabulary, seed_test_vocabulary
 from app.api.citizen_routes import (
     ApplySchemeRequest, AutoFillDecision, RequirementUpload, apply_to_scheme,
     auto_fill_requirement, get_citizen_application, upload_requirement_document,
 )
 from app.core.audit_bus import AuditBus
 from app.core.persistence import (
+    CitizenNotificationRow,
     REQUIREMENT_CATALOG, ApplicationRow, ConsentRow, DocumentRow, RequirementCatalogRow,
     engine, get_application as get_application_raw, get_document, seed_requirement_catalog,
 )
@@ -43,17 +45,15 @@ def _fake_request():
     return SimpleNamespace(state=SimpleNamespace())
 
 
+_VOCABULARY_ADDED: set[str] = set()
+
+
 def setUpModule():
-    with patch.dict("os.environ", {"SANGAM_SEED_CATALOG": "true"}):
-        seed_requirement_catalog()
+    _VOCABULARY_ADDED.update(seed_test_vocabulary())
 
 
 def tearDownModule():
-    with Session(engine) as session:
-        session.query(RequirementCatalogRow).filter(
-            RequirementCatalogRow.requirement_code.in_([item["code"] for item in REQUIREMENT_CATALOG])
-        ).delete(synchronize_session=False)
-        session.commit()
+    remove_test_vocabulary(_VOCABULARY_ADDED)
 
 
 def _success_result(record_id="REC-1", canonical=None):
@@ -73,6 +73,7 @@ class RequirementResilienceTests(unittest.TestCase):
         with Session(engine) as session:
             if self._created_app_ids:
                 session.query(DocumentRow).filter(DocumentRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
+                session.query(CitizenNotificationRow).filter(CitizenNotificationRow.application_id.in_(self._created_app_ids)).delete(synchronize_session=False)
                 session.query(ApplicationRow).filter(ApplicationRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
             if self._created_citizen_ids:
                 session.query(ConsentRow).filter(ConsentRow.citizen_id.in_(self._created_citizen_ids)).delete(synchronize_session=False)
@@ -321,6 +322,12 @@ class AuditBusThreadSafetyTests(unittest.TestCase):
         sequences = [entry["sequence"] for entry in bus.entries]
         self.assertEqual(len(sequences), len(set(sequences)), "duplicate sequence numbers were allocated under concurrency")
         self.assertEqual(sorted(sequences), list(range(1, len(sequences) + 1)))
+
+
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
 
 
 if __name__ == "__main__":

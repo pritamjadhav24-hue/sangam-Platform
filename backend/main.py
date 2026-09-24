@@ -9,7 +9,11 @@ import app.core.notification_manager
 from app.core.persistence import ensure_demo_citizen_accounts, ensure_user_accounts, initialize, hydrate_state, persist_state, seed_catalog, seed_department_sandbox_providers, seed_department_sandbox_schema_mappings, seed_platform_citizens, seed_requirement_catalog, seed_schema_mappings, validate_production_configuration, worker_operational_status
 from app.core.redis_service import RedisService
 
-app = FastAPI(title="GovOrchestrator", version="1.0.0", description="Purpose-bound federated government service orchestration")
+_production = os.getenv("SANGAM_ENV", "development").strip().lower() in {"production", "prod"}
+# Interactive API docs are a development aid; production does not publish them.
+app = FastAPI(title="GovOrchestrator", version="1.0.0", description="Purpose-bound federated government service orchestration",
+              docs_url=None if _production else "/docs", redoc_url=None if _production else "/redoc",
+              openapi_url=None if _production else "/openapi.json")
 _cors_origins = [origin.strip() for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
 if "*" in _cors_origins and os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() in {"1", "true", "yes"}:
     raise RuntimeError("CORS wildcard origins cannot be used with credentials.")

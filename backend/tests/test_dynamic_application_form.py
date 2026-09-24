@@ -19,11 +19,13 @@ from sqlalchemy.orm import Session
 
 from unittest.mock import patch
 
+from tests.catalog_fixture import remove_test_vocabulary, seed_test_vocabulary
 from app.api.citizen_routes import (
     ApplySchemeRequest, RequirementUpload, apply_to_scheme, auto_fill_requirement,
     get_citizen_application, upload_requirement_document,
 )
 from app.core.persistence import (
+    CitizenNotificationRow,
     REQUIREMENT_CATALOG, ApplicationRow, DocumentRow, RequirementCatalogRow, citizen_service_snapshot, engine,
     seed_requirement_catalog,
 )
@@ -39,17 +41,15 @@ def _fake_request():
     return SimpleNamespace(state=SimpleNamespace())
 
 
+_VOCABULARY_ADDED: set[str] = set()
+
+
 def setUpModule():
-    with patch.dict("os.environ", {"SANGAM_SEED_CATALOG": "true"}):
-        seed_requirement_catalog()
+    _VOCABULARY_ADDED.update(seed_test_vocabulary())
 
 
 def tearDownModule():
-    with Session(engine) as session:
-        session.query(RequirementCatalogRow).filter(
-            RequirementCatalogRow.requirement_code.in_([item["code"] for item in REQUIREMENT_CATALOG])
-        ).delete(synchronize_session=False)
-        session.commit()
+    remove_test_vocabulary(_VOCABULARY_ADDED)
 
 
 class DynamicApplicationFormTests(unittest.TestCase):
@@ -61,6 +61,7 @@ class DynamicApplicationFormTests(unittest.TestCase):
             return
         with Session(engine) as session:
             session.query(DocumentRow).filter(DocumentRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
+            session.query(CitizenNotificationRow).filter(CitizenNotificationRow.application_id.in_(self._created_app_ids)).delete(synchronize_session=False)
             session.query(ApplicationRow).filter(ApplicationRow.app_id.in_(self._created_app_ids)).delete(synchronize_session=False)
             session.commit()
 
@@ -204,6 +205,12 @@ class NoHardcodedSchemeRequirementRoutingTests(unittest.TestCase):
             self.assertNotIn(literal, body_source, f"apply_to_scheme must not hardcode {literal}")
         self.assertIn("citizen_service_snapshot", body_source)
         self.assertIn("requirement_data_type", body_source)
+
+
+# Remove every runtime row (applications, consents, documents, notifications,
+# provider jobs/incidents) this module leaves in the shared database.
+from tests.catalog_fixture import guard_module_runtime_state  # noqa: E402
+guard_module_runtime_state(globals())
 
 
 if __name__ == "__main__":

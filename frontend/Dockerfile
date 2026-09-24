@@ -3,7 +3,10 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
-ARG VITE_API_BASE_URL=http://localhost:8001/api
+# Empty by default: the build then calls the same-origin /api path, which
+# nginx.conf proxies to the backend service. Set it only when the API is
+# served from a different origin.
+ARG VITE_API_BASE_URL=
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 RUN npm run build
 

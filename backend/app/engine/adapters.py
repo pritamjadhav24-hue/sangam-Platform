@@ -315,7 +315,14 @@ class DepartmentSandboxAPIAdapter(SourceAdapter):
 
     def health_check(self, correlation_id=None):
         result = super().health_check(correlation_id)
-        if result["status"] == "HEALTHY" and not self.config.get("httpPath"):
+        endpoint_ref = self.config.get("endpointRef")
+        # The registry health view nests provider metadata under "payload";
+        # the request path flattens it -- accept either shape.
+        http_path = self.config.get("httpPath") or (self.config.get("payload") or {}).get("httpPath")
+        # Every call is a real HTTP request, so without a configured base URL
+        # or path this provider cannot serve anything -- report that instead
+        # of AVAILABLE, so discovery never selects a provider bound to fail.
+        if result["status"] in {"HEALTHY", "AVAILABLE"} and (not http_path or not (endpoint_ref and os.getenv(endpoint_ref))):
             result.update({"status": "MISCONFIGURED", "errorCategory": "CONFIGURATION_ERROR"})
         return result
 

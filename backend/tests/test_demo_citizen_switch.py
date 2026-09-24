@@ -20,17 +20,30 @@ from app.core.persistence import (
 )
 
 
+# Rows this module created itself. Demo accounts/citizens that the running
+# environment already seeded are shared with the live demo and must survive.
+_ADDED: dict[str, set] = {"accounts": set(), "citizens": set()}
+
+
 def setUpModule():
+    with Session(engine) as session:
+        existing_accounts = {row.user_id for row in session.query(UserAccountRow.user_id)}
+        existing_citizens = {row.citizen_id for row in session.query(CitizenRow.citizen_id)}
     with patch.dict("os.environ", {"SANGAM_SEED_SYNTHETIC_DATA": "true"}):
         seed_platform_citizens()
     with patch.dict("os.environ", {"SANGAM_SEED_DEMO_USERS": "true", "SANGAM_DEMO_CITIZEN_PASSWORD": "test-demo-password-not-real"}):
         ensure_demo_citizen_accounts()
+    with Session(engine) as session:
+        _ADDED["accounts"] = {row.user_id for row in session.query(UserAccountRow.user_id)} - existing_accounts
+        _ADDED["citizens"] = {row.citizen_id for row in session.query(CitizenRow.citizen_id)} - existing_citizens
 
 
 def tearDownModule():
-    citizen_ids = select_demo_switchable_citizen_ids()
     with Session(engine) as session:
-        session.query(UserAccountRow).filter(UserAccountRow.user_id.in_(citizen_ids)).delete(synchronize_session=False)
+        if _ADDED["accounts"]:
+            session.query(UserAccountRow).filter(UserAccountRow.user_id.in_(_ADDED["accounts"])).delete(synchronize_session=False)
+        if _ADDED["citizens"]:
+            session.query(CitizenRow).filter(CitizenRow.citizen_id.in_(_ADDED["citizens"])).delete(synchronize_session=False)
         session.commit()
 
 

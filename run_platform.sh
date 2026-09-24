@@ -11,6 +11,9 @@ if [ ! -x "$ROOT/backend/venv/bin/python" ]; then python -m venv "$ROOT/backend/
 PYTHON="$ROOT/backend/venv/bin/python"
 "$PYTHON" -c 'import fastapi, uvicorn, rapidfuzz' >/dev/null 2>&1 || "$PYTHON" -m pip install -r "$ROOT/backend/requirements.txt"
 [ -d "$ROOT/frontend/node_modules" ] || npm --prefix "$ROOT/frontend" ci
+: "${DEPARTMENT_API_PORT:=9101}"
+(cd "$ROOT/backend" && "$PYTHON" -m alembic upgrade head)
+(cd "$ROOT/backend" && "$PYTHON" -m uvicorn app.department_api.main:app --port "$DEPARTMENT_API_PORT") &
 (cd "$ROOT/backend" && "$PYTHON" -m uvicorn main:app --reload --port "$BACKEND_PORT") &
 (cd "$ROOT/frontend" && npm run dev -- --host 127.0.0.1 --port 5173) &
 wait

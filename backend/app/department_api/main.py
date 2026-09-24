@@ -7,6 +7,8 @@ reaches it exclusively over HTTP via the provider/adapter layer.
 """
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI
 
 from app.department_api.common import SYNTHETIC_DISCLAIMER
@@ -20,6 +22,20 @@ app = FastAPI(
     description=SYNTHETIC_DISCLAIMER,
     version="1.0.0",
 )
+
+@app.on_event("startup")
+def prepare_sandbox_databases():
+    """Make a fresh deployment (e.g. an empty Compose volume) serve data
+    without a manual step: create each department's tables and load its
+    deterministic synthetic seed. Idempotent -- every department seed skips
+    itself when already populated, so restarts never duplicate or reset data.
+    Set DEPARTMENT_SANDBOX_AUTO_SEED=false to manage sandboxes by hand
+    (python -m app.sandbox.manage ...)."""
+    if os.getenv("DEPARTMENT_SANDBOX_AUTO_SEED", "true").lower() not in {"1", "true", "yes"}:
+        return
+    from app.sandbox.manage import seed_all
+    seed_all()
+
 
 for router in (
     revenue.router, education.router, social_welfare.router, agriculture.router,
