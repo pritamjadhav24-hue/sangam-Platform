@@ -19,9 +19,10 @@ export default function Navbar({ page, setPage, citizen, language = 'en', onLang
   const links = role === 'CITIZEN'
     ? [['dashboard', t.homeNav], ['schemes', t.schemesNav], ['myApplications', t.myApplicationsNav], ['notificationsPage', t.notificationsNav, unread], ['profile', t.profileNav]]
     : role === 'OFFICER' ? [['officer', 'Officer Desk']]
-    : role === 'ADMIN' ? [['adminDashboard', 'Dashboard'], ['adminApplications', 'Applications'], ['adminProviders', 'Providers'], ['adminAlerts', 'Alerts'], ['audit', 'Audit Lineage']] : [];
+    : role === 'ADMIN' ? [['adminDashboard', 'Dashboard'], ['adminApplications', 'Applications'], ['adminProviders', 'Providers'], ['adminAnalytics', 'Analytics'], ['adminSchemes', 'Schemes'], ['adminAlerts', 'Alerts'], ['audit', 'Audit'], ['adminProfile', 'Profile']] : [];
   const adminActivePage = page === 'adminApplicationDetail' ? 'adminApplications'
-    : page === 'adminProviderDetail' || page === 'health' ? 'adminProviders' : page;
+    : page === 'adminProviderDetail' || page === 'health' ? 'adminProviders'
+    : page === 'adminSchemeDetail' ? 'adminSchemes' : page;
 
   function selectBellNotification(notification) {
     setBellOpen(false);

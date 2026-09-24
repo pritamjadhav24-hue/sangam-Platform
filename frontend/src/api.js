@@ -69,6 +69,15 @@ export const api = {
   adminApplicationDetail: (appId) => request(`/admin/applications/${encodeURIComponent(appId)}`),
   adminProviders: () => request('/admin/operations/providers'),
   adminProviderRegistry: () => request('/admin/operations/providers/registry'),
+  adminAnalytics: (filters = {}) => {
+    const q = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => { if (value) q.set(key, value); });
+    const qs = q.toString();
+    return request('/admin/analytics' + (qs ? `?${qs}` : ''));
+  },
+  adminSchemes: () => request('/admin/schemes'),
+  adminSchemeDetail: (schemeId) => request(`/admin/schemes/${encodeURIComponent(schemeId)}`),
+  adminProfile: () => request('/admin/profile'),
   adminProviderDetail: (providerId) => request(`/admin/operations/providers/registry/${encodeURIComponent(providerId)}`),
   adminDeadLetterJobs: (limit = 50) => request(`/admin/operations/jobs/dead-letter?limit=${limit}`),
   adminRecentJobs: (limit = 50) => request(`/admin/operations/jobs/recent?limit=${limit}`),

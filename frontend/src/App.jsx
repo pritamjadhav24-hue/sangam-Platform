@@ -24,6 +24,23 @@ import AdminApplicationDetailPage from './pages/admin/AdminApplicationDetailPage
 import AdminProvidersPage from './pages/admin/AdminProvidersPage';
 import AdminProviderDetailPage from './pages/admin/AdminProviderDetailPage';
 import AdminAlertsPage from './pages/admin/AdminAlertsPage';
+import AdminAnalyticsPage from './pages/admin/AdminAnalyticsPage';
+import AdminSchemesPage from './pages/admin/AdminSchemesPage';
+import AdminSchemeDetailPage from './pages/admin/AdminSchemeDetailPage';
+import AdminProfilePage from './pages/admin/AdminProfilePage';
+
+// The session token is deliberately memory-only, so a browser refresh
+// always requires signing in again. Only the non-sensitive admin view
+// (page key + selected record ids) is remembered per tab, so an Admin who
+// refreshes lands back where they were right after re-authenticating.
+const ADMIN_ROUTE_KEY = 'sangam.adminRoute';
+const ADMIN_PAGES = new Set(['adminDashboard', 'adminApplications', 'adminApplicationDetail', 'adminProviders', 'adminProviderDetail', 'adminAnalytics', 'adminSchemes', 'adminSchemeDetail', 'adminAlerts', 'audit', 'adminProfile']);
+function readAdminRoute() {
+  try { return JSON.parse(sessionStorage.getItem(ADMIN_ROUTE_KEY) || 'null'); } catch { return null; }
+}
+function writeAdminRoute(route) {
+  try { sessionStorage.setItem(ADMIN_ROUTE_KEY, JSON.stringify(route)); } catch { /* storage unavailable: route simply isn't restored */ }
+}
 import SangamMark from './components/SangamMark';
 
 export default function App() {
@@ -33,6 +50,12 @@ export default function App() {
   const [demoCitizens, setDemoCitizens] = useState([]);
   const [adminApplicationId, setAdminApplicationId] = useState(null);
   const [adminProviderId, setAdminProviderId] = useState(null);
+  const [adminSchemeId, setAdminSchemeId] = useState(null);
+  useEffect(() => {
+    if (user?.role === 'ADMIN' && ADMIN_PAGES.has(page)) {
+      writeAdminRoute({ page, applicationId: adminApplicationId, providerId: adminProviderId, schemeId: adminSchemeId });
+    }
+  }, [user, page, adminApplicationId, adminProviderId, adminSchemeId]);
   useEffect(() => { setAuthFailureHandler(() => { setSessionToken(null); setUser(null); setAppId(null); setDiscovery(null); setPage('dashboard'); }); return () => setAuthFailureHandler(null); }, []);
   useEffect(() => {
     if (user?.role !== 'CITIZEN') return undefined;
@@ -72,6 +95,14 @@ export default function App() {
   async function login(id, pw) {
     const result = await api.login(id, pw);
     setSessionToken(result.token); setUser(result.user); setApplications([]); setNotifications([]); setAppId(null); setDiscovery(null); setSchemeId(null);
+    if (result.user.role === 'ADMIN') {
+      const saved = readAdminRoute();
+      if (saved && ADMIN_PAGES.has(saved.page)) {
+        setAdminApplicationId(saved.applicationId || null); setAdminProviderId(saved.providerId || null); setAdminSchemeId(saved.schemeId || null);
+        setPage(saved.page);
+        return;
+      }
+    }
     setPage(result.user.role === 'CITIZEN' ? 'dashboard' : result.user.role === 'OFFICER' ? 'officer' : 'adminDashboard');
   }
   async function demoSwitch(citizenId) {
@@ -86,7 +117,7 @@ export default function App() {
   function viewScheme(id) { setSchemeId(id); setPage('schemeDetail'); }
   function openApplicationForm(scheme) { const id = scheme?.serviceId || scheme?.schemeId || scheme; if (id) setSchemeId(id); setPage('applicationForm'); }
   function openApplication(application) { if (application?.serviceId) setSchemeId(application.serviceId); setPage(application?.status === 'SUBMITTED' ? 'reviewApplication' : 'applicationForm'); }
-  function logout() { setSessionToken(null); setUser(null); setApplications([]); setNotifications([]); setAppId(null); setDiscovery(null); setSchemeId(null); setPage('dashboard'); }
+  function logout() { try { sessionStorage.removeItem(ADMIN_ROUTE_KEY); } catch { /* ignore */ } setSessionToken(null); setUser(null); setApplications([]); setNotifications([]); setAppId(null); setDiscovery(null); setSchemeId(null); setPage('dashboard'); }
   async function onNotificationSelect(notification) {
     if (!notification.read) {
       setNotifications(items => items.map(item => item.notificationId === notification.notificationId ? { ...item, read: true } : item));
@@ -105,6 +136,10 @@ export default function App() {
   function openProviderDetail(providerId) {
     setAdminProviderId(providerId);
     setPage('adminProviderDetail');
+  }
+  function openSchemeDetail(schemeId) {
+    setAdminSchemeId(schemeId);
+    setPage('adminSchemeDetail');
   }
   if (!user) return <><Navbar page={page} setPage={setPage} language={language} onLanguageChange={changeLanguage} demoCitizens={demoCitizens} onDemoSwitch={demoSwitch} /><LoginPage onLogin={login} language={language} /></>;
   const props = { navigate, language, notifications, schemes };
@@ -129,6 +164,10 @@ export default function App() {
     adminProviders: <AdminProvidersPage onOpenProvider={openProviderDetail} api={api} />,
     adminProviderDetail: <AdminProviderDetailPage providerId={adminProviderId} onBack={() => navigateAdmin('adminProviders')} onNavigateToApplication={id => navigateAdmin('adminApplicationDetail', id)} api={api} />,
     adminAlerts: <AdminAlertsPage onNavigateToApplication={id => navigateAdmin('adminApplicationDetail', id)} api={api} />,
+    adminAnalytics: <AdminAnalyticsPage api={api} onNavigate={navigateAdmin} onOpenProvider={openProviderDetail} onOpenApplication={id => navigateAdmin('adminApplicationDetail', id)} />,
+    adminSchemes: <AdminSchemesPage api={api} onOpenScheme={openSchemeDetail} />,
+    adminSchemeDetail: <AdminSchemeDetailPage api={api} schemeId={adminSchemeId} onBack={() => navigateAdmin('adminSchemes')} onOpenProvider={openProviderDetail} />,
+    adminProfile: <AdminProfilePage api={api} />,
     health: <AdminProvidersPage onOpenProvider={openProviderDetail} api={api} />,
     audit: <AuditLineagePage onAudit={api.audit} />,
   }[page] || null;

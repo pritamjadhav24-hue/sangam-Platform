@@ -66,6 +66,8 @@ class AdminOperationsTests(unittest.TestCase):
         self.assertIn("incidents", res)
         self.assertIsInstance(res["incidents"], list)
 
+        from tests.incident_cleanup import now, purge_incidents_since
+        self.addCleanup(purge_incidents_since, "TEST_INCIDENT_PROVIDER", now())
         before = open_provider_incident_count()
         record_provider_health_transition("TEST_INCIDENT_PROVIDER", "Test Dept", "Test Service", "AVAILABLE", "UNAVAILABLE", "UPSTREAM_UNAVAILABLE")
         self.assertEqual(open_provider_incident_count(), before + 1)
@@ -143,6 +145,8 @@ class AdminOperationsTests(unittest.TestCase):
         req = next(r for r in detail["requirements"] if r["fulfillmentMethod"] == "AUTO_FILL" and r.get("sourceCandidates"))
         primary_system = req["sourceCandidates"][0]["providerId"] or req["sourceCandidates"][0]["provider"]
 
+        from tests.incident_cleanup import now, purge_incidents_since
+        self.addCleanup(purge_incidents_since, primary_system, now())
         record_provider_health_transition(primary_system, primary_system, None, "AVAILABLE", "UNAVAILABLE", "UPSTREAM_UNAVAILABLE")
         try:
             detail_after = get_admin_application_detail(auto_fill_app_id, user=admin_user)
@@ -197,8 +201,11 @@ class AdminOperationsTests(unittest.TestCase):
             self.assertIn("Attempt failed", step_labels)
             self.assertIn("Retrieval succeeded", step_labels)
         finally:
+            from app.core.persistence import ConsentRow, DocumentRow
             with Session(engine) as session:
+                session.query(DocumentRow).filter(DocumentRow.app_id == application["appId"]).delete(synchronize_session=False)
                 session.query(ApplicationRow).filter(ApplicationRow.app_id == application["appId"]).delete(synchronize_session=False)
+                session.query(ConsentRow).filter(ConsentRow.citizen_id == "CITIZEN_ADMIN_FB_001").delete(synchronize_session=False)
                 session.commit()
 
 

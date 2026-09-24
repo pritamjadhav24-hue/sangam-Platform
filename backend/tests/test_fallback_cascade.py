@@ -50,17 +50,27 @@ PROVIDER_B = {"serviceId": "SVC-B", "providerId": "PROV-B", "provider": "Provide
 PROVIDER_C = {"serviceId": "SVC-C", "providerId": "PROV-C", "provider": "Provider C", "priority": 30}
 
 
+_SEEDED_BY_THIS_MODULE: list[str] = []
+
+
 def setUpModule():
     from unittest.mock import patch as _patch
+    with Session(engine) as session:
+        existing = {row.requirement_code for row in session.query(RequirementCatalogRow)}
     with _patch.dict("os.environ", {"SANGAM_SEED_CATALOG": "true"}):
         seed_requirement_catalog()
+    with Session(engine) as session:
+        _SEEDED_BY_THIS_MODULE.extend(row.requirement_code for row in session.query(RequirementCatalogRow) if row.requirement_code not in existing)
 
 
 def tearDownModule():
-    from app.core.persistence import REQUIREMENT_CATALOG as CATALOG
+    # Remove only vocabulary rows this module added, never pre-existing
+    # catalog data the running demo depends on.
+    if not _SEEDED_BY_THIS_MODULE:
+        return
     with Session(engine) as session:
         session.query(RequirementCatalogRow).filter(
-            RequirementCatalogRow.requirement_code.in_([item["code"] for item in CATALOG])
+            RequirementCatalogRow.requirement_code.in_(_SEEDED_BY_THIS_MODULE)
         ).delete(synchronize_session=False)
         session.commit()
 

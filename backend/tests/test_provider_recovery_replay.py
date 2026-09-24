@@ -99,6 +99,7 @@ class ProviderRecoveryReplayTests(unittest.TestCase):
     # 17. A job that is not DEAD_LETTER is never selected for replay at all.
     def test_only_dead_letter_jobs_are_candidates_for_replay(self):
         provider = "RECOVERY-TEST-PROVIDER-4"
+        self._app_ids.append("APP-RECOVERY-004")  # so tearDown removes this job row
         queue = JobQueue(self.redis)
         job = queue.enqueue("retrieve.test", "APP-RECOVERY-004", "APP-RECOVERY-004", "DEP-RECOVERY-004", {"providerId": provider})
         # Left QUEUED, never claimed/dead-lettered.
@@ -147,6 +148,8 @@ class ProviderRecoveryReplayTests(unittest.TestCase):
         self._make_dependency(dependency_id, app_id, "TEST_REQUIREMENT")
         job = _dead_letter_job(self.redis, provider, app_id, dependency_id)
 
+        from tests.incident_cleanup import now, purge_incidents_since
+        self.addCleanup(purge_incidents_since, provider, now())
         before = open_provider_incident_count()
         record_provider_health_transition(provider, provider, None, "AVAILABLE", "UNAVAILABLE", "UPSTREAM_UNAVAILABLE")
         self.assertEqual(open_provider_incident_count(), before + 1)

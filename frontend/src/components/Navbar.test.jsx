@@ -81,6 +81,42 @@ describe('Navbar notifications entry (Phase 6G3 Task 2)', () => {
   });
 });
 
+describe('Navbar Admin navigation (final Admin portal structure)', () => {
+  const ADMIN = { role: 'ADMIN', userId: 'ADMIN_MH_01', name: 'Admin One' };
+
+  it('shows the complete Admin navigation in order', () => {
+    render(<Navbar page="adminDashboard" setPage={() => {}} citizen={ADMIN} notifications={[]} onNotificationSelect={vi.fn()} />);
+    const labels = Array.from(document.querySelectorAll('.navlinks button')).map(b => b.textContent);
+    expect(labels).toEqual(['Dashboard', 'Applications', 'Providers', 'Analytics', 'Schemes', 'Alerts', 'Audit', 'Profile']);
+  });
+
+  it('highlights the parent section while viewing a detail page', () => {
+    const { rerender } = render(<Navbar page="adminSchemeDetail" setPage={() => {}} citizen={ADMIN} notifications={[]} onNotificationSelect={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Schemes' })).toHaveClass('active');
+    rerender(<Navbar page="adminProviderDetail" setPage={() => {}} citizen={ADMIN} notifications={[]} onNotificationSelect={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Providers' })).toHaveClass('active');
+    rerender(<Navbar page="adminApplicationDetail" setPage={() => {}} citizen={ADMIN} notifications={[]} onNotificationSelect={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Applications' })).toHaveClass('active');
+  });
+
+  it('navigates to the new Admin modules', async () => {
+    const setPage = vi.fn();
+    render(<Navbar page="adminDashboard" setPage={setPage} citizen={ADMIN} notifications={[]} onNotificationSelect={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Analytics' }));
+    await user.click(screen.getByRole('button', { name: 'Schemes' }));
+    await user.click(screen.getByRole('button', { name: 'Profile' }));
+    expect(setPage.mock.calls.map(call => call[0])).toEqual(['adminAnalytics', 'adminSchemes', 'adminProfile']);
+  });
+
+  it('never shows Admin sections to citizens', () => {
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={[]} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    for (const label of ['Analytics', 'Providers', 'Alerts', 'Audit']) {
+      expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument();
+    }
+  });
+});
+
 describe('Navbar Officer/Admin notification bell (regression fix)', () => {
   const OFFICER = { role: 'OFFICER', userId: 'OFFICER_MH_01', name: 'Officer One' };
   const ADMIN = { role: 'ADMIN', userId: 'ADMIN_MH_01', name: 'Admin One' };

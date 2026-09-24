@@ -101,6 +101,8 @@ class ProviderRegistryTests(unittest.TestCase):
         provider = registry[0]
         provider_id, provider_name = provider["providerId"], provider["name"]
 
+        from tests.incident_cleanup import now, purge_incidents_since
+        self.addCleanup(purge_incidents_since, provider_name, now())
         record_provider_health_transition(provider_name, provider_name, None, "AVAILABLE", "UNAVAILABLE", "UPSTREAM_UNAVAILABLE")
         try:
             detail = provider_registry_detail_route(provider_id, user=admin)

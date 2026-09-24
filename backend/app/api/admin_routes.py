@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from collections import Counter
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
+from app.core.admin_insights import (
+    analytics_report, classify_application_outcome, effective_access_model, scheme_catalogue, scheme_detail,
+)
 from app.core.audit_bus import audit_bus
-from app.core.auth import require_roles
+from app.core.auth import JWT_EXPIRES_SECONDS, _bearer, decode_token, require_roles
 from app.core.event_bus import event_bus
 from app.engine.adapters import integration_health, set_integration_availability
 from app.engine.registry import dependency_registry
@@ -84,6 +90,56 @@ def provider_registry(user: dict = Depends(require_roles("ADMIN"))):
     return {"providers": provider_registry_snapshot()}
 
 
+@router.get("/analytics")
+def admin_analytics(
+    start: Optional[str] = Query(None, description="YYYY-MM-DD, inclusive"),
+    end: Optional[str] = Query(None, description="YYYY-MM-DD, inclusive"),
+    status: Optional[str] = Query(None),
+    outcome: Optional[str] = Query(None),
+    provider: Optional[str] = Query(None),
+    requirement: Optional[str] = Query(None),
+    incident_status: Optional[str] = Query(None, alias="incidentStatus"),
+    user: dict = Depends(require_roles("ADMIN")),
+):
+    try:
+        return analytics_report(start=start, end=end, status=status, outcome=outcome, provider=provider,
+                                requirement=requirement, incident_status=incident_status)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.get("/schemes")
+def admin_schemes(user: dict = Depends(require_roles("ADMIN"))):
+    return {"schemes": scheme_catalogue()}
+
+
+@router.get("/schemes/{scheme_id}")
+def admin_scheme_detail(scheme_id: str, user: dict = Depends(require_roles("ADMIN"))):
+    detail = scheme_detail(scheme_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Scheme not found.")
+    return detail
+
+
+@router.get("/profile")
+def admin_profile(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+                  user: dict = Depends(require_roles("ADMIN"))):
+    claims = decode_token(credentials.credentials)
+    as_iso = lambda seconds: datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    return {
+        "user": {"userId": user.get("userId"), "name": user.get("name"), "role": user.get("role")},
+        "session": {
+            "issuedAt": as_iso(claims["iat"]),
+            "expiresAt": as_iso(claims["exp"]),
+            "lifetimeSeconds": JWT_EXPIRES_SECONDS,
+            "sessionRef": f"{claims['jti'][:6]}…",
+        },
+        "access": effective_access_model(request.app.routes),
+    }
+
+
 @router.get("/operations/providers/registry/{provider_id}")
 def provider_registry_detail_route(provider_id: str, user: dict = Depends(require_roles("ADMIN"))):
     detail = provider_registry_detail(provider_id)
@@ -148,40 +204,19 @@ def operations_overview(user: dict = Depends(require_roles("ADMIN"))):
         app_list = [dict(a.payload or {}) for a in apps]
 
         status_counts: dict[str, int] = {}
-        success_statuses = {"VALIDATED", "RETRIEVED", "USER_OVERRIDDEN"}
-        # Application-outcome buckets, mutually exclusive, all derived from
-        # actual requirement-level data rather than the coarse application
-        # status alone:
-        #   automaticallyVerified -- every requirement fulfilled, none by
-        #       manual upload.
-        #   manuallyFulfilled -- every requirement fulfilled, but at least
-        #       one via citizen manual upload (documentId set).
-        #   citizenActionRequired -- a requirement is ACTION_REQUIRED/
-        #       FAILED/REJECTED and needs the citizen to act (e.g. upload).
-        #   officerReviewRequired -- application is waiting on an officer
-        #       (entity/conflict review) rather than the citizen.
-        #   retryInProgress -- a requirement is still WAITING on an
-        #       automated retry, nothing needs a person yet.
-        auto_verified = manually_fulfilled = citizen_action_required = 0
-        officer_review_required = retry_in_progress = 0
+        # Mutually exclusive, requirement-derived outcome buckets -- shared
+        # with Analytics via classify_application_outcome so the two views
+        # can never disagree.
+        outcome_counts = Counter()
         for a in app_list:
             st = a.get("status", "DRAFT")
             status_counts[st] = status_counts.get(st, 0) + 1
-            reqs = a.get("requirements", [])
-            is_manual = lambda r: bool(r.get("documentId")) or r.get("fulfillmentMethod") == "MANUAL_UPLOAD"
-            if st in {"WAITING_FOR_OFFICER", "CONFLICT_DETECTED"}:
-                officer_review_required += 1
-            elif any(r.get("status") in {"ACTION_REQUIRED", "FAILED", "REJECTED"} for r in reqs) or st == "VERIFICATION_FAILED":
-                citizen_action_required += 1
-            elif any(r.get("status") == "WAITING" for r in reqs):
-                retry_in_progress += 1
-            else:
-                fulfilled = [r for r in reqs if r.get("status") in success_statuses]
-                if reqs and len(fulfilled) == len(reqs):
-                    if any(is_manual(r) for r in fulfilled):
-                        manually_fulfilled += 1
-                    else:
-                        auto_verified += 1
+            outcome_counts[classify_application_outcome(a)] += 1
+        auto_verified = outcome_counts["automaticallyVerified"]
+        manually_fulfilled = outcome_counts["manuallyFulfilled"]
+        citizen_action_required = outcome_counts["citizenActionRequired"]
+        officer_review_required = outcome_counts["officerReviewRequired"]
+        retry_in_progress = outcome_counts["retryInProgress"]
 
         providers = provider_operational_summary()
         jobs = job_operational_summary()
