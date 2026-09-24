@@ -1476,8 +1476,13 @@ def open_provider_incident_count() -> int:
         return session.query(ProviderIncidentRow).filter(ProviderIncidentRow.status == "OPEN").count()
 
 
-def replay_dead_letter_job(job_id: str, redis_service) -> dict:
-    """Reset and enqueue a dead-letter job, rolling back if Redis cannot accept it."""
+def replay_dead_letter_job(job_id: str, redis_service, *, trigger: str = "MANUAL") -> dict:
+    """Reset and enqueue a dead-letter job, rolling back if Redis cannot
+    accept it. ``trigger`` is ``"MANUAL"`` for the existing admin-initiated
+    replay endpoint, or ``"AUTOMATIC_RECOVERY"`` when called by
+    replay_eligible_dead_letter_jobs_for_provider() after a provider health
+    transition -- only the audit wording differs; the reset/enqueue
+    mechanics and every safety check are identical and not duplicated."""
     from app.core.observability import structured_log
     from app.core.event_bus import event_bus
     from app.core.audit_bus import audit_bus
@@ -1502,10 +1507,60 @@ def replay_dead_letter_job(job_id: str, redis_service) -> dict:
                          "attempt": row.attempt, "maxAttempts": row.max_attempts, "retryCount": 0,
                          "createdAt": row.created_at, "startedAt": row.started_at, "completedAt": row.completed_at, "error": None}
         session.commit()
-    event = event_bus.publish("PROVIDER_JOB_REPLAYED", {"appId": replay_result["applicationId"], "dependencyId": replay_result["dependencyId"], "jobId": replay_result["jobId"], "correlationId": replay_result["correlationId"]})
-    audit_bus.append("SYSTEM", "PROVIDER_JOB", "Administrator replayed dead-letter provider job", replay_result["providerId"] or "CONFIGURED_PROVIDER", "REPLAY", correlation_id=replay_result["correlationId"], payload={"jobId": replay_result["jobId"], "dependencyId": replay_result["dependencyId"], "eventId": event["eventId"]})
+    event = event_bus.publish("PROVIDER_JOB_REPLAYED", {"appId": replay_result["applicationId"], "dependencyId": replay_result["dependencyId"], "jobId": replay_result["jobId"], "correlationId": replay_result["correlationId"], "trigger": trigger})
+    audit_why = "Provider recovered; dead-letter job automatically replayed" if trigger == "AUTOMATIC_RECOVERY" else "Administrator replayed dead-letter provider job"
+    audit_bus.append("SYSTEM", "PROVIDER_JOB", audit_why, replay_result["providerId"] or "CONFIGURED_PROVIDER", "REPLAY", correlation_id=replay_result["correlationId"], payload={"jobId": replay_result["jobId"], "dependencyId": replay_result["dependencyId"], "eventId": event["eventId"], "trigger": trigger})
     structured_log("provider_job_replayed", correlation_id=replay_result["correlationId"], application_id=replay_result["applicationId"], dependency_id=replay_result["dependencyId"], job_id=replay_result["jobId"], provider_id=replay_result["providerId"], outcome="QUEUED")
     return replay_result
+
+
+def find_dead_letter_jobs_for_provider(provider_system: str) -> list[ProviderJobRow]:
+    with Session(engine) as session:
+        return session.query(ProviderJobRow).filter(
+            ProviderJobRow.provider_id == provider_system,
+            ProviderJobRow.status == "DEAD_LETTER",
+        ).all()
+
+
+def replay_eligible_dead_letter_jobs_for_provider(provider_system: str, redis_service) -> dict:
+    """Called when a provider's health transitions back to AVAILABLE/
+    HEALTHY (see record_provider_health_transition and its caller in
+    app.engine.adapters.integration_health -- the existing health-change
+    detection is the sole trigger, nothing new is added here). Finds every
+    DEAD_LETTER ProviderJobRow for that provider and replays only the ones
+    still eligible, reusing replay_dead_letter_job() -- not a second replay
+    mechanism.
+
+    A job is skipped (never replayed) when the requirement it was
+    retrieving for has already been fulfilled another way -- a fallback
+    provider already succeeded, or the citizen already uploaded the
+    document manually -- so recovery never overwrites a successful
+    fallback or manual fulfillment. replay_dead_letter_job's own existing
+    "dependency already COMPLETED" guard is preserved unchanged underneath
+    this additional, requirement-level check.
+    """
+    success_statuses = {"VALIDATED", "RETRIEVED", "USER_OVERRIDDEN", "FOUND"}
+    replayed, skipped = [], []
+    for job in find_dead_letter_jobs_for_provider(provider_system):
+        with Session(engine) as session:
+            requirement_code = None
+            if job.dependency_id:
+                dependency = session.get(DependencyRow, job.dependency_id)
+                requirement_code = dependency.required_data if dependency else None
+            application = session.get(ApplicationRow, job.application_id) if job.application_id else None
+            requirement = None
+            if application and requirement_code:
+                requirement = next((item for item in (application.payload or {}).get("requirements", []) if item.get("code") == requirement_code), None)
+        already_fulfilled = bool(requirement) and (requirement.get("status") in success_statuses or bool(requirement.get("documentId")))
+        if already_fulfilled:
+            skipped.append({"jobId": job.job_id, "reason": "requirement already fulfilled through another path"})
+            continue
+        try:
+            replay_dead_letter_job(job.job_id, redis_service, trigger="AUTOMATIC_RECOVERY")
+            replayed.append(job.job_id)
+        except (KeyError, ValueError) as error:
+            skipped.append({"jobId": job.job_id, "reason": str(error)})
+    return {"provider": provider_system, "replayedJobIds": replayed, "skipped": skipped}
 
 
 def catalog_seeded() -> bool:

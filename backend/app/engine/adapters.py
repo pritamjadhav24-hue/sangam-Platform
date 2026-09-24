@@ -486,7 +486,20 @@ def integration_health(record_event=False):
             event_bus.publish("INTEGRATION_HEALTH_CHANGED", {"system": system, "status": status, "service": metadata.get("service")})
             audit_bus.append("SYSTEM", "INTEGRATION_HEALTH", "Integration availability check", system, status, payload={"system": system, "status": status})
             from app.core.persistence import record_provider_health_transition
-            record_provider_health_transition(system, item.get("department"), item.get("service"), _last_health.get(system), status, item.get("errorCategory"))
+            previous_status = _last_health.get(system)
+            record_provider_health_transition(system, item.get("department"), item.get("service"), previous_status, status, item.get("errorCategory"))
+            if status in {"AVAILABLE", "HEALTHY"} and previous_status not in (None, "AVAILABLE", "HEALTHY"):
+                # Recovery: safely replay whatever DEAD_LETTER jobs for this
+                # provider are still eligible. Never let this best-effort
+                # side task fail the health check itself -- e.g. Redis
+                # being disabled in this environment must not break
+                # GET /admin/integration-health or any other caller.
+                try:
+                    from app.core.persistence import replay_eligible_dead_letter_jobs_for_provider
+                    from app.core.redis_service import RedisService
+                    replay_eligible_dead_letter_jobs_for_provider(system, RedisService())
+                except Exception:
+                    pass
         _last_health[system] = status
     return result
 

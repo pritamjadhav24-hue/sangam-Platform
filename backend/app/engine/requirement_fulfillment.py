@@ -37,12 +37,19 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.core.audit_bus import audit_bus
 from app.engine import retry_policy
 from app.engine.adapters import AdapterResult, integration_health, request_registered_service
 from app.engine.artifact_retrieval import _source_category_for_provider, is_document_requirement
 from app.engine.consent_manager import CONSUMER, execute_with_persisted_authorization
 from app.engine.registry import select_dependency_provider
 from app.engine.validation_engine import validate
+
+# Hard ceiling on providers tried within one cascade, purely as a defensive
+# bound against a registry-configuration bug -- normal operation always
+# terminates earlier, either on success or because find_fallback_candidate
+# naturally runs out of eligible, not-yet-tried candidates.
+MAX_CASCADE_ATTEMPTS = 10
 
 AUTO_FILL_PURPOSE_PREFIX = "AUTO_FILL:"
 SUCCESS_STATUSES = frozenset({"VALIDATED", "RETRIEVED"})
@@ -79,20 +86,79 @@ def find_requirement(application: dict, requirement_code: str) -> Optional[dict]
     return next((item for item in application.get("requirements", []) if item.get("code") == requirement_code), None)
 
 
-def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_id: str, correlation_id: Optional[str]) -> AdapterResult:
+def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_id: str, correlation_id: Optional[str],
+                            consent_id: Optional[str] = None) -> tuple[AdapterResult, list[dict]]:
     """Fresh, server-side-only provider discovery + adapter call for exactly
-    this requirement. The frontend has no way to influence which provider is
-    selected -- this function takes no provider/department input at all."""
+    this requirement, cascading through every eligible fallback provider
+    within this ONE fulfillment operation on a retryable failure -- the
+    citizen never has to click Auto-Fill again for a fallback to happen.
+    The frontend has no way to influence which provider is selected -- this
+    function takes no provider/department input at all.
+
+    Reuses select_dependency_provider/find_fallback_candidate for discovery
+    (no second selection algorithm) and retry_policy.is_retryable_category
+    for classification (no second failure taxonomy). A provider already
+    tried in this cascade is never selected again here; a later, separate
+    fulfill_requirement() call (e.g. the citizen manually retrying) is free
+    to reconsider it, since attempts/maxAttempts on the requirement -- not
+    this per-call exclusion set -- is what governs retry across calls.
+
+    Returns (final_result, attempt_log); attempt_log records every provider
+    tried, in order, for the caller to persist as lineage.
+    """
+    tried_provider_ids: set[str] = set()
+    attempt_log: list[dict] = []
     selected = select_dependency_provider(requirement_code, integration_health())
-    if not selected:
-        return AdapterResult(None, correlation_id=correlation_id, error_category="CONFIGURATION_ERROR", success=False, retryable=False)
-    return request_registered_service(
-        selected["serviceId"], citizen_id, requirement_code=requirement_code,
-        correlation_id=correlation_id, idempotency_key=f"{application_id}:{requirement_code}",
-    )
+    result: Optional[AdapterResult] = None
+
+    while selected and len(attempt_log) < MAX_CASCADE_ATTEMPTS:
+        provider_id = selected.get("providerId") or selected.get("provider")
+        provider_name = selected.get("provider")
+        is_fallback = bool(attempt_log)
+        audit_bus.append(
+            "SYSTEM", requirement_code,
+            "Fallback provider selected after primary provider failure" if is_fallback else "Primary provider selected for requirement",
+            provider_name, "FALLBACK_SELECTED" if is_fallback else "SELECT", consent_id,
+            payload={"appId": application_id, "requirementCode": requirement_code, "providerId": provider_id,
+                     "attemptNumber": len(attempt_log) + 1, "isFallback": is_fallback},
+            correlation_id=application_id,
+        )
+        result = request_registered_service(
+            selected["serviceId"], citizen_id, requirement_code=requirement_code,
+            correlation_id=correlation_id, idempotency_key=f"{application_id}:{requirement_code}",
+        )
+        tried_provider_ids.add(provider_id)
+        attempt_log.append({
+            "providerId": provider_id, "provider": provider_name, "isFallback": is_fallback,
+            "success": bool(result.success), "errorCategory": result.error_category,
+        })
+        if result.success:
+            audit_bus.append(
+                "SYSTEM", requirement_code, "Provider retrieval succeeded", provider_name, "RETRIEVED", consent_id,
+                payload={"appId": application_id, "requirementCode": requirement_code, "providerId": provider_id, "isFallback": is_fallback},
+                correlation_id=application_id,
+            )
+            return result, attempt_log
+
+        category = result.error_category or "UPSTREAM_UNAVAILABLE"
+        audit_bus.append(
+            "SYSTEM", requirement_code, "Provider attempt failed", provider_name, "FAIL", consent_id,
+            payload={"appId": application_id, "requirementCode": requirement_code, "providerId": provider_id, "errorCategory": category},
+            correlation_id=application_id,
+        )
+        if not retry_policy.is_retryable_category(category):
+            # Non-retryable (validation/auth/config/etc.) -- the existing
+            # policy says this terminates immediately, never falls back.
+            return result, attempt_log
+        selected = retry_policy.find_fallback_candidate(requirement_code, exclude_provider_ids=tried_provider_ids)
+
+    if result is None:
+        # No eligible provider existed even for the first attempt.
+        return AdapterResult(None, correlation_id=correlation_id, error_category="CONFIGURATION_ERROR", success=False, retryable=False), attempt_log
+    return result, attempt_log
 
 
-def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult]) -> bool:
+def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult], attempt_log: Optional[list[dict]] = None) -> bool:
     """Mutate the requirement dict in place from one adapter outcome. Returns
     whether the outcome was actually applied (``False`` for a stale no-op --
     see below), so the caller knows whether to also touch the document
@@ -118,6 +184,13 @@ def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult]) -
     requirement["attempts"] = requirement.get("attempts", 0) + 1
     requirement["maxAttempts"] = requirement.get("maxAttempts", 3)
     requirement.pop("autoFillRequestedAt", None)
+    if attempt_log:
+        # Ground truth for Admin visibility (app.api.admin_routes) of
+        # exactly which providers this operation tried, in order -- more
+        # precise than inferring "was this a fallback" from the provider
+        # currently ranked first, which can drift after a later recovery.
+        requirement["fallbackAttempts"] = attempt_log
+        requirement["isFallback"] = attempt_log[-1]["isFallback"]
     record = adapter_result.record if adapter_result else None
     if record:
         # Prefer the adapter's own schema_mappings-derived canonical view
@@ -205,16 +278,23 @@ def fulfill_requirement(application: dict, requirement_code: str, citizen_id: st
         raise KeyError(requirement_code)
 
     purpose = auto_fill_purpose(requirement_code)
+    attempt_log: list[dict] = []
+
+    def _operation() -> AdapterResult:
+        result, log = _discover_and_retrieve(requirement_code, citizen_id, application_id, correlation_id, consent_id)
+        attempt_log.extend(log)
+        return result
+
     adapter_result = execute_with_persisted_authorization(
         citizen_id, CONSUMER, purpose, requested_attributes=[], service_id=application.get("serviceId"),
         application_id=application_id, consent_id=consent_id,
-        operation=lambda: _discover_and_retrieve(requirement_code, citizen_id, application_id, correlation_id),
+        operation=_operation,
     )
 
     applied = []
 
     def mutate(requirement: dict) -> None:
-        applied.append(_apply_outcome(requirement, adapter_result))
+        applied.append(_apply_outcome(requirement, adapter_result, attempt_log))
 
     updated_application, updated_requirement = mutate_requirement_under_lock(application_id, requirement_code, mutate)
     if applied and applied[0]:

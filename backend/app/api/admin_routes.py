@@ -305,15 +305,30 @@ def _requirement_lineage_steps(req: dict, fulfillment_method: str, is_fallback: 
 
     # AUTO_FILL
     steps.append({"step": "Consent recorded", "detail": "Citizen granted Auto-Fill consent"})
-    steps.append({"step": "Provider discovery evaluated", "detail": f"{candidate_count} eligible provider(s) considered"})
-    if primary_candidate:
-        steps.append({
-            "step": "Primary provider unavailable" if is_fallback else "Primary provider selected",
-            "detail": primary_candidate.get("provider"),
-        })
-    if is_fallback:
-        steps.append({"step": "Fallback evaluation", "detail": "Next eligible, healthy provider identified"})
-        steps.append({"step": "Fallback provider selected", "detail": chosen_provider})
+    fallback_attempts = req.get("fallbackAttempts")
+    if fallback_attempts:
+        # Ground truth from the real in-request fallback cascade: one
+        # PRIMARY/FALLBACK selection + outcome step per provider actually
+        # tried in this operation, in order -- e.g. "Provider A (PRIMARY)
+        # -> FAILED -> Provider B (FALLBACK) -> SUCCESS".
+        steps.append({"step": "Provider discovery evaluated", "detail": f"{candidate_count} eligible provider(s) considered"})
+        for attempt in fallback_attempts:
+            role = "FALLBACK" if attempt.get("isFallback") else "PRIMARY"
+            steps.append({"step": f"{attempt.get('provider')} ({role})", "detail": "Attempt started"})
+            if attempt.get("success"):
+                steps.append({"step": "Retrieval succeeded", "detail": attempt.get("provider")})
+            else:
+                steps.append({"step": "Attempt failed", "detail": attempt.get("errorCategory") or "Unknown error"})
+    else:
+        if primary_candidate:
+            steps.append({"step": "Provider discovery evaluated", "detail": f"{candidate_count} eligible provider(s) considered"})
+            steps.append({
+                "step": "Primary provider unavailable" if is_fallback else "Primary provider selected",
+                "detail": primary_candidate.get("provider"),
+            })
+        if is_fallback:
+            steps.append({"step": "Fallback evaluation", "detail": "Next eligible, healthy provider identified"})
+            steps.append({"step": "Fallback provider selected", "detail": chosen_provider})
     if attempts > 1:
         steps.append({"step": "Automated retry", "detail": f"{attempts - 1} retr{'y' if attempts - 1 == 1 else 'ies'} attempted"})
 
@@ -371,12 +386,30 @@ def get_admin_application_detail(
             fulfillment_method = "MANUAL_UPLOAD" if req.get("documentId") or req.get("fulfillmentMethod") == "MANUAL_UPLOAD" else ("AUTO_FILL" if chosen_provider or req.get("canonical") else "PENDING")
 
             primary_candidate = candidates_sorted[0] if candidates_sorted else None
-            is_fallback = bool(primary_candidate) and fulfillment_method == "AUTO_FILL" and primary_candidate.get("providerId") != chosen_provider and primary_candidate.get("provider") != chosen_provider
+            fallback_attempts = req.get("fallbackAttempts")
+            if fallback_attempts:
+                # Ground truth recorded by the real in-request fallback
+                # cascade (app.engine.requirement_fulfillment) -- exactly
+                # which providers were tried, in order, for this attempt.
+                # Preferred over inference below, which can drift once a
+                # primary provider recovers after the fact.
+                is_fallback = bool(req.get("isFallback"))
+                primary_attempt_provider = fallback_attempts[0].get("provider")
+            else:
+                is_fallback = bool(primary_candidate) and fulfillment_method == "AUTO_FILL" and primary_candidate.get("providerId") != chosen_provider and primary_candidate.get("provider") != chosen_provider
+                primary_attempt_provider = primary_candidate.get("provider") if primary_candidate else None
             primary_incident = open_incidents_by_provider.get(primary_candidate.get("providerId")) if primary_candidate else None
 
             decision_reason = None
             if fulfillment_method == "AUTO_FILL":
-                if candidates_sorted:
+                if fallback_attempts:
+                    if not is_fallback:
+                        decision_reason = f"Primary provider ({primary_attempt_provider}) succeeded on the first attempt."
+                    else:
+                        failed_providers = ", ".join(a.get("provider") for a in fallback_attempts[:-1])
+                        successful_provider = fallback_attempts[-1].get("provider")
+                        decision_reason = f"Primary provider ({failed_providers}) failed; fallback source ({successful_provider}) was evaluated and succeeded within the same operation -- no repeat citizen action required."
+                elif candidates_sorted:
                     top = candidates_sorted[0]
                     if not is_fallback:
                         decision_reason = f"Primary authoritative source ({top.get('provider')}) selected based on healthy status ({top.get('healthStatus')}) and priority tier {top.get('priority', 10)}."

@@ -78,19 +78,29 @@ def retry_decision(dependency: dict, has_fallback_candidate: bool = False) -> st
     return FALLBACK_PROVIDER if has_fallback_candidate else WAITING_RETRY_EXHAUSTED
 
 
-def find_fallback_candidate(requirement_code: str, current_provider_id: Optional[str]) -> Optional[dict]:
+def find_fallback_candidate(requirement_code: str, current_provider_id: Optional[str] = None,
+                             exclude_provider_ids: Optional[set] = None) -> Optional[dict]:
     """Look for another eligible, healthy provider for this requirement using
     the existing, unmodified capability registry. Returns None if none
     exists -- callers must then leave the dependency waiting, never invent a
-    provider."""
+    provider.
+
+    ``exclude_provider_ids`` generalizes ``current_provider_id`` to a whole
+    set, for a caller (an in-request fallback cascade) that must not
+    re-select ANY provider already attempted this operation, not just the
+    single most recent one.
+    """
     from app.engine.adapters import integration_health
     from app.engine.registry import dependency_registry
 
+    excluded = set(exclude_provider_ids or ())
+    if current_provider_id:
+        excluded.add(current_provider_id)
     candidates = [
         item for item in dependency_registry(integration_health())
         if item.get("requirementCode") == requirement_code
         and item.get("healthStatus") in {"AVAILABLE", "HEALTHY"}
-        and item.get("providerId") != current_provider_id
+        and item.get("providerId") not in excluded
     ]
     if not candidates:
         return None

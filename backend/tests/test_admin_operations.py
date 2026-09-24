@@ -155,6 +155,52 @@ class AdminOperationsTests(unittest.TestCase):
         finally:
             record_provider_health_transition(primary_system, primary_system, None, "UNAVAILABLE", "AVAILABLE", None)
 
+    def test_admin_detail_reflects_a_real_fallback_cascade_end_to_end(self):
+        from unittest.mock import patch
+        from app.api.citizen_routes import ApplySchemeRequest, apply_to_scheme
+        from app.engine.consent_manager import create_consent
+        from app.core.persistence import get_application as get_application_raw
+        from app.engine import requirement_fulfillment, retry_policy
+        from types import SimpleNamespace
+
+        def _user(citizen_id):
+            return {"userId": citizen_id, "citizenId": citizen_id, "name": "Test", "role": "CITIZEN"}
+
+        application = apply_to_scheme(ApplySchemeRequest(schemeId="SCH-MH-2026"), SimpleNamespace(state=SimpleNamespace()), user=_user("CITIZEN_ADMIN_FB_001"))
+        code = application["requirements"][0]["requirementCode"]
+        app_snapshot = get_application_raw(application["appId"])
+        receipt = create_consent(
+            "CITIZEN_ADMIN_FB_001", True, attributes=[], service_id=app_snapshot.get("serviceId"),
+            application_id=application["appId"], purpose=requirement_fulfillment.auto_fill_purpose(code),
+        )
+        primary = {"serviceId": "SVC-X", "providerId": "PROV-X", "provider": "Provider X", "priority": 10}
+        fallback = {"serviceId": "SVC-Y", "providerId": "PROV-Y", "provider": "Provider Y", "priority": 20}
+        from app.engine.adapters import AdapterResult
+        try:
+            with patch.object(requirement_fulfillment, "select_dependency_provider", return_value=primary), \
+                 patch.object(requirement_fulfillment, "request_registered_service", side_effect=[
+                     AdapterResult(None, success=False, error_category="TIMEOUT", retryable=True),
+                     AdapterResult({"id": "REC-1", "canonical": {"value": "ok"}, "validUntil": None}, success=True, metadata={"providerId": "PROV-Y"}),
+                 ]), \
+                 patch.object(retry_policy, "find_fallback_candidate", return_value=fallback):
+                requirement_fulfillment.fulfill_requirement(app_snapshot, code, "CITIZEN_ADMIN_FB_001", receipt["consentId"])
+
+            admin_user = {"userId": "ADMIN_MH_01", "role": "ADMIN"}
+            detail = get_admin_application_detail(application["appId"], user=admin_user)
+            req = next(r for r in detail["requirements"] if r["code"] == code)
+            self.assertTrue(req["isFallback"])
+            self.assertIn("Provider X", req["decisionReason"])
+            self.assertIn("Provider Y", req["decisionReason"])
+            step_labels = [s["step"] for s in req["lineageSteps"]]
+            self.assertIn("Provider X (PRIMARY)", step_labels)
+            self.assertIn("Provider Y (FALLBACK)", step_labels)
+            self.assertIn("Attempt failed", step_labels)
+            self.assertIn("Retrieval succeeded", step_labels)
+        finally:
+            with Session(engine) as session:
+                session.query(ApplicationRow).filter(ApplicationRow.app_id == application["appId"]).delete(synchronize_session=False)
+                session.commit()
+
 
 if __name__ == "__main__":
     unittest.main()
