@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.department_api.common import correlation_id_header, envelope, not_found, session_dependency
+from app.department_api.common import correlation_id_header, envelope, not_found, session_dependency, department_health
+from app.department_api.resolution import PersonIndex, register_resolver
 from app.sandbox.skill_employment import models
 
 router = APIRouter(prefix="/departments/skill-employment", tags=["skill_employment"])
@@ -14,7 +15,7 @@ get_session = session_dependency(models.ENGINE)
 
 @router.get("/health")
 def health():
-    return {"status": "AVAILABLE", "sourceSystem": SOURCE_SYSTEM, "synthetic": True}
+    return department_health(models.ENGINE, SOURCE_SYSTEM)
 
 
 @router.get("/skill-certifications/{citizen_ref}")
@@ -41,3 +42,11 @@ def get_employment_registration(citizen_ref: str, correlation_id=Depends(correla
         return not_found(SOURCE_SYSTEM, correlation_id)
     data = {"name": jobseeker.name, "exchange_office": registration.exchange_office}
     return envelope(data, source_system=SOURCE_SYSTEM, correlation_id=correlation_id, record_id=registration.registration_id, status=registration.status)
+
+
+# Canonical record lookup for SANGAM: this department finds the person in its
+# own records (see app.department_api.resolution) and serves the record
+# through the handlers above.
+register_resolver(router, get_session, PersonIndex(models.Jobseeker, id_field="jobseeker_id", name_field="name", dob_field="dateOfBirth",
+                                                   phone_field="mobile", identifier_names=('jobseeker_id',)),
+                  SOURCE_SYSTEM, {"skill-certifications": get_skill_certification, "employment-registrations": get_employment_registration})

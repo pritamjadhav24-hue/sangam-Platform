@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { schemeImage } from '../schemeImages';
 import { languageText, categoryLabel } from '../i18n';
 import { applicationStateLabel } from '../applicationState';
 
@@ -40,7 +41,7 @@ export default function SchemesPage({ schemes: schemesProp, applications, onView
         <div>
           <p className="eyebrow">{language === 'en' ? 'Scheme catalogue' : 'योजना सूची'}</p>
           <h1>{language === 'en' ? 'Government schemes & services' : 'शासकीय योजना व सेवा'}</h1>
-          <p className="muted">{language === 'en' ? 'Discover schemes across Maharashtra government departments, verified automatically through SANGAM.' : 'महाराष्ट्र शासनाच्या विविध विभागांमधील योजना शोधा, SANGAM द्वारे आपोआप पडताळलेल्या.'}</p>
+          <p className="muted">{language === 'en' ? 'Available services from connected departments.' : 'सहभागी विभागांमधील योजना शोधा. SANGAM आपली माहिती आपोआप पडताळते.'}</p>
         </div>
       </div>
 
@@ -68,17 +69,18 @@ export default function SchemesPage({ schemes: schemesProp, applications, onView
             {filtered.map(scheme => {
               const id = scheme.serviceId || scheme.schemeId;
               const application = appliedByScheme.get(id);
+              const image = schemeImage(scheme, language);
               return (
-                <article className="scheme-card card" key={id}>
+                <article className="scheme-card card with-image" key={id}>
+                  <img className="scheme-card-image" src={image.src} alt={image.alt} loading="lazy" width="720" height="405" />
                   <div className="scheme-card-heading">
                     {scheme.category && <span className="tag">{categoryLabel(scheme.category, language)}</span>}
-                    {scheme.synthetic && <span className="tag demo-tag">{language === 'en' ? 'Demo' : 'नमुना'}</span>}
                     {application && <span className="tag applied-tag">{application.status === 'SUBMITTED' ? applicationStateLabel('SUBMITTED', language) : t.alreadyApplied}</span>}
                   </div>
                   <h3>{language === 'en' ? scheme.name : (scheme.nameMr || scheme.name)}</h3>
                   <p>{language === 'en' ? scheme.description : (scheme.descriptionMr || scheme.description)}</p>
                   <div className="scheme-card-footer">
-                    <small>{language === 'en' ? scheme.department : (scheme.departmentMr || scheme.department)}</small>
+                    <small>{language === 'en' ? `Offered by ${scheme.department}` : `${scheme.departmentMr || scheme.department} द्वारे उपलब्ध`}</small>
                     <button className="outline" onClick={() => onViewScheme(id)}>{language === 'en' ? 'View details' : 'तपशील पहा'}</button>
                   </div>
                 </article>

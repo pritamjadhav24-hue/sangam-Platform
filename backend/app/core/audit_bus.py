@@ -24,6 +24,23 @@ class AuditBus:
         # (tiny, non-blocking) read-allocate-append critical section without
         # changing the ledger's shape or semantics.
         self._lock = threading.Lock()
+        # Highest sequence number known to be allocated -- in this process or
+        # in the persisted ledger.  Sequences come from this high-water mark,
+        # never from len(self.entries): the persisted ledger can have gaps
+        # (the legacy snapshot is last-writer-wins across the API process,
+        # the worker and reloads), and after hydrating N rows with gaps,
+        # len + 1 re-issues a sequence that is already in use.
+        self._last_sequence = 0
+
+    def _hash(self, entry: dict[str, Any]) -> str:
+        content = {k: v for k, v in entry.items() if k != "entryHash"}
+        return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
+
+    def _next_sequence(self) -> int:
+        # Caller holds self._lock.
+        tail = self.entries[-1]["sequence"] if self.entries else 0
+        self._last_sequence = max(self._last_sequence, tail) + 1
+        return self._last_sequence
 
     def append(self, who: str, what: str, why: str, source: str, action: str,
                consent_id: str | None = None, payload: Any = None,
@@ -36,20 +53,70 @@ class AuditBus:
         with self._lock:
             previous_hash = self.entries[-1]["entryHash"] if self.entries else "GENESIS"
             entry = {
-                "sequence": len(self.entries) + 1, "who": who, "what": what, "why": why,
+                "sequence": self._next_sequence(), "who": who, "what": what, "why": why,
                 "when": datetime.now(timezone.utc).isoformat(), "source": source, "action": action,
                 "consentId": consent_id, "correlationId": correlation_id,
                 "payloadHash": payload_hash, "previousHash": previous_hash,
             }
-            entry["entryHash"] = hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()
+            entry["entryHash"] = self._hash(entry)
             self.entries.append(entry)
         return entry
+
+    def hydrate(self, entries: list[dict[str, Any]], persisted_max_sequence: int = 0) -> None:
+        """Load the persisted ledger (ordered by sequence) and continue numbering above it."""
+        with self._lock:
+            self.entries.extend(entries)
+            known = max((entry.get("sequence") or 0 for entry in self.entries), default=0)
+            self._last_sequence = max(self._last_sequence, known, persisted_max_sequence or 0)
+
+    def reconcile_for_persistence(self, persisted: dict[int, Any], skip=lambda entry: False) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return the entries to write to a ledger that already holds `persisted`
+        (sequence -> entryHash of rows the snapshot keeps).
+
+        - An entry identical (same sequence and entryHash) to a kept row, or to an
+          earlier in-memory entry, is written once: persistence is idempotent.
+        - An entry whose sequence is held by a *different* record was allocated
+          from stale numbering.  It is never dropped: it is re-appended at the
+          head of the ledger under a fresh sequence above everything persisted,
+          re-chained to the current tail, and keeps `resequencedFrom`.
+        Returns (entries_to_write, resequenced_entries).
+        """
+        with self._lock:
+            self._last_sequence = max([self._last_sequence, *persisted.keys()])
+            to_write, conflicts, seen, keep = [], [], {}, []
+            conflict_hashes = set()
+            for entry in self.entries:
+                sequence, entry_hash = entry.get("sequence"), entry.get("entryHash")
+                if entry_hash in conflict_hashes:
+                    continue  # a second copy of a record already being re-appended
+                if sequence in seen:
+                    if seen[sequence] == entry_hash:
+                        continue  # the same record twice in memory: keep one copy
+                    conflicts.append(entry); conflict_hashes.add(entry_hash)
+                    continue
+                if not skip(entry) and sequence in persisted:
+                    if persisted[sequence] != entry_hash:
+                        conflicts.append(entry); conflict_hashes.add(entry_hash)
+                        continue
+                else:
+                    if not skip(entry):
+                        to_write.append(entry)
+                seen[sequence] = entry_hash
+                keep.append(entry)
+            self.entries[:] = keep
+            for entry in conflicts:
+                entry["resequencedFrom"] = entry["sequence"]
+                entry["sequence"] = self._next_sequence()
+                entry["previousHash"] = self.entries[-1]["entryHash"] if self.entries else "GENESIS"
+                entry["entryHash"] = self._hash(entry)
+                self.entries.append(entry)
+                to_write.append(entry)
+            return to_write, conflicts
 
     def verify(self) -> bool:
         previous = "GENESIS"
         for entry in self.entries:
-            content = {k: v for k, v in entry.items() if k != "entryHash"}
-            if entry["previousHash"] != previous or hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest() != entry["entryHash"]:
+            if entry["previousHash"] != previous or self._hash(entry) != entry["entryHash"]:
                 return False
             previous = entry["entryHash"]
         return True
@@ -74,8 +141,10 @@ class AuditBus:
             self._processed_event_ids.add(event_id)
 
     def reset(self) -> None:
-        self.entries.clear()
-        self._processed_event_ids.clear()
+        with self._lock:
+            self.entries.clear()
+            self._processed_event_ids.clear()
+            self._last_sequence = 0
 
 
 audit_bus = AuditBus()

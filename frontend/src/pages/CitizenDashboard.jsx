@@ -2,13 +2,7 @@ import { useState } from 'react';
 import { languageText, categoryLabel } from '../i18n';
 import { NEEDS_ATTENTION_STATUSES } from '../requirementState';
 import { applicationStateClass, applicationStateLabel } from '../applicationState';
-
-function greetingKey() {
-  const hour = new Date().getHours();
-  if (hour < 12) return 'goodMorning';
-  if (hour < 17) return 'goodAfternoon';
-  return 'goodEvening';
-}
+import { schemeImage } from '../schemeImages';
 
 function firstName(fullName) {
   return (fullName || '').split(' ')[0] || fullName;
@@ -49,21 +43,22 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
     <main className="container citizen-home">
       <section className="citizen-welcome">
         <div>
-          <p className="eyebrow">{t[greetingKey()]}</p>
-          <h1>{t[greetingKey()]}, {firstName(citizen?.name)}</h1>
+          <h1>{language === 'en' ? `Welcome, ${firstName(citizen?.name)}` : `स्वागत आहे, ${firstName(citizen?.name)}`}</h1>
           <p>{t.heroBlurb}</p>
         </div>
-        <div className="welcome-mark">SANGAM<span>{language === 'en' ? 'Federated Government Interoperability Platform' : 'फेडरेटेड शासकीय इंटरऑपरेबिलिटी प्लॅटफॉर्म'}</span></div>
       </section>
 
       <section className="citizen-actions">
-        <div className="search-service browse-cta">
-          <label>{language === 'en' ? 'Explore schemes' : 'योजना शोधा'}</label>
-          <p className="muted">{language === 'en' ? 'Search and filter every government scheme available through SANGAM.' : 'SANGAM द्वारे उपलब्ध सर्व शासकीय योजना शोधा व गाळा.'}</p>
+        <div className="card action-card">
+          <p className="eyebrow">{language === 'en' ? 'Services' : 'सेवा'}</p>
+          <h2>{language === 'en' ? 'Find a service' : 'सेवा शोधा'}</h2>
+          <p className="muted">{language === 'en' ? 'Browse services from connected departments.' : 'जोडलेल्या विभागांच्या सेवा पहा.'}</p>
           <button className="primary" onClick={() => navigate('schemes')}>{language === 'en' ? 'Browse all schemes' : 'सर्व योजना पहा'}</button>
         </div>
-        <div className="track-box">
-          <div><p className="eyebrow">{t.trackTitle}</p><label htmlFor="quick-track">{t.applicationId}</label></div>
+        <div className="card action-card">
+          <p className="eyebrow">{language === 'en' ? 'Applications' : 'अर्ज'}</p>
+          <h2>{t.trackTitle}</h2>
+          <label htmlFor="quick-track">{t.applicationId}</label>
           <div className="track-input">
             <input id="quick-track" placeholder={t.applicationId} onKeyDown={event => { if (event.key === 'Enter') trackApplication(event.currentTarget.value); }} />
             <button className="primary" onClick={() => trackApplication(document.getElementById('quick-track')?.value)}>{t.track}</button>
@@ -131,8 +126,10 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
           <div className="scheme-grid">
             {highlighted.map(scheme => {
               const id = scheme.serviceId || scheme.schemeId;
+              const image = schemeImage(scheme, language);
               return (
-                <article className="scheme-card card" key={id}>
+                <article className="scheme-card card with-image" key={id}>
+                  <img className="scheme-card-image" src={image.src} alt={image.alt} loading="lazy" width="720" height="405" />
                   <div className="scheme-card-heading">
                     {scheme.category && <span className="tag">{categoryLabel(scheme.category, language)}</span>}
                     {appliedSchemeIds.has(id) && <span className="tag applied-tag">{t.alreadyApplied}</span>}
@@ -140,7 +137,7 @@ export default function CitizenDashboard({ schemes, applications, citizen, navig
                   <h3>{language === 'en' ? scheme.name : (scheme.nameMr || scheme.name)}</h3>
                   <p>{language === 'en' ? scheme.description : (scheme.descriptionMr || scheme.description)}</p>
                   <div className="scheme-card-footer">
-                    <small>{language === 'en' ? scheme.department : (scheme.departmentMr || scheme.department)}</small>
+                    <small>{language === 'en' ? `Offered by ${scheme.department}` : `${scheme.departmentMr || scheme.department} द्वारे उपलब्ध`}</small>
                     <button className="outline" onClick={() => onViewScheme(id)}>{language === 'en' ? 'View details' : 'तपशील पहा'}</button>
                   </div>
                 </article>

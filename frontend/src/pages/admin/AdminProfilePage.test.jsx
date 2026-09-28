@@ -17,11 +17,13 @@ const PROFILE = {
 describe('AdminProfilePage', () => {
   it('shows identity, session and the read-only effective access model', async () => {
     render(<AdminProfilePage api={{ adminProfile: vi.fn().mockResolvedValue(PROFILE) }} />);
-    await waitFor(() => expect(screen.getByText('Platform Administrator')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Platform Administrator' })).toBeInTheDocument());
     expect(screen.getByText('ADMIN_MH_01')).toBeInTheDocument();
     expect(screen.getByText('Admin operations console')).toBeInTheDocument();
     expect(screen.getByText('2 of 5')).toBeInTheDocument();
-    expect(screen.getByText(/permissions are not editable at runtime/)).toBeInTheDocument();
+    expect(screen.getByText('Read-only.', { exact: false })).toBeInTheDocument();
+    expect(screen.getByText('Security')).toBeInTheDocument();
+    expect(screen.getByText('Last password change').nextSibling).toHaveTextContent('Not recorded'); // never invented
     // No fake permission toggles.
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     expect(screen.queryByRole('switch')).not.toBeInTheDocument();

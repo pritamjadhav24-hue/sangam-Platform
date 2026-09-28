@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Skeleton } from '../../components/ui';
 
 export default function AdminSchemeDetailPage({ api, schemeId, onBack, onOpenProvider }) {
   const [detail, setDetail] = useState(null);
@@ -17,7 +18,7 @@ export default function AdminSchemeDetailPage({ api, schemeId, onBack, onOpenPro
 
   const back = <button className="outline small back-link" onClick={onBack}>← Back to Schemes</button>;
 
-  if (loading) return <main className="container">{back}<p className="loading-state">Loading scheme detail…</p></main>;
+  if (loading) return <main className="container">{back}<Skeleton lines={4} label="Loading scheme detail" /></main>;
   if (error || !detail) return <main className="container">{back}<div className="alert danger" role="alert">{error || 'Scheme not found.'}</div></main>;
 
   return (
@@ -30,7 +31,7 @@ export default function AdminSchemeDetailPage({ api, schemeId, onBack, onOpenPro
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
           <span className={`status ${detail.active ? 'found' : 'exception'}`}>{detail.active ? 'ACTIVE' : 'INACTIVE'}</span>
           {detail.category && <span className="tag" style={{ fontSize: '11px' }}>{detail.category}</span>}
-          {detail.synthetic && <span className="tag" style={{ fontSize: '11px' }}>Synthetic demo scheme</span>}
+          {detail.synthetic && <span className="tag" style={{ fontSize: '11px' }}>Synthetic data</span>}
           <span className="tag" style={{ fontSize: '11px' }}>{detail.applicationCount} application(s)</span>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '14px', marginTop: '16px' }}>
@@ -47,7 +48,7 @@ export default function AdminSchemeDetailPage({ api, schemeId, onBack, onOpenPro
         <div className="section-heading">
           <div>
             <h2>Requirements</h2>
-            <p>Each requirement's capability is fulfilled by providers registered for it in the Provider Registry; with no eligible provider, only manual upload is possible.</p>
+            <p>Providers that can answer each requirement. Without one, the citizen uploads the document.</p>
           </div>
           <span className="count-badge">{detail.requirements.length} requirements</span>
         </div>

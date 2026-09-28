@@ -45,7 +45,7 @@ class GenericDependencyEngineTests(unittest.TestCase):
         self.assertTrue(initiate_dependency("CITIZEN_001", academic_app, "ACADEMIC_RECORD")["success"])
 
     def test_capability_projection_is_authoritative_over_service_payload(self):
-        capability = {"requirementCode": "CUSTOM_REQUIREMENT", "provider": "Provider B", "providerId": "PROVIDER-B", "requiredService": "Custom service", "serviceName": "Custom service", "serviceId": "SERVICE-B", "adapter": "REST API", "priority": 1}
+        capability = {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "CUSTOM_REQUIREMENT", "provider": "Provider B", "providerId": "PROVIDER-B", "requiredService": "Custom service", "serviceName": "Custom service", "serviceId": "SERVICE-B", "adapter": "REST API", "priority": 1}
         with patch("app.core.persistence.provider_capability_snapshot", return_value=[capability]):
             selected = select_dependency_provider("CUSTOM_REQUIREMENT", [{"system": "Provider B", "providerId": "PROVIDER-B", "status": "AVAILABLE"}])
         self.assertEqual(selected["providerId"], "PROVIDER-B")
@@ -63,8 +63,8 @@ class GenericDependencyEngineTests(unittest.TestCase):
 
     def test_available_provider_wins_over_unhealthy_provider(self):
         candidates = [
-            {"requirementCode": "CUSTOM", "provider": "Unhealthy", "providerId": "UNHEALTHY", "requiredService": "Custom", "serviceName": "Custom", "serviceId": "S-1", "adapter": "REST API", "priority": 1},
-            {"requirementCode": "CUSTOM", "provider": "Healthy", "providerId": "HEALTHY", "requiredService": "Custom", "serviceName": "Custom", "serviceId": "S-2", "adapter": "REST API", "priority": 10},
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "CUSTOM", "provider": "Unhealthy", "providerId": "UNHEALTHY", "requiredService": "Custom", "serviceName": "Custom", "serviceId": "S-1", "adapter": "REST API", "priority": 1},
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "CUSTOM", "provider": "Healthy", "providerId": "HEALTHY", "requiredService": "Custom", "serviceName": "Custom", "serviceId": "S-2", "adapter": "REST API", "priority": 10},
         ]
         with patch("app.core.persistence.provider_capability_snapshot", return_value=candidates):
             selected = select_dependency_provider("CUSTOM", [{"system": "Unhealthy", "providerId": "UNHEALTHY", "status": "UNAVAILABLE"}, {"system": "Healthy", "providerId": "HEALTHY", "status": "AVAILABLE"}])
@@ -82,7 +82,7 @@ class GenericDependencyEngineTests(unittest.TestCase):
                     session.delete(capability)
                     session.commit()
                     self.assertFalse(request_registered_service(service.service_id, "CITIZEN_001", requirement_code="DOMICILE_PROOF").success)
-                    capability = ProviderCapabilityRow(capability_id=f"TEST:{service.service_id}", provider_id=provider.provider_id, capability_code="DOMICILE_PROOF", service_id=service.service_id, enabled=False, payload={})
+                    capability = ProviderCapabilityRow(capability_id=f"TEST:{service.service_id}", provider_id=provider.provider_id, capability_code="DOMICILE_PROOF", service_id=service.service_id, enabled=False, payload={"authorization": {"authoritative": True}})
                     session.add(capability)
                     session.commit()
                     self.assertFalse(request_registered_service(service.service_id, "CITIZEN_001", requirement_code="DOMICILE_PROOF").success)

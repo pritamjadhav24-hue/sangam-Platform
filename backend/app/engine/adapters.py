@@ -25,6 +25,76 @@ _integrations = {"Civil Registry": {"adapterType": "Federated SSO", "service": "
 def _now() -> str: return datetime.now(timezone.utc).isoformat()
 
 
+# Only infrastructure failures say anything about a provider's health. A
+# "no record for this citizen" (404 -> VALIDATION_ERROR) or a rejected
+# credential is a normal answer from a healthy department system.
+HEALTH_AFFECTING_CATEGORIES = RETRYABLE_CATEGORIES | {"MALFORMED_RESPONSE"}
+# A recorded runtime failure marks a provider DEGRADED only while it is
+# recent and nothing has succeeded since -- never permanently.
+DEGRADED_WINDOW_SECONDS = 60
+DEPARTMENT_PROBE_TTL_SECONDS = 10
+DEPARTMENT_PROBE_TIMEOUT_SECONDS = 1.5
+DEPARTMENT_SLOW_MS = 1000
+_department_probes: dict[str, dict] = {}
+
+
+def department_key_from_path(http_path: str | None) -> str | None:
+    """'/departments/social-welfare/...' -> 'SOCIAL_WELFARE'."""
+    import re
+    match = re.match(r"^/?departments/([a-z0-9-]+)/", str(http_path or ""))
+    return match.group(1).upper().replace("-", "_") if match else None
+
+
+def department_base_url(config: dict) -> str | None:
+    """Each department is its own service: DEPARTMENT_API_URL_<DEPARTMENT>
+    (e.g. DEPARTMENT_API_URL_REVENUE) wins; the provider's configured
+    endpointRef (a single shared base URL) is the fallback."""
+    http_path = config.get("httpPath") or (config.get("payload") or {}).get("httpPath")
+    key = department_key_from_path(http_path)
+    specific = os.getenv(f"DEPARTMENT_API_URL_{key}") if key else None
+    if specific:
+        return specific
+    endpoint_ref = config.get("endpointRef")
+    return os.getenv(endpoint_ref) if endpoint_ref else None
+
+
+def probe_department(base_url: str) -> dict:
+    """GET <department service>/health, cached briefly per service. The
+    department reports AVAILABLE only when it can also reach its own DB."""
+    cached = _department_probes.get(base_url)
+    if cached and time.monotonic() - cached["_at"] < DEPARTMENT_PROBE_TTL_SECONDS:
+        return cached
+    started = time.perf_counter()
+    try:
+        with urlopen(Request(base_url.rstrip("/") + "/health", headers={"Accept": "application/json"}, method="GET"),
+                     timeout=DEPARTMENT_PROBE_TIMEOUT_SECONDS) as response:
+            body = json.loads(response.read(64 * 1024).decode("utf-8") or "{}")
+            reachable = response.status == 200 and body.get("status") == "AVAILABLE"
+    except Exception:
+        reachable = False
+    result = {"reachable": reachable, "latencyMs": round((time.perf_counter() - started) * 1000, 1), "checkedAt": _now(), "_at": time.monotonic()}
+    _department_probes[base_url] = result
+    return result
+
+
+def _recent_failure(runtime: dict) -> bool:
+    failed_at, succeeded_at = runtime.get("lastFailureAt"), runtime.get("lastSuccessAt")
+    if not failed_at or not runtime.get("errorCategory"):
+        return False
+    if succeeded_at and succeeded_at > failed_at:
+        return False
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(failed_at)).total_seconds()
+    except ValueError:
+        return False
+    return age <= DEGRADED_WINDOW_SECONDS
+
+
+def _record_runtime_failure(source: str, category: str) -> None:
+    if category in HEALTH_AFFECTING_CATEGORIES:
+        _runtime_health[source] = {**_runtime_health.get(source, {}), "lastFailureAt": _now(), "errorCategory": category}
+
+
 def _configured_integrations() -> dict:
     configured = {}
     try:
@@ -176,13 +246,13 @@ class SourceAdapter(ProviderAdapter):
                 normalized = self.normalize(self.fetcher(citizen_id))
                 if normalized is None: raise AdapterError("Malformed provider response", "MALFORMED_RESPONSE")
                 elapsed = round((time.perf_counter() - started) * 1000, 2)
-                _runtime_health[self.source] = {"lastSuccessAt": _now(), "lastResponseMs": elapsed, "errorCategory": None}
+                _runtime_health[self.source] = {**_runtime_health.get(self.source, {}), "lastSuccessAt": _now(), "lastResponseMs": elapsed, "errorCategory": None}
                 return AdapterResult(normalized, attempts=attempt, delayed=attempt > 1, provider=self.source, operation=operation, correlation_id=correlation_id, idempotency_key=idempotency_key, response_ms=elapsed, success=True, metadata={"providerId": self.provider_id})
             except TimeoutError: category = "TIMEOUT"
             except ConnectionError: category = "NETWORK_ERROR"
             except AdapterError as error: category = error.category
             except Exception: category = "UPSTREAM_ERROR"
-            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": category}
+            _record_runtime_failure(self.source, category)
             if category not in RETRYABLE_CATEGORIES or attempt >= int(self.config.get("maxAttempts", 3)):
                 return self._failure(operation, category, "Sandbox provider operation failed", correlation_id, idempotency_key, attempts=attempt)
             time.sleep(0.08 * attempt)
@@ -301,6 +371,34 @@ class CSVFileAdapter(SourceAdapter):
         except (OSError, UnicodeError, csv.Error): return self._failure(request.operation, "MALFORMED_RESPONSE", "Configured CSV could not be parsed", request.correlation_id, request.idempotency_key)
 
 
+def resolve_path_for(config: dict):
+    """The department's canonical lookup path for this provider. Declared in
+    the registry (``resolvePath``), or derived from the provider's record path
+    by the department API convention: ``/departments/<d>/<record>/{citizenRef}``
+    -> ``/departments/<d>/resolve/<record>``. ``lookupContract: LEGACY`` opts out."""
+    if str(config.get("lookupContract", "CANONICAL")).upper() == "LEGACY":
+        return None
+    if config.get("resolvePath"):
+        return config["resolvePath"]
+    parts = [part for part in str(config.get("httpPath") or "").split("/") if part]
+    if len(parts) >= 3 and parts[-1] == "{citizenRef}":
+        return "/" + "/".join([*parts[:-2], "resolve", parts[-2]])
+    return None
+
+
+def canonical_lookup(citizen_id: str, data: dict) -> dict:
+    """The minimum SANGAM shares so a department can find the person: its
+    canonical identity (never the application or other departments' data)."""
+    identity = data.get("identity")
+    if identity is None:
+        from app.engine.entity_resolution import citizen_identity
+        identity = citizen_identity(citizen_id)
+    lookup = {"citizenRef": citizen_id, **{key: identity.get(key) for key in ("name", "dob", "phone", "address") if identity.get(key)}}
+    if data.get("identifiers"):
+        lookup["identifiers"] = dict(data["identifiers"])
+    return lookup
+
+
 class DepartmentSandboxAPIAdapter(SourceAdapter):
     """Calls a simulated department's own REST API over HTTP.
 
@@ -322,8 +420,22 @@ class DepartmentSandboxAPIAdapter(SourceAdapter):
         # Every call is a real HTTP request, so without a configured base URL
         # or path this provider cannot serve anything -- report that instead
         # of AVAILABLE, so discovery never selects a provider bound to fail.
-        if result["status"] in {"HEALTHY", "AVAILABLE"} and (not http_path or not (endpoint_ref and os.getenv(endpoint_ref))):
+        base_url = department_base_url({**self.config, "httpPath": http_path})
+        department_key = department_key_from_path(http_path)
+        dedicated_service = bool(department_key and os.getenv(f"DEPARTMENT_API_URL_{department_key}"))
+        if result["status"] in {"HEALTHY", "AVAILABLE"} and (not http_path or not base_url):
             result.update({"status": "MISCONFIGURED", "errorCategory": "CONFIGURATION_ERROR"})
+        elif result["status"] in {"HEALTHY", "AVAILABLE"} and dedicated_service:
+            # Only a department running as its own service is probed; the
+            # legacy shared department API keeps configuration-based health.
+            # A real check of the department's own service (and, through it,
+            # its database): an unreachable department is UNAVAILABLE.
+            probe = probe_department(base_url)
+            result.update({"departmentKey": department_key_from_path(http_path), "probeLatencyMs": probe["latencyMs"], "probedAt": probe["checkedAt"]})
+            if not probe["reachable"]:
+                result.update({"status": "UNAVAILABLE", "errorCategory": "UPSTREAM_UNAVAILABLE"})
+            elif probe["latencyMs"] > DEPARTMENT_SLOW_MS:
+                result.update({"status": "DEGRADED", "errorCategory": "TIMEOUT"})
         return result
 
     def _auth_headers(self):
@@ -353,6 +465,8 @@ class DepartmentSandboxAPIAdapter(SourceAdapter):
             "sourceSystem": response.get("sourceSystem"),
             "raw": data,
             "canonical": apply_schema_mapping(self.provider_id, data),
+            # How the department found the person (canonical lookup contract).
+            "departmentMatch": response.get("match") if isinstance(response.get("match"), dict) else None,
         }
 
     def _http_call(self, request):
@@ -360,51 +474,92 @@ class DepartmentSandboxAPIAdapter(SourceAdapter):
         if invalid:
             invalid.operation, invalid.correlation_id, invalid.idempotency_key = request.operation, request.correlation_id, request.idempotency_key
             return invalid
-        endpoint = os.getenv(self.config.get("endpointRef")) if self.config.get("endpointRef") else None
+        endpoint = department_base_url(self.config)
         path_template = self.config.get("httpPath")
         if not endpoint or not path_template:
             return self._failure(request.operation, "CONFIGURATION_ERROR", "Department sandbox API path is not configured", request.correlation_id, request.idempotency_key)
         citizen_ref = request.data.get("citizenId") or ""
         if not citizen_ref:
             return self._failure(request.operation, "VALIDATION_ERROR", "citizenId is required", request.correlation_id, request.idempotency_key)
-        try:
-            url = validate_endpoint(endpoint.rstrip("/") + "/" + path_template.format(citizenRef=citizen_ref).lstrip("/"), self.config.get("environment", "SANDBOX"))
-        except ValueError:
-            return self._failure(request.operation, "CONFIGURATION_ERROR", "Department sandbox API endpoint is invalid", request.correlation_id, request.idempotency_key)
         headers = {"Accept": "application/json", "X-Correlation-ID": request.correlation_id or "", "Idempotency-Key": request.idempotency_key or ""}
         try:
             headers.update(self._auth_headers())
         except AdapterError as error:
             return self._failure(request.operation, error.category, "Department sandbox API authentication is not supported", request.correlation_id, request.idempotency_key)
+        environment = self.config.get("environment", "SANDBOX")
+        try:
+            resolve_path = resolve_path_for(self.config)
+            resolve_url = validate_endpoint(endpoint.rstrip("/") + "/" + resolve_path.lstrip("/"), environment) if resolve_path else None
+            legacy_url = validate_endpoint(endpoint.rstrip("/") + "/" + path_template.format(citizenRef=citizen_ref).lstrip("/"), environment)
+        except ValueError:
+            return self._failure(request.operation, "CONFIGURATION_ERROR", "Department sandbox API endpoint is invalid", request.correlation_id, request.idempotency_key)
         started = time.perf_counter()
         try:
-            with urlopen(Request(url, headers=headers, method="GET"), timeout=min(max(int(self.config.get("timeoutSeconds", 5)), 1), 120)) as response:
-                raw = response.read(1024 * 1024 + 1)
-                if len(raw) > 1024 * 1024:
-                    return self._failure(request.operation, "MALFORMED_RESPONSE", "Department sandbox API response exceeded the configured size limit", request.correlation_id, request.idempotency_key, response.status)
-                normalized = self.normalize(json.loads(raw.decode("utf-8")))
-                if normalized is None:
-                    return self._failure(request.operation, "MALFORMED_RESPONSE", "Department sandbox API response was not usable", request.correlation_id, request.idempotency_key, response.status)
-                elapsed = round((time.perf_counter() - started) * 1000, 2)
-                _runtime_health[self.source] = {"lastSuccessAt": _now(), "lastResponseMs": elapsed, "errorCategory": None}
-                return AdapterResult(normalized, provider=self.source, operation=request.operation, correlation_id=request.correlation_id, idempotency_key=request.idempotency_key, response_ms=elapsed, success=True, status_code=response.status, metadata={"providerId": self.provider_id})
+            response = None
+            if resolve_url:
+                # The canonical lookup contract: the department finds the
+                # person in its own records from SANGAM's canonical identity.
+                response = self._send(resolve_url, "POST", {**headers, "Content-Type": "application/json"}, canonical_lookup(citizen_ref, request.data))
+            if response is None:
+                # A department that does not (yet) offer the contract: the
+                # original lookup by SANGAM's citizen reference.
+                response = self._send(legacy_url, "GET", headers)
+            status, raw = response
+            if len(raw) > 1024 * 1024:
+                return self._failure(request.operation, "MALFORMED_RESPONSE", "Department sandbox API response exceeded the configured size limit", request.correlation_id, request.idempotency_key, status)
+            normalized = self.normalize(json.loads(raw.decode("utf-8")))
+            if normalized is None:
+                return self._failure(request.operation, "MALFORMED_RESPONSE", "Department sandbox API response was not usable", request.correlation_id, request.idempotency_key, status)
+            elapsed = round((time.perf_counter() - started) * 1000, 2)
+            _runtime_health[self.source] = {**_runtime_health.get(self.source, {}), "lastSuccessAt": _now(), "lastResponseMs": elapsed, "errorCategory": None}
+            return AdapterResult(normalized, provider=self.source, operation=request.operation, correlation_id=request.correlation_id, idempotency_key=request.idempotency_key, response_ms=elapsed, success=True, status_code=status, metadata={"providerId": self.provider_id})
+        except json.JSONDecodeError:
+            _record_runtime_failure(self.source, "MALFORMED_RESPONSE")
+            return self._failure(request.operation, "MALFORMED_RESPONSE", "Department sandbox API returned malformed data", request.correlation_id, request.idempotency_key)
         except HTTPError as error:
             category = "VALIDATION_ERROR" if error.code == 404 else "AUTHENTICATION_ERROR" if error.code == 401 else "AUTHORIZATION_ERROR" if error.code == 403 else "RATE_LIMITED" if error.code == 429 else "VALIDATION_ERROR" if 400 <= error.code < 500 else "UPSTREAM_ERROR"
             message = "No department record found for this citizen" if error.code == 404 else "Department sandbox API returned an error"
-            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": category}
-            return self._failure(request.operation, category, message, request.correlation_id, request.idempotency_key, error.code)
+            _record_runtime_failure(self.source, category)
+            failure = self._failure(request.operation, category, message, request.correlation_id, request.idempotency_key, error.code)
+            if error.code == 404:
+                # The department answered: it holds no record for this person.
+                # Distinct from a real validation error, so discovery may ask
+                # another department registered for the same requirement.
+                failure.metadata["recordNotFound"] = True
+                # How the department's own lookup ended (NO_MATCH, AMBIGUOUS,
+                # INSUFFICIENT_IDENTITY) -- never the record itself.
+                lookup_result = (error.headers or {}).get("X-Match-Result") if hasattr(error, "headers") else None
+                if lookup_result in {"NO_MATCH", "AMBIGUOUS", "INSUFFICIENT_IDENTITY"}:
+                    failure.metadata["lookupResult"] = lookup_result
+            return failure
         except TimeoutError:
-            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": "TIMEOUT"}
+            _record_runtime_failure(self.source, "TIMEOUT")
             return self._failure(request.operation, "TIMEOUT", "Department sandbox API timed out", request.correlation_id, request.idempotency_key)
         except URLError:
-            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": "NETWORK_ERROR"}
+            _record_runtime_failure(self.source, "NETWORK_ERROR")
             return self._failure(request.operation, "NETWORK_ERROR", "Department sandbox API network call failed", request.correlation_id, request.idempotency_key)
-        except json.JSONDecodeError:
-            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": "MALFORMED_RESPONSE"}
-            return self._failure(request.operation, "MALFORMED_RESPONSE", "Department sandbox API returned malformed data", request.correlation_id, request.idempotency_key)
         except Exception:
-            _runtime_health[self.source] = {"lastFailureAt": _now(), "errorCategory": "INTERNAL_ERROR"}
+            _record_runtime_failure(self.source, "INTERNAL_ERROR")
             return self._failure(request.operation, "INTERNAL_ERROR", "Department sandbox API operation failed safely", request.correlation_id, request.idempotency_key)
+
+    def _send(self, url, method, headers, body=None):
+        """(status, raw body) for a 2xx answer. For the canonical contract,
+        None when the department does not offer it (route missing), so the
+        caller uses the original lookup; any other HTTP error propagates."""
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        timeout = min(max(int(self.config.get("timeoutSeconds", 5)), 1), 120)
+        try:
+            with urlopen(Request(url, data=data, headers=headers, method=method), timeout=timeout) as response:
+                return response.status, response.read(1024 * 1024 + 1)
+        except HTTPError as error:
+            if method == "POST" and error.code in {404, 405}:
+                try:
+                    detail = json.loads(error.read().decode("utf-8") or "null")
+                except Exception:
+                    detail = None
+                if not (isinstance(detail, dict) and detail.get("status") == "NOT_FOUND"):
+                    return None  # no such contract here (route missing / unsupported record type)
+            raise
 
     def _execute(self, request, simulate_timeout=False):
         result = self._http_call(request)
@@ -417,15 +572,27 @@ class DepartmentSandboxAPIAdapter(SourceAdapter):
         return result
 
 
+def service_is_authorized(service_id: str, requirement_code: str, registry: list[dict]) -> bool:
+    """A service may be called for a requirement only when the registry lists
+    it for that requirement *and* it is authorized (source of record or an
+    explicitly authorized fallback) -- being the top-ranked one is not required."""
+    from app.engine.provider_policy import is_selectable
+    return any(item.get("serviceId") == service_id and item.get("requirementCode") == requirement_code and is_selectable(item) for item in registry)
+
+
 def request_registered_service(service_id, citizen_id, requirement_code=None, correlation_id=None, idempotency_key=None):
     from sqlalchemy.orm import Session
     from app.core.persistence import ProviderCapabilityRow, ProviderRow, ServiceCatalogRow, engine
     with Session(engine) as session:
         service = session.get(ServiceCatalogRow, service_id)
     selected_requirement = requirement_code or (service.requirement_code if service else None)
-    from app.engine.registry import select_dependency_provider
-    selected = select_dependency_provider(selected_requirement, integration_health()) if service and selected_requirement else None
-    if not selected or selected.get("serviceId") != service_id:
+    # Only a service registered for this requirement *and authorized* for it
+    # (authoritative or an explicitly authorized fallback) may be called --
+    # never an arbitrary service id. It need not be the top-ranked one: the
+    # discovery cascade asks the next authorized provider when the first has
+    # no record. Health is checked below.
+    from app.engine.registry import dependency_registry
+    if not (service and selected_requirement and service_is_authorized(service_id, selected_requirement, dependency_registry(integration_health()))):
         return AdapterResult(None, provider=None, correlation_id=correlation_id, idempotency_key=idempotency_key, error_category="CONFIGURATION_ERROR", success=False)
     with Session(engine) as session:
         service = session.get(ServiceCatalogRow, service_id)
@@ -485,9 +652,9 @@ def integration_health(record_event=False):
         checked = adapter.health_check() if adapter else {"status": "UNSUPPORTED", "errorCategory": "UNSUPPORTED_OPERATION"}
         runtime = _runtime_health.get(system, {})
         status = "UNAVAILABLE" if not state["available"] else checked.get("status", "UNSUPPORTED")
-        if status in {"AVAILABLE", "HEALTHY"} and runtime.get("lastFailureAt") and runtime.get("errorCategory"):
+        if status in {"AVAILABLE", "HEALTHY"} and _recent_failure(runtime):
             status = "DEGRADED"
-        item = {"system": system, "department": system, "adapterType": metadata.get("adapterType"), "service": metadata.get("service"), "status": status, "lastCheckedAt": _now(), "error": "Provider unavailable" if status == "UNAVAILABLE" else None, "lastSuccessAt": runtime.get("lastSuccessAt"), "lastFailureAt": runtime.get("lastFailureAt"), "errorCategory": runtime.get("errorCategory") or checked.get("errorCategory"), "lastResponseMs": runtime.get("lastResponseMs")}
+        item = {"system": system, "department": system, "adapterType": metadata.get("adapterType"), "service": metadata.get("service"), "status": status, "lastCheckedAt": _now(), "error": "Provider unavailable" if status == "UNAVAILABLE" else None, "lastSuccessAt": runtime.get("lastSuccessAt"), "lastFailureAt": runtime.get("lastFailureAt"), "errorCategory": (runtime.get("errorCategory") if status != "AVAILABLE" else None) or checked.get("errorCategory"), "lastResponseMs": runtime.get("lastResponseMs") or checked.get("probeLatencyMs"), "providerId": config["providerId"], "departmentKey": checked.get("departmentKey"), "simulated": not state["available"]}
         result.append(item)
         if record_event and _last_health.get(system) != status:
             event_bus.publish("INTEGRATION_HEALTH_CHANGED", {"system": system, "status": status, "service": metadata.get("service")})
@@ -507,8 +674,26 @@ def integration_health(record_event=False):
                     replay_eligible_dead_letter_jobs_for_provider(system, RedisService())
                 except Exception:
                     pass
-        _last_health[system] = status
+        if record_event:
+            # Only a recorded check advances the baseline, so a transition seen
+            # by an ordinary read is still recorded by the next recording check.
+            _last_health[system] = status
     return result
+
+
+def health_for_selection() -> list[dict]:
+    """Health snapshot for provider selection (Auto-Fill, fallback). When a
+    provider has just become unhealthy -- or recovered -- this records the
+    transition (opening/resolving its incident) at the moment SANGAM
+    detects it, instead of waiting for an Admin to look. Healthy providers
+    never seen before are not recorded, so steady state adds no events."""
+    health = integration_health()
+    changed = any(
+        (_last_health.get(item["system"]) is not None or item["status"] not in {"AVAILABLE", "HEALTHY"})
+        and _last_health.get(item["system"]) != item["status"]
+        for item in health
+    )
+    return integration_health(record_event=True) if changed else health
 
 
 def validate_payload(record):

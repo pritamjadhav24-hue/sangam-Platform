@@ -65,7 +65,7 @@ class SecurityHardeningTests(unittest.TestCase):
     def test_safe_application_view_does_not_return_raw_requirement_records(self):
         from app.api.citizen_routes import _safe_application
         safe = _safe_application({"appId": "APP-SAFE", "citizenId": "CITIZEN_001", "requirements": [{"code": "INCOME_PROOF", "source": "Revenue Department", "status": "FOUND", "canonical": {"incomeAmount": 123}, "recordId": "RAW-1"}], "dependencies": [], "conflicts": []})
-        self.assertEqual(safe["requirements"], [{"requirementCode": "INCOME_PROOF", "displayLabel": "Income Proof", "displayLabelMr": "Income Proof", "status": "FOUND", "userAction": "No action required"}])
+        self.assertEqual(safe["requirements"], [{"requirementCode": "INCOME_PROOF", "displayLabel": "Income Proof", "displayLabelMr": "Income Proof", "status": "FOUND", "userAction": "No action required", "verificationState": "VERIFIED", "canUpload": True}])
         self.assertNotIn("recordId", str(safe))
         self.assertNotIn("canonical", str(safe))
 

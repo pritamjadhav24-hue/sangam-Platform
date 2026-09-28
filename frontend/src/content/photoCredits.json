@@ -1,0 +1,84 @@
+{
+  "schemes": [
+    {
+      "key": "farmland",
+      "caption": "Farmland, Targaon",
+      "title": "Farmland in the village of Targaon, Maharashtra 6.jpg",
+      "author": "Contributers2020",
+      "license": "CC BY-SA 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+      "source": "https://commons.wikimedia.org/wiki/File:Farmland_in_the_village_of_Targaon,_Maharashtra_6.jpg",
+      "file": "/images/schemes/farmland.webp"
+    },
+    {
+      "key": "housing",
+      "caption": "Residential apartments, Pune",
+      "title": "Magarpatta Residential Apartments.JPG",
+      "author": "Samreenshaikh",
+      "license": "CC BY-SA 3.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/3.0",
+      "source": "https://commons.wikimedia.org/wiki/File:Magarpatta_Residential_Apartments.JPG",
+      "file": "/images/schemes/housing.webp"
+    },
+    {
+      "key": "scholarship",
+      "caption": "Graduating students celebrating",
+      "title": "BIET Graduation day.jpg",
+      "author": "Bharat Institute of Engineering and Technology",
+      "license": "CC BY-SA 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+      "source": "https://commons.wikimedia.org/wiki/File:BIET_Graduation_day.jpg",
+      "file": "/images/schemes/scholarship.webp"
+    },
+    {
+      "key": "birth",
+      "caption": "A newborn baby",
+      "title": "New Born Male Baby.jpg",
+      "author": "User:Avdhesh",
+      "license": "CC BY-SA 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+      "source": "https://commons.wikimedia.org/wiki/File:New_Born_Male_Baby.jpg",
+      "file": "/images/schemes/birth.webp"
+    },
+    {
+      "key": "welfare",
+      "caption": "Women's self-help group meeting",
+      "title": "Women self help group foundation.jpg",
+      "author": "Pondicherry17",
+      "license": "CC BY-SA 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+      "source": "https://commons.wikimedia.org/wiki/File:Women_self_help_group_foundation.jpg",
+      "file": "/images/schemes/welfare.webp"
+    },
+    {
+      "key": "farm-inputs",
+      "caption": "Farmer sowing seed by hand",
+      "title": "Farmer sowing India.jpg",
+      "author": "Pappu Sarkar01",
+      "license": "CC BY-SA 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+      "source": "https://commons.wikimedia.org/wiki/File:Farmer_sowing_India.jpg",
+      "file": "/images/schemes/farm-inputs.webp"
+    },
+    {
+      "key": "academic",
+      "caption": "Students writing in a classroom",
+      "title": "Classroom in East Sikkim, India (3848315549).jpg",
+      "author": "dhillan chandramowli",
+      "license": "CC BY-SA 2.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/2.0",
+      "source": "https://commons.wikimedia.org/wiki/File:Classroom_in_East_Sikkim,_India_(3848315549).jpg",
+      "file": "/images/schemes/academic.webp"
+    },
+    {
+      "key": "skills",
+      "caption": "Students at a computer skills training lab",
+      "title": "Students at a school in Bangalore, India learning to code on Progate.jpg",
+      "author": "Nayakyashraj",
+      "license": "CC BY-SA 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+      "source": "https://commons.wikimedia.org/wiki/File:Students_at_a_school_in_Bangalore,_India_learning_to_code_on_Progate.jpg",
+      "file": "/images/schemes/skills.webp"
+    }
+  ]
+}

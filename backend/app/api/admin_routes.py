@@ -5,12 +5,13 @@ from collections import Counter
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from app.core.admin_insights import (
-    analytics_report, classify_application_outcome, effective_access_model, scheme_catalogue, scheme_detail,
+    analytics_report, classify_application_outcome, department_health_summary, effective_access_model, incident_impacts, scheme_catalogue, scheme_detail,
 )
 from app.core.audit_bus import audit_bus
+from app.engine.eligibility import assess_application, data_quality as eligibility_data_quality
 from app.core.auth import JWT_EXPIRES_SECONDS, _bearer, decode_token, require_roles
 from app.core.event_bus import event_bus
 from app.engine.adapters import integration_health, set_integration_availability
@@ -20,7 +21,7 @@ from app.mocks.education_dept import set_income_conflict
 from app.core.persistence import (
     job_operational_summary, recent_provider_jobs, provider_job_detail,
     provider_operational_summary, replay_dead_letter_job, worker_operational_status,
-    _safe_job_view, ApplicationRow, DependencyRow, ProviderJobRow, EntityReviewRow,
+    _safe_job_view, ApplicationRow, DependencyRow, ProviderJobRow, ProviderRow, EntityReviewRow,
     ConflictReviewRow, AuditEntryRow, engine, provider_incidents_summary,
     open_provider_incident_count, provider_registry_snapshot, provider_registry_detail,
     reset_demo_database,
@@ -59,6 +60,35 @@ def dependency_registry_status(user: dict = Depends(require_roles("ADMIN"))):
     return {"services": dependency_registry(integration_health(record_event=True))}
 
 
+class DepartmentAvailability(BaseModel):
+    available: bool
+    error: Optional[str] = Field(default=None, max_length=120)
+
+
+@router.get("/operations/departments")
+def operations_departments(user: dict = Depends(require_roles("ADMIN"))):
+    """Health of each government department on its own, plus the platform."""
+    return department_health_summary()
+
+
+@router.post("/operations/departments/{department_key}/availability")
+def simulate_department_availability(department_key: str, body: DepartmentAvailability, user: dict = Depends(require_roles("ADMIN"))):
+    """Fault injection for a whole department (every provider it runs), for
+    test/staging demonstrations. Stopping the department's own service has
+    the same effect for real."""
+    from app.engine.departments import provider_department
+    key = department_key.upper()
+    with Session(engine) as session:
+        names = [row.name for row in session.query(ProviderRow).filter(ProviderRow.active.is_(True)).all() if provider_department(row.provider_id) == key]
+    if not names:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    for name in names:
+        set_integration_availability(name, body.available, body.error or "Department unavailable")
+    audit_bus.append(user["userId"], "INTEGRATION_HEALTH", "Administrator changed simulated department availability", key,
+                     "SIMULATE", payload={"department": key, "available": body.available, "providers": names, "actorRole": user["role"]})
+    return department_health_summary()
+
+
 @router.post("/integration-health/simulate")
 def simulate_integration_availability(body: IntegrationAvailability, user: dict = Depends(require_roles("ADMIN"))):
     try:
@@ -83,6 +113,16 @@ def reset_demo(user: dict = Depends(require_roles("ADMIN"))):
     removed = reset_demo_database()
     reset_demo_state()
     return {"success": True, "message": "Demo activity cleared; seeded reference data retained.", "sessionReset": True, "removed": removed}
+
+
+@router.get("/operations/activity")
+def interoperability_activity_feed(limit: int = Query(30, ge=1, le=200), applicationId: Optional[str] = Query(None, max_length=120),
+                                   user: dict = Depends(require_roles("ADMIN"))):
+    """Sanitized orchestration timeline: requesting department -> SANGAM ->
+    provider registry -> department API -> entity resolution -> normalization
+    -> verification -> result, for each recent Auto-Fill exchange."""
+    from app.core.admin_insights import interoperability_activity
+    return interoperability_activity(limit=limit, application_id=applicationId)
 
 
 @router.get("/operations/providers")
@@ -133,8 +173,18 @@ def admin_profile(request: Request, credentials: Optional[HTTPAuthorizationCrede
                   user: dict = Depends(require_roles("ADMIN"))):
     claims = decode_token(credentials.credentials)
     as_iso = lambda seconds: datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    from app.seeds.staff_profiles import STAFF_PROFILES
+    office = STAFF_PROFILES.get(user.get("userId"), {})
     return {
-        "user": {"userId": user.get("userId"), "name": user.get("name"), "role": user.get("role")},
+        "user": {"userId": user.get("userId"), "name": user.get("name"), "role": user.get("role"),
+                 "accountStatus": "Active", **office},
+        "security": {
+            # What the platform actually knows -- nothing is invented.
+            "authentication": "Password sign-in with a signed, time-limited session",
+            "passwordStored": "Hashed (scrypt); never shown or retrievable",
+            "lastPasswordChange": None,
+            "signedInAt": as_iso(claims["iat"]),
+        },
         "session": {
             "issuedAt": as_iso(claims["iat"]),
             "expiresAt": as_iso(claims["exp"]),
@@ -199,7 +249,26 @@ def replay_job(job_id: str, user: dict = Depends(require_roles("ADMIN"))):
 
 @router.get("/operations/incidents")
 def operations_incidents(user: dict = Depends(require_roles("ADMIN"))):
-    return {"incidents": provider_incidents_summary()}
+    incidents = provider_incidents_summary()
+    impacts = incident_impacts([item["incidentId"] for item in incidents])
+    for item in incidents:
+        impact = impacts.get(item["incidentId"])
+        if impact:
+            # Requirement-level impact (Auto-Fill operations + async jobs)
+            # supersedes the job-only counters the summary started with.
+            item.update(impact)
+            item["affectedApplications"] = impact["affectedApplicationsTotal"]
+            item["retryPendingCount"] = impact["pendingRetries"]
+            item["fallbackRecoveredCount"] = max(item.get("fallbackRecoveredCount") or 0, impact["successfulFallbacks"])
+    return {"incidents": incidents}
+
+
+@router.get("/operations/incidents/{incident_id}/impact")
+def operations_incident_impact(incident_id: str, user: dict = Depends(require_roles("ADMIN"))):
+    impact = incident_impacts([incident_id], include_applications=True).get(incident_id)
+    if impact is None:
+        raise HTTPException(status_code=404, detail="Incident not found.")
+    return {"incidentId": incident_id, **impact}
 
 
 @router.get("/operations/overview")
@@ -242,15 +311,10 @@ def operations_overview(user: dict = Depends(require_roles("ADMIN"))):
         healthy_count = sum(1 for s in provider_health_statuses if s in {"AVAILABLE", "HEALTHY"})
         down_count = sum(1 for s in provider_health_statuses if s == "UNAVAILABLE")
         degraded_count = sum(1 for s in provider_health_statuses if s not in {"AVAILABLE", "HEALTHY", "UNAVAILABLE"})
-        # An honest, data-driven summary label rather than a flat
-        # "Operational" that would contradict a failed ledger check or an
-        # open provider incident right next to it.
-        if not ledger_valid:
-            system_state = "DEGRADED_LEDGER_INTEGRITY"
-        elif active_incidents > 0 or down_count > 0:
-            system_state = "DEGRADED_PROVIDER_INCIDENT"
-        else:
-            system_state = "OPERATIONAL"
+        # The SANGAM platform's own state. A department being unavailable is
+        # that department's state (see "departments"), not the platform's.
+        system_state = "DEGRADED_LEDGER_INTEGRITY" if not ledger_valid else "OPERATIONAL"
+        departments = department_health_summary()
 
         return {
             "system": {
@@ -262,6 +326,7 @@ def operations_overview(user: dict = Depends(require_roles("ADMIN"))):
                 "auditEntriesCount": len(audit_bus.entries),
                 "architecture": "FEDERATED",
             },
+            "departments": departments["departments"],
             "applications": {
                 "total": len(app_list),
                 "byStatus": status_counts,
@@ -435,8 +500,9 @@ def get_admin_application_detail(
         requirements_detail = []
         for req in payload.get("requirements", []):
             code = req.get("code")
-            candidates = [c for c in registry_list if c.get("requirementCode") == code]
-            candidates_sorted = sorted(candidates, key=lambda c: (c.get("priority", 100), c.get("provider", "")))
+            from app.engine.provider_policy import is_selectable, selection_key
+            candidates = [c for c in registry_list if c.get("requirementCode") == code and is_selectable(c)]
+            candidates_sorted = sorted(candidates, key=selection_key)
 
             chosen_provider = req.get("providerId")
             fulfillment_method = "MANUAL_UPLOAD" if req.get("documentId") or req.get("fulfillmentMethod") == "MANUAL_UPLOAD" else ("AUTO_FILL" if chosen_provider or req.get("canonical") else "PENDING")
@@ -465,13 +531,14 @@ def get_admin_application_detail(
                         failed_providers = ", ".join(a.get("provider") for a in fallback_attempts[:-1])
                         successful_provider = fallback_attempts[-1].get("provider")
                         how = "was unavailable" if all(a.get("skipped") for a in fallback_attempts[:-1]) else "failed"
-                        decision_reason = f"Primary provider ({failed_providers}) {how}; fallback source ({successful_provider}) was evaluated and succeeded within the same operation -- no repeat citizen action required."
+                        role = "authorized fallback" if req.get("servedByRole") == "AUTHORIZED_FALLBACK" else "next authoritative source"
+                        decision_reason = f"Primary provider ({failed_providers}) {how}; {role} ({successful_provider}) was evaluated and succeeded within the same operation -- no repeat citizen action required."
                 elif candidates_sorted:
                     top = candidates_sorted[0]
                     if not is_fallback:
                         decision_reason = f"Primary authoritative source ({top.get('provider')}) selected based on healthy status ({top.get('healthStatus')}) and priority tier {top.get('priority', 10)}."
                     else:
-                        decision_reason = f"Primary provider ({top.get('provider')}) was unavailable; fallback source ({chosen_provider}) selected because it is the next eligible, healthy provider for this requirement."
+                        decision_reason = f"Primary provider ({top.get('provider')}) was unavailable; {chosen_provider} was selected because the registry explicitly authorizes it for this requirement."
                 else:
                     decision_reason = f"Provider ({chosen_provider}) selected from capability catalog."
             elif fulfillment_method == "MANUAL_UPLOAD":
@@ -504,10 +571,14 @@ def get_admin_application_detail(
                 "conflictReview": related_conflict_rev,
             })
         
+        assessment = assess_application({**payload, "citizenId": row.citizen_id})
         return {
             "appId": row.app_id,
             "citizenId": row.citizen_id,
             "status": row.status,
+            # Full eligibility view: every rule with its data source and
+            # observed value, plus completeness and data-quality confidence.
+            "eligibility": {**assessment, **eligibility_data_quality(assessment, payload)},
             "serviceId": payload.get("serviceId"),
             "schemeName": payload.get("schemeName") or payload.get("serviceId"),
             "createdAt": payload.get("createdAt") or (row.created_at.isoformat() if row.created_at else None),

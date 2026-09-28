@@ -9,7 +9,7 @@ describe('ProfilePage', () => {
   it('renders the real authenticated citizen profile fields', () => {
     render(<ProfilePage citizen={CITIZEN_A} applications={[]} />);
     expect(screen.getByText('Amit Kale')).toBeInTheDocument();
-    expect(screen.getByText('SYN-CIT-00001')).toBeInTheDocument();
+    expect(screen.getAllByText('SYN-CIT-00001').length).toBeGreaterThan(0);
     expect(screen.getByText('1991-11-16')).toBeInTheDocument();
     expect(screen.getByText('Pune')).toBeInTheDocument();
   });

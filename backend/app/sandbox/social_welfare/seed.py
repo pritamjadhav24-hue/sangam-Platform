@@ -32,9 +32,15 @@ def seed(session, citizens: list[dict]) -> dict:
         if rng.random() < 0.15:
             name = spelling_variant(rng, name)
         category = rng.choice(CASTE_CATEGORIES)
+        # Household income verified at enrolment for about half of the
+        # beneficiaries (the rest were never income-assessed).
+        income_rng = random.Random("income:" + citizen["citizenId"])  # own RNG: main sequence unchanged
+        verified_income = round(income_rng.uniform(60000, 700000), 2) if income_rng.random() < 0.5 else None
         session.add(Beneficiary(
             beneficiary_id=beneficiary_id, citizen_ref=citizen["citizenId"], name=name,
             date_of_birth=citizen["dob"], mobile=citizen["phone"], social_category=category,
+            address_line=citizen.get("district"), verified_annual_income=verified_income,
+            income_verified_on="2025-11-15" if verified_income is not None else None,
         ))
         counts["beneficiaries"] += 1
 
@@ -76,3 +82,33 @@ def seed(session, citizens: list[dict]) -> dict:
             ))
             counts["scheme_enrollments"] += 1
     return counts
+
+
+def seed_demo(session, _citizens=None) -> dict:
+    """Curated public-demo citizens (app.seeds.demo_citizens), idempotent."""
+    from app.seeds.demo_citizens import demo_records
+    added = 0
+    for index, (citizen, spec) in enumerate(demo_records("social_welfare"), start=1):
+        if session.query(Beneficiary).filter_by(citizen_ref=citizen["citizenId"]).first():
+            continue
+        beneficiary_id = f"SW-DEMO-BEN-{index:03d}"
+        session.add(Beneficiary(
+            beneficiary_id=beneficiary_id, citizen_ref=citizen["citizenId"], name=spec.get("name", citizen["name"]),
+            date_of_birth=spec.get("dob", citizen["dob"]), mobile=spec.get("phone", citizen["phone"]),
+            social_category=spec.get("category", "OPEN"), address_line=spec.get("address"),
+            verified_annual_income=spec.get("verifiedIncome"),
+            income_verified_on="2025-11-15" if spec.get("verifiedIncome") is not None else None,
+        ))
+        session.flush()
+        if spec.get("caste"):
+            session.add(CasteCertificate(
+                certificate_id=f"SW-DEMO-CST-{index:03d}", beneficiary_id=beneficiary_id, caste=spec.get("category", "OPEN"),
+                issued_on="2023-08-21" if spec["caste"] == "ISSUED" else None, status=spec["caste"],
+            ))
+        if spec.get("bank"):
+            session.add(BankLinkage(
+                linkage_id=f"SW-DEMO-BNK-{index:03d}", beneficiary_id=beneficiary_id, bank_name="Bank of Maharashtra",
+                account_status=spec["bank"],
+            ))
+        added += 1
+    return {"demoCitizens": added}

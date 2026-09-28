@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Skeleton } from '../../components/ui';
 
 export default function AdminAlertsPage({ onNavigateToApplication, api }) {
   const [incidents, setIncidents] = useState([]);
@@ -10,6 +11,8 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
   const [replayingId, setReplayingId] = useState(null);
   const [actioningId, setActioningId] = useState(null);
   const [notice, setNotice] = useState('');
+  const [impactOpen, setImpactOpen] = useState(null);
+  const [impactDetail, setImpactDetail] = useState({});
 
   const loadData = () => {
     setLoading(true);
@@ -47,6 +50,17 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
     }
   }
 
+  async function toggleImpact(incidentId) {
+    if (impactOpen === incidentId) { setImpactOpen(null); return; }
+    setImpactOpen(incidentId);
+    try {
+      const detail = await api.adminIncidentImpact(incidentId);
+      setImpactDetail(current => ({ ...current, [incidentId]: detail }));
+    } catch (err) {
+      setImpactDetail(current => ({ ...current, [incidentId]: { error: err.message || 'Impact could not be loaded.' } }));
+    }
+  }
+
   async function handleMappingDecision(reviewId, decision) {
     setActioningId(reviewId);
     setNotice('');
@@ -69,9 +83,9 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
     <main className="container">
       <div className="page-title">
         <div>
-          <p className="eyebrow">Exception Monitoring · Admin</p>
-          <h1>Exceptions & Alerts</h1>
-          <p>Genuine cases requiring investigation — normal automated retrievals never appear here.</p>
+          <p className="eyebrow">Operations</p>
+          <h1>Incidents & Exceptions</h1>
+          <p>Cases that need investigation.</p>
         </div>
         <div className="actions">
           <button className="outline" onClick={loadData} disabled={loading}>
@@ -95,7 +109,7 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
           <small>Provider dispatches that exhausted automated retries</small>
         </div>
         <div className="summary-card amber">
-          <span className="eyebrow">Entity Resolution Reviews</span>
+          <span className="eyebrow">Identity Match Reviews</span>
           <b>{entityReviewCount}</b>
           <small>Unresolved identity-matching cases (see Application Registry)</small>
         </div>
@@ -110,24 +124,25 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
         <div className="section-heading">
           <div>
             <h2>Provider Incidents</h2>
-            <p>One incident represents one underlying department/provider outage — not one per affected citizen. Affected/recovered/dead-letter counts are aggregated from tracked provider jobs.</p>
+            <p>One incident per department outage, with the applications it affected.</p>
           </div>
           <span className="count-badge">Open: {incidents.filter(i => i.status === 'OPEN').length}</span>
         </div>
 
         {loading ? (
-          <p className="loading-state">Loading incidents…</p>
+          <Skeleton lines={4} label="Loading incidents" />
         ) : incidents.length === 0 ? (
           <div className="empty-state">
             <span>✓</span>
             <h3>No provider incidents recorded</h3>
-            <p className="muted">Every registered department provider has been healthy since this record began.</p>
+            <p className="muted">All providers have been healthy.</p>
           </div>
         ) : (
           <div style={{ display: 'grid', gap: '12px', marginTop: '12px' }}>
             {incidents.map(incident => (
               <div
                 key={incident.incidentId}
+                className="incident-card"
                 style={{
                   border: '1px solid #E8D5D0', borderRadius: '6px', padding: '14px',
                   borderLeft: `4px solid ${incident.status === 'OPEN' ? '#F2542D' : '#0E9594'}`,
@@ -147,13 +162,27 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
                       {incident.resolvedAt && ` · Resolved ${new Date(incident.resolvedAt).toLocaleString()}`}
                     </small>
                   </div>
-                  <div style={{ textAlign: 'right', fontSize: '13px' }}>
+                  <div className="incident-impact-counts" aria-label="Incident impact">
+                    <div><b>{incident.affectedCitizens ?? 0}</b> affected citizen{incident.affectedCitizens === 1 ? '' : 's'}</div>
                     <div><b>{incident.affectedApplications}</b> affected application{incident.affectedApplications === 1 ? '' : 's'}</div>
-                    <div style={{ color: '#0E9594' }}><b>{incident.fallbackRecoveredCount}</b> recovered via fallback</div>
-                    <div style={{ color: incident.actionRequiredCount > 0 ? '#a25a12' : '#7A6360' }}><b>{incident.actionRequiredCount}</b> require citizen action</div>
-                    <div className="muted"><b>{incident.retryPendingCount}</b> retry-pending</div>
+                    <div><b>{(incident.affectedSchemes || []).length}</b> affected scheme{(incident.affectedSchemes || []).length === 1 ? '' : 's'}</div>
+                    <div style={{ color: incident.blockedOperations > 0 ? '#a25a12' : '#7A6360' }}><b>{incident.blockedOperations ?? 0}</b> blocked operation{incident.blockedOperations === 1 ? '' : 's'}</div>
+                    <div className="muted"><b>{incident.pendingRetries ?? incident.retryPendingCount ?? 0}</b> pending retr{(incident.pendingRetries ?? 0) === 1 ? 'y' : 'ies'}</div>
+                    <div style={{ color: '#0B6E6D' }}><b>{incident.successfulFallbacks ?? incident.fallbackRecoveredCount ?? 0}</b> successful fallback{incident.successfulFallbacks === 1 ? '' : 's'}</div>
+                    <div style={{ color: '#0B6E6D' }}><b>{incident.recoveredApplications ?? 0}</b> recovered application{incident.recoveredApplications === 1 ? '' : 's'}</div>
                   </div>
                 </div>
+                {(incident.affectedSchemes || []).length > 0 && (
+                  <small className="muted" style={{ display: 'block', marginTop: '8px' }}>Schemes: {incident.affectedSchemes.join(', ')}</small>
+                )}
+                {incident.affectedApplications > 0 && (
+                  <button className="small outline" style={{ marginTop: '10px' }} onClick={() => toggleImpact(incident.incidentId)} aria-expanded={impactOpen === incident.incidentId}>
+                    {impactOpen === incident.incidentId ? 'Hide affected applications' : 'View affected applications'}
+                  </button>
+                )}
+                {impactOpen === incident.incidentId && (
+                  <IncidentImpactTable detail={impactDetail[incident.incidentId]} onNavigateToApplication={onNavigateToApplication} />
+                )}
               </div>
             ))}
           </div>
@@ -164,18 +193,18 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
         <div className="section-heading">
           <div>
             <h2>Dead-Letter Provider Jobs</h2>
-            <p>Individual execution-level records. Automated retries were exhausted for these dispatches — replay after the upstream issue is resolved.</p>
+            <p>Retries were exhausted for these requests. Replay once the department is available.</p>
           </div>
           <span className="count-badge">Jobs: {deadLetterJobs.length}</span>
         </div>
 
         {loading ? (
-          <p className="loading-state">Loading exceptions…</p>
+          <Skeleton lines={4} label="Loading exceptions" />
         ) : deadLetterJobs.length === 0 ? (
           <div className="empty-state">
             <span>✓</span>
             <h3>No dead-letter jobs</h3>
-            <p className="muted">Every provider dispatch has either completed or is still within its retry window.</p>
+            <p className="muted">No failed requests.</p>
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
@@ -235,7 +264,7 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
         <div className="section-heading">
           <div>
             <h2>Schema Mapping Reviews</h2>
-            <p>Semantic field-mapping ambiguities that automated matching could not resolve with confidence.</p>
+            <p>Field mappings that need a decision.</p>
           </div>
           <span className="count-badge">Reviews: {mappingReviews.length}</span>
         </div>
@@ -244,7 +273,7 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
           <div className="empty-state">
             <span>✓</span>
             <h3>No pending schema mapping reviews</h3>
-            <p className="muted">Automated semantic mapping is resolving fields with sufficient confidence.</p>
+            <p className="muted">No mapping reviews pending.</p>
           </div>
         ) : (
           <div style={{ display: 'grid', gap: '12px', marginTop: '12px' }}>
@@ -273,5 +302,43 @@ export default function AdminAlertsPage({ onNavigateToApplication, api }) {
         )}
       </div>
     </main>
+  );
+}
+
+
+function IncidentImpactTable({ detail, onNavigateToApplication }) {
+  if (!detail) return <Skeleton lines={4} label="Loading affected applications" />;
+  if (detail.error) return <div className="alert danger" role="alert">{detail.error}</div>;
+  if (!detail.applications?.length) return <p className="muted">No applications depended on this provider during the incident.</p>;
+  return (
+    <div style={{ overflowX: 'auto', marginTop: '10px' }}>
+      <table>
+        <thead>
+          <tr><th>Application</th><th>Citizen</th><th>Scheme</th><th>Blocked stage</th><th>Requirements</th></tr>
+        </thead>
+        <tbody>
+          {detail.applications.map(app => (
+            <tr key={app.appId}>
+              <td>
+                <button className="link-button" style={{ background: 'none', border: 'none', color: '#127475', cursor: 'pointer', textDecoration: 'underline', padding: 0 }}
+                  onClick={() => onNavigateToApplication(app.appId)}>{app.appId}</button>
+                <small style={{ display: 'block' }} className="muted">{app.applicationStatus}</small>
+              </td>
+              <td>{app.citizenId || '—'}</td>
+              <td>{app.schemeName || '—'}</td>
+              <td>{app.blockedStage || (app.recovered ? 'Recovered' : 'Not blocked')}</td>
+              <td>
+                {app.requirements.map(req => (
+                  <div key={req.requirementCode}>
+                    <b>{req.label}</b>: {req.stateLabel}{req.resolvedBy ? ` — ${req.resolvedBy}` : ''}
+                  </div>
+                ))}
+                {app.jobs.map(job => <div key={job.jobId} className="muted">Job {job.jobId.slice(0, 12)}…: {job.status}</div>)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

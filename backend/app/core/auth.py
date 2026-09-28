@@ -133,3 +133,13 @@ def demo_citizen_switch_enabled() -> bool:
     """
     mode = os.getenv("SANGAM_ENV", "development").strip().lower()
     return mode not in {"production", "prod"} and os.getenv("SANGAM_ALLOW_DEMO_CITIZEN_SWITCH", "false").lower() in {"1", "true", "yes"}
+
+
+def public_demo_enabled() -> bool:
+    """Explicit public-demonstration mode (SANGAM_PUBLIC_DEMO=true): the
+    sign-in page offers the curated demo citizens (app.seeds.demo_citizens)
+    and signs in as one of them without a password. Off by default. It only
+    ever issues a token for an account marked isPublicDemo -- never for a
+    real citizen, officer or administrator -- and does not change normal
+    password authentication in any way."""
+    return os.getenv("SANGAM_PUBLIC_DEMO", "false").strip().lower() in {"1", "true", "yes"}

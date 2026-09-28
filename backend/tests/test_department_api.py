@@ -151,7 +151,8 @@ class DepartmentAPISchemaIndependenceTests(unittest.TestCase):
         self.assertIn("/departments/food-civil-supplies/ration-cards/{citizen_ref}", routes)
         revenue_resource_routes = [p for p in routes if p.startswith("/departments/revenue/") and "{citizen_ref}" in p]
         transport_resource_routes = [p for p in routes if p.startswith("/departments/transport/") and "{citizen_ref}" in p]
-        self.assertEqual(len(revenue_resource_routes), 2)
+        # land records, income certificates, domicile certificates
+        self.assertEqual(len(revenue_resource_routes), 3)
         self.assertEqual(len(transport_resource_routes), 2)
 
 

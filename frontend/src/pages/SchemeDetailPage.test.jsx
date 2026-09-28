@@ -35,6 +35,13 @@ describe('SchemeDetailPage', () => {
     expect(screen.getByText('Identity')).toBeInTheDocument();
   });
 
+  it('lists the scheme eligibility criteria the application will be checked against', () => {
+    const scheme = { ...SCHEME_A, eligibilityCriteria: [{ id: 'income', label: 'Annual family income up to Rs 6,00,000' }, { id: 'identity', label: 'Identity is verified' }] };
+    render(<SchemeDetailPage schemeId="ZZZ-ALPHA-2099" schemes={[scheme]} navigate={() => {}} onApply={() => {}} />);
+    expect(screen.getByText('Annual family income up to Rs 6,00,000')).toBeInTheDocument();
+    expect(screen.getByText('Identity is verified')).toBeInTheDocument();
+  });
+
   it('renders genuinely different content for a different scheme id using the same component (requirement 5)', () => {
     render(<SchemeDetailPage schemeId="ZZZ-BETA-2099" schemes={SCHEMES} navigate={() => {}} onApply={() => {}} />);
 

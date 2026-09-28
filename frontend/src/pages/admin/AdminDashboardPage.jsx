@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react';
 
+const DEPARTMENT_STATUS = {
+  AVAILABLE: ['Available', 'found'], DEGRADED: ['Degraded', 'pending'], UNAVAILABLE: ['Unavailable', 'exception'], NOT_CONFIGURED: ['Not configured', 'pending'],
+};
+
 const SYSTEM_STATE_LABEL = {
-  OPERATIONAL: 'Operational',
+  OPERATIONAL: 'Healthy',
   DEGRADED_LEDGER_INTEGRITY: 'Degraded — Ledger Integrity',
   DEGRADED_PROVIDER_INCIDENT: 'Degraded — Provider Incident',
 };
@@ -48,16 +52,16 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
     <main className="container">
       <div className="page-title">
         <div>
-          <p className="eyebrow">Middleware Operations · Admin Console</p>
-          <h1>Operations Dashboard</h1>
-          <p>Real-time system health, cross-department orchestration, and exception monitoring across SANGAM.</p>
+          <p className="eyebrow">Operations</p>
+          <h1>Operations Overview</h1>
+          <p>System health, applications and exceptions at a glance.</p>
         </div>
         <div className="actions">
           <button className="outline" onClick={loadData} disabled={loading}>
             {loading ? 'Refreshing…' : '↻ Refresh Data'}
           </button>
           <button className="outline danger-text" onClick={() => setResetOpen(true)}>
-            Reset Demo Environment
+            Reset Environment
           </button>
         </div>
       </div>
@@ -69,10 +73,10 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
           {/* Top Operational Metrics */}
           <div className="summary-grid">
             <div className={`summary-card ${overview.system.state !== 'OPERATIONAL' ? 'amber' : ''}`}>
-              <span className="eyebrow">System State</span>
+              <span className="eyebrow">SANGAM platform</span>
               <b>{SYSTEM_STATE_LABEL[overview.system.state] || overview.system.state}</b>
               <small>
-                Ledger Chain: {overview.system.auditChainValid ? '✓ Verified' : '⚠ Invalid'} · Federated Architecture (department systems remain independent)
+                Audit trail {overview.system.auditChainValid ? 'verified' : 'integrity check failed'}
               </small>
             </div>
 
@@ -109,33 +113,47 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
             </div>
           </div>
 
+          {(overview.departments || []).some(item => item.headline) && (
+            <div className="department-strip" aria-label="Department systems">
+              {overview.departments.filter(item => item.headline).map(item => {
+                const [label, className] = DEPARTMENT_STATUS[item.status] || DEPARTMENT_STATUS.NOT_CONFIGURED;
+                return (
+                  <button key={item.key} className="department-pill" onClick={() => onNavigate('adminProviders')}>
+                    {item.name.replace(' Department', '')} <span className={`status ${className}`}>{label}</span>
+                    {item.activeIncidents > 0 && <small>{item.activeIncidents} incident{item.activeIncidents === 1 ? '' : 's'}</small>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           {/* Quick Navigation Cards */}
           <div className="admin-quick-nav grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', marginBottom: '24px' }}>
             <div className="card admin-nav-card" onClick={() => onNavigate('adminApplications')} style={{ cursor: 'pointer' }}>
               <p className="eyebrow">Registry</p>
               <h3>Applications ({overview.applications.total})</h3>
-              <p className="muted">Search all applications, inspect orchestration lineage, and track verification stages.</p>
+              <p className="muted">Search applications and track verification progress.</p>
               <button className="small outline" style={{ marginTop: '8px' }}>Open Applications →</button>
             </div>
 
             <div className="card admin-nav-card" onClick={() => onNavigate('adminProviders')} style={{ cursor: 'pointer' }}>
               <p className="eyebrow">Integrations</p>
               <h3>Department Providers ({overview.providers.registered})</h3>
-              <p className="muted">Inspect department adapter health, capabilities, and test resilience simulation.</p>
+              <p className="muted">Department health, capabilities and outage testing.</p>
               <button className="small outline" style={{ marginTop: '8px' }}>Inspect Providers →</button>
             </div>
 
             <div className="card admin-nav-card" onClick={() => onNavigate('adminAlerts')} style={{ cursor: 'pointer' }}>
               <p className="eyebrow">Interventions</p>
               <h3>Exceptions & Alerts ({overview.exceptions.activeProviderIncidents + overview.exceptions.totalAlerts})</h3>
-              <p className="muted">Provider incidents, fallback/recovery activity, dead-letter jobs, and reviews needing a person.</p>
+              <p className="muted">Incidents, fallback activity, failed jobs and pending reviews.</p>
               <button className="small outline" style={{ marginTop: '8px' }}>View Exceptions →</button>
             </div>
 
             <div className="card admin-nav-card" onClick={() => onNavigate('audit')} style={{ cursor: 'pointer' }}>
               <p className="eyebrow">Accountability</p>
-              <h3>Audit & Data Lineage</h3>
-              <p className="muted">{overview.system.auditEntriesCount} SHA-256 chained events recording automated vs officer actions.</p>
+              <h3>Audit trail</h3>
+              <p className="muted">{overview.system.auditEntriesCount} tamper-evident events recorded.</p>
               <button className="small outline" style={{ marginTop: '8px' }}>View Ledger →</button>
             </div>
           </div>
@@ -144,8 +162,8 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
           <div className="card" style={{ marginBottom: '24px' }}>
             <div className="section-heading">
               <div>
-                <h2>Asynchronous Orchestration Pipeline</h2>
-                <p>Background provider jobs, leasing status, and automated retry metrics.</p>
+                <h2>Background jobs</h2>
+                <p>Queued and retried department requests.</p>
               </div>
               <span className="count-badge">Total Jobs: {overview.jobs?.total || 0}</span>
             </div>
@@ -168,8 +186,8 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
           <div className="card">
             <div className="section-heading">
               <div>
-                <h2>Recent Operational Jobs</h2>
-                <p>Latest asynchronous requests processed across integrated department sandboxes.</p>
+                <h2>Recent department requests</h2>
+                <p>Latest department requests.</p>
               </div>
               <button className="small outline" onClick={() => onNavigate('adminAlerts')}>
                 Inspect Dead-Letter Queue
@@ -222,7 +240,7 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
                               [{job.error.category}] {job.error.message?.slice(0, 40)}
                             </span>
                           ) : (
-                            <span style={{ color: '#0E9594' }}>✓ Verified</span>
+                            <span style={{ color: '#0B6E6D' }}>✓ Verified</span>
                           )}
                         </td>
                         <td><small>{new Date(job.createdAt).toLocaleTimeString()}</small></td>
@@ -236,20 +254,21 @@ export default function AdminDashboardPage({ onNavigate, api, onReset }) {
         </>
       )}
 
-      {/* Reset Demo Modal */}
+      {/* Reset environment modal (refused by the backend in production mode) */}
       {resetOpen && (
         <div className="modal-backdrop" role="presentation">
           <section className="reset-modal" role="dialog" aria-modal="true" aria-labelledby="admin-reset-title">
             <span className="modal-icon">!</span>
             <p className="eyebrow">Admin Action</p>
-            <h2 id="admin-reset-title">Reset demonstration environment?</h2>
+            <h2 id="admin-reset-title">Reset this environment?</h2>
             <p>
               This clears all applications, documents, consent receipts, notifications, provider jobs, incidents,
               events and audit history. Seeded accounts, citizens, schemes and providers are kept.
+              This action is refused in production environments.
             </p>
             <div className="actions">
               <button className="outline" onClick={() => setResetOpen(false)}>Cancel</button>
-              <button className="primary danger-button" onClick={handleResetDemo}>Reset Demo</button>
+              <button className="primary danger-button" onClick={handleResetDemo}>Reset environment</button>
             </div>
           </section>
         </div>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Skeleton } from '../../components/ui';
 
 export default function AdminSchemesPage({ api, onOpenScheme }) {
   const [schemes, setSchemes] = useState([]);
@@ -20,9 +21,9 @@ export default function AdminSchemesPage({ api, onOpenScheme }) {
     <main className="container">
       <div className="page-title">
         <div>
-          <p className="eyebrow">Scheme / Requirement Catalogue · Admin</p>
+          <p className="eyebrow">Operations</p>
           <h1>Schemes &amp; Requirements</h1>
-          <p>The same persisted scheme definitions the Citizen portal uses, with each requirement's provider coverage. Read-only.</p>
+          <p>Scheme definitions and each requirement's provider coverage.</p>
         </div>
         <div className="actions">
           <button className="outline" onClick={load} disabled={loading}>{loading ? 'Refreshing…' : '↻ Refresh'}</button>
@@ -37,7 +38,7 @@ export default function AdminSchemesPage({ api, onOpenScheme }) {
           <span className="count-badge">Schemes: {schemes.length}</span>
         </div>
         {loading ? (
-          <p className="loading-state">Loading scheme catalogue…</p>
+          <Skeleton lines={4} label="Loading scheme catalogue" />
         ) : schemes.length === 0 ? (
           <div className="empty-state">
             <span>○</span>
@@ -70,7 +71,7 @@ export default function AdminSchemesPage({ api, onOpenScheme }) {
                       <td>{scheme.department}</td>
                       <td>
                         <span className={`status ${scheme.active ? 'found' : 'exception'}`}>{scheme.active ? 'ACTIVE' : 'INACTIVE'}</span>
-                        {scheme.synthetic && <small className="muted">Synthetic demo scheme</small>}
+                        {scheme.synthetic && <small className="muted">Synthetic data</small>}
                       </td>
                       <td>{scheme.requirementCount} <small className="muted">{scheme.mandatoryCount} mandatory</small></td>
                       <td>

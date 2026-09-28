@@ -9,17 +9,19 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.audit_bus import audit_bus
-from app.core.auth import require_roles
+from fastapi.security import HTTPAuthorizationCredentials
+from app.core.auth import _bearer, decode_token, require_roles
 from app.core.event_bus import event_bus
 from app.engine.consent_manager import CONSUMER, PERMITTED, PURPOSE, ConsentAuthorizationError, authorize_access, create_consent, current, revoke_consent
 from app.engine.dependency_orchestrator import ensure_missing_dependencies, initiate_dependency
 from app.core.persistence import (citizen_service_snapshot, catalog_snapshot, create_citizen_notification, engine,
-                                  get_application, get_document, list_applications_for_citizen,
+                                  delete_document, get_application, get_document, list_applications_for_citizen,
                                   list_dependencies_for_application,
                                   create_application as create_application_authoritative,
                                   mark_application_write_authoritative, upsert_document)
-from app.engine.artifact_retrieval import citizen_safe_document_text, document_display_name, requirement_data_type, validate_upload_metadata
-from app.engine import requirement_fulfillment, submission
+from app.engine.artifact_retrieval import (UPLOAD_FILE_SIGNATURES, citizen_safe_document_text, decode_upload_file, document_display_name,
+                                            requirement_data_type, safe_upload_filename, validate_upload_metadata)
+from app.engine import eligibility, requirement_fulfillment, submission
 from app.engine.requirement_analyzer import discover
 from app.engine.rules_engine import evaluate
 from app.engine.workflow_engine import APPLICATIONS, create_application, find_active_application, transition_application
@@ -76,9 +78,13 @@ class ApplySchemeRequest(BaseModel):
 
 
 class RequirementUpload(BaseModel):
+    """``content`` is plain text for text/plain / application/json, or the
+    base64-encoded file for image/jpeg, image/png and application/pdf
+    (device upload or camera capture, at most 5 MB decoded)."""
     title: str = Field(min_length=1, max_length=200)
     contentType: str = Field(default="text/plain", max_length=60)
-    content: str = Field(min_length=1, max_length=200_000)
+    content: str = Field(min_length=1, max_length=7_200_000)
+    fileName: Optional[str] = Field(default=None, max_length=200)
 
 
 class AutoFillDecision(BaseModel):
@@ -191,14 +197,105 @@ _REQUIREMENT_USER_ACTION = {
 _NEEDS_ATTENTION_REQUIREMENT_STATUSES = frozenset({"ACTION_REQUIRED", "FAILED"})
 
 
+# Requirement types a citizen may evidence with their own upload: documents
+# and certificates, and department records (a supporting document such as a
+# marksheet or bank passbook, reviewed by an officer). An identity attribute
+# is not uploadable -- it comes from the identity registry.
+UPLOADABLE_DATA_TYPES = frozenset({"DOCUMENT", "CERTIFICATE", "RECORD"})
+
+
+def _can_upload(requirement: dict) -> bool:
+    data_type = requirement.get("dataType")
+    if data_type is None:
+        from app.engine.artifact_retrieval import requirement_data_type
+        data_type = requirement_data_type(requirement.get("code") or "")
+    return data_type in UPLOADABLE_DATA_TYPES
+
+
+_OUTAGE_CATEGORIES = frozenset({"UPSTREAM_UNAVAILABLE", "NETWORK_ERROR", "UPSTREAM_ERROR", "RATE_LIMITED"})
+
+
+def _verification_state(requirement: dict) -> str:
+    """One explicit, citizen-safe verification state -- so "no record",
+    "temporarily unavailable", "not confident it is you" and "you declined"
+    are never collapsed into the same message.
+
+    NOT_STARTED, CHECKING, VERIFIED, VERIFIED_VIA_FALLBACK, UPLOADED,
+    NO_RECORD, TEMPORARILY_UNAVAILABLE, TIMEOUT, UNAUTHORIZED, CONSENT_DENIED,
+    LOW_CONFIDENCE, AMBIGUOUS_MATCH, VERIFICATION_FAILED, MANUAL_UPLOAD_REQUIRED."""
+    status, category = requirement.get("status"), requirement.get("errorCategory")
+    if status in {"VALIDATED", "RETRIEVED", "FOUND"}:
+        if requirement.get("documentId"):
+            return "UPLOADED"
+        return "VERIFIED_VIA_FALLBACK" if (requirement.get("provenance") or {}).get("fallbackUsed") else "VERIFIED"
+    if status == "PROCESSING" or (requirement.get("autoFillRequestedAt") and status in {None, "NOT_PROVIDED"}):
+        return "CHECKING"
+    if status in {None, "NOT_PROVIDED"}:
+        return "NOT_STARTED"
+    if category == "IDENTITY_UNCONFIRMED":
+        return "LOW_CONFIDENCE"
+    if category == "TIMEOUT":
+        return "TIMEOUT"
+    if category in _OUTAGE_CATEGORIES:
+        return "TEMPORARILY_UNAVAILABLE"
+    if category in {"AUTHORIZATION_ERROR", "AUTHENTICATION_ERROR"}:
+        return "UNAUTHORIZED"
+    if category == "VALIDATION_ERROR":
+        return "AMBIGUOUS_MATCH" if requirement.get("lookupOutcome") == "AMBIGUOUS" else "NO_RECORD"
+    if status == "REJECTED":
+        return "VERIFICATION_FAILED"
+    if status == "ACTION_REQUIRED" and not category:
+        return "CONSENT_DENIED"
+    if status in {"FAILED", "ACTION_REQUIRED", "WAITING"}:
+        return "MANUAL_UPLOAD_REQUIRED"
+    return "IN_PROGRESS"
+
+
+_STATE_MESSAGES = {
+    "NO_RECORD": "No verified record was found in the connected departments.",
+    "TEMPORARILY_UNAVAILABLE": "Government verification is temporarily unavailable.",
+    "TIMEOUT": "The government department took too long to respond.",
+    "LOW_CONFIDENCE": "We couldn't verify this record with sufficient confidence.",
+    "AMBIGUOUS_MATCH": "More than one record matched your details, so it couldn't be verified automatically.",
+    "UNAUTHORIZED": "Automatic retrieval is not authorized for this record.",
+    "CONSENT_DENIED": "You chose not to allow automatic retrieval.",
+    "VERIFICATION_FAILED": "The retrieved information could not be verified.",
+    "MANUAL_UPLOAD_REQUIRED": "Automatic verification could not be completed.",
+}
+_UPLOAD_SENTENCE = " You can upload the document yourself."
+
+
 def _requirement_user_action(requirement: dict) -> str:
     """ACTION_REQUIRED after exhausted retries carries the failure's error
     category; after a declined consent it does not. Only the wording differs
     -- no provider or failure detail ever reaches the citizen."""
-    status = requirement.get("status")
-    if status == "ACTION_REQUIRED" and requirement.get("errorCategory"):
-        return _REQUIREMENT_USER_ACTION["FAILED"]
-    return _REQUIREMENT_USER_ACTION.get(status, "Retry verification or request help")
+    state = _verification_state(requirement)
+    if state in _STATE_MESSAGES:
+        message = _STATE_MESSAGES[state]
+        if _can_upload(requirement):
+            return message + _UPLOAD_SENTENCE
+        return message + (" You can try Auto-Fill again at any time." if state == "CONSENT_DENIED" else " Please try again later.")
+    return _REQUIREMENT_USER_ACTION.get(requirement.get("status"), "Retry verification or request help")
+
+
+# Entity resolution could not confirm the department record is this
+# citizen's (it is never attached); and "no record exists" (a department
+# answered, it simply holds nothing for this citizen).
+IDENTITY_UNCONFIRMED_MESSAGE = "We couldn't verify this record with sufficient confidence. You can upload the document yourself."
+NO_RECORD_MESSAGE = "No verified record was found in the connected departments. You can upload the document yourself."
+UNAVAILABLE_MESSAGE = "Government verification is temporarily unavailable. You can upload the document yourself."
+
+
+# A requirement waiting because the verification it needs is unavailable
+# (an outage, not a problem with the citizen's data). The citizen is told
+# only that -- never which department, provider or system is down.
+_OUTAGE_ERROR_CATEGORIES = frozenset({"UPSTREAM_UNAVAILABLE", "NETWORK_ERROR", "TIMEOUT", "UPSTREAM_ERROR", "RATE_LIMITED"})
+VERIFICATION_DELAYED_MESSAGE = ("Your application is temporarily delayed because one of the required verifications is currently "
+                                "unavailable. Your application has been retained; please try again later.")
+
+
+def _verification_delayed(requirement: dict) -> bool:
+    return requirement.get("status") == "WAITING" and requirement.get("errorCategory") in _OUTAGE_ERROR_CATEGORIES
 
 
 def _notify_requirement_outcome(citizen_id: str, application_id: str, requirement_code: str, label: str, previous_status: str | None, new_status: str | None) -> None:
@@ -219,7 +316,21 @@ def _notify_requirement_outcome(citizen_id: str, application_id: str, requiremen
         create_citizen_notification(citizen_id, "DOCUMENT_VERIFIED", "Document verified", f"Your {name} has been verified.", application_id=application_id, requirement_code=requirement_code)
 
 
-def _safe_application(app: dict) -> dict:
+def _verified_source(requirement: dict) -> dict:
+    if requirement.get("documentId") or requirement.get("status") not in {"VALIDATED", "RETRIEVED"} or not requirement.get("sourceDepartment"):
+        return {}
+    from app.engine.departments import department_label
+    key = requirement["sourceDepartment"]
+    provenance = requirement.get("provenance") or {}
+    # Citizen-safe provenance only: which department, when, whether an
+    # alternate government source answered, and whether it was a record or a
+    # department-issued file -- never provider, API or match internals.
+    return {"source": department_label(key), "sourceMr": department_label(key, "mr"), "verifiedAt": requirement.get("verifiedAt"),
+            "alternateSource": bool(provenance.get("fallbackUsed", requirement.get("isFallback"))),
+            "recordKind": provenance.get("recordKind", "STRUCTURED_RECORD")}
+
+
+def _safe_application(app: dict, eligibility_cache: Optional[dict] = None) -> dict:
     safe_requirements = []
     for requirement in app.get("requirements", []):
         safe_requirements.append({
@@ -228,6 +339,8 @@ def _safe_application(app: dict) -> dict:
             "displayLabelMr": requirement.get("labelMr") or requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title(),
             "status": requirement.get("status"),
             "userAction": requirement.get("action") or _requirement_user_action(requirement),
+            "verificationState": _verification_state(requirement),
+            "canUpload": _can_upload(requirement),
             **({"verifiedOn": requirement.get("verifiedOn")} if requirement.get("verifiedOn") else {}),
             # Phase 6B dynamic form fields -- present only on applications created
             # through the new /apply boundary; never exposes provider/department/
@@ -235,6 +348,9 @@ def _safe_application(app: dict) -> dict:
             **({"mandatory": requirement.get("mandatory")} if "mandatory" in requirement else {}),
             **({"dataType": requirement.get("dataType")} if "dataType" in requirement else {}),
             **({"documentId": requirement.get("documentId")} if requirement.get("documentId") else {}),
+            # Which department verified it (never which system/API), shown as
+            # "Source: Revenue Department". Not for the citizen's own upload.
+            **_verified_source(requirement),
         })
     safe_conflicts = [{"status": item.get("status"), "field": item.get("canonicalField"), "message": "Additional review is required."} for item in app.get("conflicts", [])]
     safe_dependencies = []
@@ -249,6 +365,10 @@ def _safe_application(app: dict) -> dict:
     safe["dependencies"] = safe_dependencies
     if isinstance(app.get("eligibility"), dict):
         safe["eligibility"] = {field: app["eligibility"].get(field) for field in ("eligible", "reasons") if field in app["eligibility"]}
+    # Deterministic scheme eligibility (app.engine.eligibility): outcome and
+    # per-criterion reasons only -- no provider, source or rule internals.
+    safe["eligibilityAssessment"] = eligibility.citizen_view(eligibility.assess_application(app, eligibility_cache))
+    safe["verificationDelayed"] = any(_verification_delayed(item) for item in app.get("requirements", []))
     if isinstance(app.get("statusHistory"), list):
         safe["statusHistory"] = [{field: item.get(field) for field in ("status", "at") if field in item} for item in app["statusHistory"]]
     # Phase 6E: every read of an application (apply/auto-fill/upload/get)
@@ -324,11 +444,31 @@ def create_citizen_application(body: ApplicationCreate, user: dict = Depends(req
     return _safe_application(app)
 
 
+@router.get("/profile")
+def citizen_profile(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer), user: dict = Depends(require_roles("CITIZEN"))):
+    """The signed-in citizen's own profile: their record in the citizen
+    register (or their account details) and the current session."""
+    from datetime import datetime, timezone
+    from app.core.persistence import CitizenRow
+    citizen_id = user["citizenId"]
+    with Session(engine) as session:
+        row = session.get(CitizenRow, citizen_id)
+        record = ({"name": row.full_name, "dob": row.date_of_birth, "gender": row.gender, "phone": row.phone,
+                   "district": row.district, "address": (row.payload or {}).get("address")} if row else
+                  {key: user.get(key) for key in ("name", "dob", "phone", "district")})
+    claims = decode_token(credentials.credentials)
+    as_iso = lambda seconds: datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    return {"citizenId": citizen_id, **{key: value for key, value in record.items() if value},
+            "accountStatus": "Active", "verifiedIdentity": row is not None,
+            "session": {"signedInAt": as_iso(claims["iat"]), "expiresAt": as_iso(claims["exp"])}}
+
+
 @router.get("/applications")
 def list_citizen_applications(user: dict = Depends(require_roles("CITIZEN"))):
     with Session(engine) as session:
         applications = list_applications_for_citizen(user.get("citizenId"), session=session)
-        return {"applications": [_safe_application(_application_with_database_dependencies(app, session)) for app in applications]}
+        cache: dict = {}  # scheme rules + profile read once for the whole list
+        return {"applications": [_safe_application(_application_with_database_dependencies(app, session), cache) for app in applications]}
 
 
 @router.get("/applications/{application_id}")
@@ -547,7 +687,7 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
     requirement = requirement_fulfillment.find_requirement(app, requirement_code)
     if requirement is None:
         raise HTTPException(status_code=404, detail="Requirement not found on this application")
-    if requirement.get("dataType") not in {"DOCUMENT", "CERTIFICATE"}:
+    if not _can_upload(requirement):
         raise HTTPException(status_code=400, detail="This requirement does not accept a manual document upload")
 
     artifact = {"title": body.title, "contentType": body.contentType, "content": body.content}
@@ -555,9 +695,19 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
     if not integrity["valid"]:
         raise HTTPException(status_code=422, detail={"reasons": integrity["reasons"]})
 
-    checksum = hashlib.sha256(body.content.encode("utf-8")).hexdigest()
+    is_file = body.contentType in UPLOAD_FILE_SIGNATURES
+    file_bytes = decode_upload_file(body.content) if is_file else None
+    checksum = hashlib.sha256(file_bytes if is_file else body.content.encode("utf-8")).hexdigest()
     document_id = f"DOC-{application_id}-{requirement_code}"
     canonical = {"title": body.title, "contentType": body.contentType, "checksum": checksum}
+    file_fields = {}
+    if is_file:
+        file_name = safe_upload_filename(body.fileName, body.contentType)
+        canonical.update({"fileName": file_name, "sizeBytes": len(file_bytes)})
+        # Stored (base64) on the document reference itself; only the
+        # authenticated owner's download route ever returns it.
+        encoded = body.content.split(",", 1)[1] if body.content.startswith("data:") else body.content
+        file_fields = {"fileName": file_name, "sizeBytes": len(file_bytes), "fileContent": encoded}
     previous_status = requirement.get("status")
     label = requirement.get("label") or requirement_code
 
@@ -575,7 +725,8 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
         "providerId": None, "documentType": requirement_code, "status": "VALIDATED",
         "checksum": checksum, "isSynthetic": True, "referenceUri": None,
         "validation": {"valid": True, "reasons": []}, "canonical": canonical,
-        "title": body.title, "contentType": body.contentType, "contentPreview": body.content[:2000],
+        "title": body.title, "contentType": body.contentType,
+        **({"contentPreview": body.content[:2000]} if not is_file else file_fields),
     })
     audit_bus.append(
         citizen_id, requirement_code, "Citizen uploaded a document manually", "Citizen Upload", "UPLOAD",
@@ -586,7 +737,45 @@ def upload_requirement_document(application_id: str, requirement_code: str, body
     return _safe_application(application)
 
 
-def _owned_validated_document(application_id: str, requirement_code: str, citizen_id: str) -> tuple[dict, dict]:
+@router.delete("/applications/{application_id}/requirements/{requirement_code}/upload")
+def remove_requirement_upload(application_id: str, requirement_code: str, user: dict = Depends(require_roles("CITIZEN"))):
+    """Withdraw the citizen's own manual upload before submission: the
+    requirement returns to NOT_PROVIDED (Auto-Fill and upload are available
+    again) and the uploaded document reference is removed. Only a document
+    the citizen uploaded can be removed -- never a verified provider result
+    -- and never after the application has been submitted."""
+    citizen_id = user["citizenId"]
+    enforce("requirement_upload", citizen_id, limit=10, window_seconds=60)
+    app = _load_owned_application(application_id, citizen_id)
+    _assert_application_not_submitted(app)
+    requirement = requirement_fulfillment.find_requirement(app, requirement_code)
+    if requirement is None:
+        raise HTTPException(status_code=404, detail="Requirement not found on this application")
+    document_id = requirement.get("documentId")
+    document = get_document(document_id) if document_id else None
+    if not document or document.get("sourceType") != "CITIZEN_UPLOAD" or document.get("citizenId") != citizen_id:
+        raise HTTPException(status_code=409, detail="There is no uploaded document to remove for this requirement.")
+
+    def mutate(target: dict) -> None:
+        target["status"] = "NOT_PROVIDED"
+        target.pop("documentId", None)
+
+    try:
+        # The requirement reset and the document delete commit together (or
+        # not at all), so they can never disagree.
+        application, _ = requirement_fulfillment.mutate_requirement_under_lock(
+            application_id, requirement_code, mutate, before_commit=lambda session: delete_document(document_id, session=session))
+    except requirement_fulfillment.ApplicationSubmittedError:
+        raise HTTPException(status_code=409, detail="This application has already been submitted and can no longer be changed.")
+    audit_bus.append(
+        citizen_id, requirement_code, "Citizen removed an uploaded document before submission", "Citizen Upload", "UPLOAD_REMOVED",
+        payload={"appId": application_id, "requirementCode": requirement_code, "documentId": document_id, "actorRole": user["role"]},
+        correlation_id=application_id,
+    )
+    return _safe_application(application)
+
+
+def _owned_validated_document(application_id: str, requirement_code: str, citizen_id: str, include_file: bool = False) -> tuple[dict, dict]:
     """Shared ownership + status check for both the view and download
     routes: the application must belong to the caller, the requirement must
     exist on it, and only an already-VALIDATED document is ever exposed --
@@ -597,7 +786,7 @@ def _owned_validated_document(application_id: str, requirement_code: str, citize
     if requirement is None:
         raise HTTPException(status_code=404, detail="Requirement not found on this application")
     document_id = requirement.get("documentId") or f"DOC-{application_id}-{requirement_code}"
-    document = get_document(document_id)
+    document = get_document(document_id, include_file=include_file)
     if not document or document.get("appId") != application_id or document.get("citizenId") != citizen_id or document.get("status") != "VALIDATED":
         raise HTTPException(status_code=404, detail="No verified document is available for this requirement")
     return requirement, document
@@ -607,6 +796,14 @@ def _document_view_payload(requirement: dict, document: dict, user: dict) -> dic
     label = requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title()
     title = document_display_name(label)
     document_id = document["documentId"]
+    if document.get("sizeBytes") is not None:
+        # An uploaded image/PDF: the client previews the file itself
+        # (fetched through the download route); only its metadata here.
+        return {
+            "documentId": document_id, "title": title, "requirementCode": requirement["code"], "status": document["status"],
+            "isFile": True, "contentType": document.get("contentType"), "fileName": document.get("fileName"),
+            "sizeBytes": document.get("sizeBytes"), "sourceType": "CITIZEN_UPLOAD",
+        }
     if document.get("sourceType") == "CITIZEN_UPLOAD" and document.get("contentPreview"):
         # A citizen's own manual upload has no provider canonical fields to
         # show -- render back what they actually submitted instead.
@@ -637,10 +834,15 @@ def view_requirement_document(application_id: str, requirement_code: str, user: 
 
 @router.get("/applications/{application_id}/requirements/{requirement_code}/document/download")
 def download_requirement_document(application_id: str, requirement_code: str, user: dict = Depends(require_roles("CITIZEN"))):
-    """Download variant of the same citizen-safe document view, as a plain
-    text file attachment."""
+    """Download variant of the same citizen-safe document view: the original
+    file for an uploaded image/PDF, otherwise a plain text rendering."""
     citizen_id = user["citizenId"]
-    requirement, document = _owned_validated_document(application_id, requirement_code, citizen_id)
+    requirement, document = _owned_validated_document(application_id, requirement_code, citizen_id, include_file=True)
+    if document.get("fileContent"):
+        file_bytes = decode_upload_file(document["fileContent"]) or b""
+        file_name = safe_upload_filename(document.get("fileName"), document.get("contentType", ""))
+        return Response(content=file_bytes, media_type=document.get("contentType"),
+                        headers={"Content-Disposition": 'attachment; filename="' + file_name + '"'})
     payload = _document_view_payload(requirement, document, user)
     filename = re.sub(r"[^A-Za-z0-9]+", "-", payload["title"]).strip("-") + ".txt"
     return Response(

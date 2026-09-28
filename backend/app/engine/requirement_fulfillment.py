@@ -39,7 +39,7 @@ from typing import Optional
 
 from app.core.audit_bus import audit_bus
 from app.engine import retry_policy
-from app.engine.adapters import AdapterResult, integration_health, request_registered_service
+from app.engine.adapters import AdapterResult, health_for_selection, integration_health, request_registered_service
 from app.engine.artifact_retrieval import _source_category_for_provider, is_document_requirement
 from app.engine.consent_manager import CONSUMER, execute_with_persisted_authorization
 from app.engine.registry import dependency_registry, select_dependency_provider
@@ -108,7 +108,7 @@ def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_i
     """
     tried_provider_ids: set[str] = set()
     attempt_log: list[dict] = []
-    health = integration_health()
+    health = health_for_selection()  # records a just-detected outage/recovery (incident timing)
     selected = select_dependency_provider(requirement_code, health)
     result: Optional[AdapterResult] = None
 
@@ -117,10 +117,11 @@ def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_i
     # operation's real lineage: without them, a provider selected only
     # because the primary was down would be reported as if it were the
     # primary. Same registry + ordering select_dependency_provider uses.
-    def rank(item: dict) -> tuple:
-        return (item.get("priority", 100), item.get("provider") or "")
+    from app.engine.provider_policy import is_selectable, item_role, selection_key
+    rank = selection_key
 
-    ranked = sorted((item for item in dependency_registry(health) if item["requirementCode"] == requirement_code), key=rank)
+    ranked = sorted((item for item in dependency_registry(health) if item["requirementCode"] == requirement_code and is_selectable(item)), key=rank)
+    roles = {item.get("providerId"): item_role(item) for item in ranked}
     for candidate in ranked:
         if selected and rank(candidate) >= rank(selected):
             break
@@ -129,6 +130,7 @@ def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_i
         attempt_log.append({
             "providerId": candidate.get("providerId"), "provider": candidate.get("provider"), "isFallback": bool(attempt_log),
             "success": False, "skipped": True, "healthStatus": candidate.get("healthStatus"), "errorCategory": "UPSTREAM_UNAVAILABLE",
+            "role": item_role(candidate), "at": _now(),
         })
         audit_bus.append(
             "SYSTEM", requirement_code, "Provider skipped: currently unavailable", candidate.get("provider"), "SKIPPED", consent_id,
@@ -153,14 +155,19 @@ def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_i
                      "attemptNumber": len(attempt_log) + 1, "isFallback": is_fallback},
             correlation_id=application_id,
         )
+        started_at = _now()
         result = request_registered_service(
             selected["serviceId"], citizen_id, requirement_code=requirement_code,
             correlation_id=correlation_id, idempotency_key=f"{application_id}:{requirement_code}",
         )
         tried_provider_ids.add(provider_id)
+        record_not_found = bool((result.metadata or {}).get("recordNotFound")) and not result.success
         attempt_log.append({
             "providerId": provider_id, "provider": provider_name, "isFallback": is_fallback,
             "success": bool(result.success), "errorCategory": result.error_category,
+            "role": roles.get(provider_id) or item_role(selected), "at": started_at, "completedAt": _now(),
+            **({"recordNotFound": True} if record_not_found else {}),
+            **({"lookupResult": (result.metadata or {}).get("lookupResult")} if (result.metadata or {}).get("lookupResult") else {}),
         })
         if result.success:
             audit_bus.append(
@@ -176,7 +183,32 @@ def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_i
             payload={"appId": application_id, "requirementCode": requirement_code, "providerId": provider_id, "errorCategory": category},
             correlation_id=application_id,
         )
+        primary_unreachable = any(entry.get("skipped") or retry_policy.is_retryable_category(entry.get("errorCategory") or "")
+                                  for entry in attempt_log[:-1])
         if not retry_policy.is_retryable_category(category):
+            if category == "VALIDATION_ERROR" and (primary_unreachable or record_not_found):
+                # "No record" from one department is not "no record" for the
+                # citizen: the record may be kept by another department
+                # registered for the same requirement, so ask the next one in
+                # the registry's order. Only when every capable provider has
+                # answered is it "no record"; if a higher-priority source
+                # could not be asked at all, it is "not available right now".
+                selected = retry_policy.find_fallback_candidate(requirement_code, exclude_provider_ids=tried_provider_ids)
+                if selected is None:
+                    # Every *reachable* authorized provider has answered. If an
+                    # authorized provider could not be asked (unhealthy, so not
+                    # a candidate), "no record" would be a false claim.
+                    logged = {entry.get("providerId") for entry in attempt_log}
+                    unasked = [item for item in ranked if item.get("providerId") not in logged
+                               and item.get("healthStatus") not in {"AVAILABLE", "HEALTHY"}]
+                    if primary_unreachable or unasked:
+                        for item in unasked:
+                            attempt_log.append({"providerId": item.get("providerId"), "provider": item.get("provider"), "isFallback": True,
+                                                "success": False, "skipped": True, "healthStatus": item.get("healthStatus"),
+                                                "errorCategory": "UPSTREAM_UNAVAILABLE", "role": item_role(item), "at": _now()})
+                        return AdapterResult(None, correlation_id=correlation_id, error_category="UPSTREAM_UNAVAILABLE", success=False, retryable=True), attempt_log
+                    return result, attempt_log
+                continue
             # Non-retryable (validation/auth/config/etc.) -- the existing
             # policy says this terminates immediately, never falls back.
             return result, attempt_log
@@ -188,7 +220,28 @@ def _discover_and_retrieve(requirement_code: str, citizen_id: str, application_i
     return result, attempt_log
 
 
+PROVIDER_HISTORY_LIMIT = 25
+
+
 def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult], attempt_log: Optional[list[dict]] = None) -> bool:
+    """Apply one outcome (see _apply_outcome_to_requirement) and, when it was
+    applied, append a timestamped record of the operation -- every provider
+    tried and the resulting requirement status -- to ``providerHistory``.
+    ``fallbackAttempts`` only ever holds the latest operation; this history
+    is what lets Admin incident impact tie past failures, fallbacks and
+    recoveries to an incident's time window."""
+    applied = _apply_outcome_to_requirement(requirement, adapter_result, attempt_log)
+    if applied and attempt_log:
+        history = list(requirement.get("providerHistory") or [])
+        history.append({
+            "at": _now(), "outcome": requirement.get("status"),
+            "attempts": [{key: attempt.get(key) for key in ("providerId", "provider", "success", "skipped", "errorCategory", "recordNotFound", "role")} for attempt in attempt_log],
+        })
+        requirement["providerHistory"] = history[-PROVIDER_HISTORY_LIMIT:]
+    return applied
+
+
+def _apply_outcome_to_requirement(requirement: dict, adapter_result: Optional[AdapterResult], attempt_log: Optional[list[dict]] = None) -> bool:
     """Mutate the requirement dict in place from one adapter outcome. Returns
     whether the outcome was actually applied (``False`` for a stale no-op --
     see below), so the caller knows whether to also touch the document
@@ -221,8 +274,32 @@ def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult], a
         # currently ranked first, which can drift after a later recovery.
         requirement["fallbackAttempts"] = attempt_log
         requirement["isFallback"] = attempt_log[-1]["isFallback"] and not attempt_log[-1].get("skipped")
+        answered = next((entry for entry in reversed(attempt_log) if entry.get("success")), None)
+        requirement["servedByRole"] = (answered or {}).get("role")
+        # Whether any department's own lookup was ambiguous -- "more than one
+        # person could match", which is not the same as "no record".
+        if any(entry.get("lookupResult") == "AMBIGUOUS" for entry in attempt_log):
+            requirement["lookupOutcome"] = "AMBIGUOUS"
+        else:
+            requirement.pop("lookupOutcome", None)
     record = adapter_result.record if adapter_result else None
     if record:
+        match = (adapter_result.metadata or {}).get("identityMatch")
+        if match is not None:
+            requirement["identityMatch"] = {key: match.get(key) for key in (
+                "status", "decision", "confidenceLevel", "score", "matchedFields", "fieldComparisons", "explanation",
+                "matchCategory", "departmentMatchMethod")}
+            if match.get("decision") != "AUTO_ACCEPT":
+                # Never attach a record that may belong to someone else: the
+                # requirement stays open and the citizen can upload it instead.
+                requirement.update({"status": "ACTION_REQUIRED", "errorCategory": "IDENTITY_UNCONFIRMED",
+                                    "lastError": "Unable to confirm the record", "providerId": adapter_result.provider_id,
+                                    "resultReference": record.get("id")})
+                requirement.pop("canonical", None)
+                requirement.pop("provenance", None)
+                return True
+        else:
+            requirement.pop("identityMatch", None)
         # Prefer the adapter's own schema_mappings-derived canonical view
         # when it provides one (DepartmentSandboxAPIAdapter.normalize); other
         # provider types don't set "canonical" at all, so fall back to the
@@ -238,6 +315,10 @@ def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult], a
         requirement["lastError"] = None
         requirement["resultReference"] = record.get("id")
         requirement["providerId"] = adapter_result.provider_id
+        from app.engine.departments import provider_department
+        requirement["sourceDepartment"] = provider_department(adapter_result.provider_id)
+        requirement["verifiedAt"] = _now()
+        requirement["provenance"] = _provenance(requirement, record, match)
         if validation["valid"]:
             requirement["status"] = "VALIDATED" if is_document_requirement(requirement["code"]) else "RETRIEVED"
             requirement["verifiedOn"] = record.get("validUntil")
@@ -255,6 +336,175 @@ def _apply_outcome(requirement: dict, adapter_result: Optional[AdapterResult], a
     else:
         requirement["status"] = "WAITING"
     return True
+
+
+def _provenance(requirement: dict, record: dict, match: Optional[dict]) -> dict:
+    """Where a verified value came from, kept with the requirement: the
+    department and provider, the department's own record id, when and how it
+    was verified, and how sure SANGAM is that it is this citizen's."""
+    department_match = record.get("departmentMatch") or {}
+    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    identified = department_match.get("method") in {"DEPARTMENT_IDENTIFIER", "CROSS_REFERENCE"}
+    return {
+        "sourceDepartment": requirement.get("sourceDepartment"),
+        "providerId": requirement.get("providerId"),
+        "sourceRecordId": record.get("id"),
+        "verifiedAt": requirement.get("verifiedAt"),
+        # A department API answering from its own register: structured,
+        # verified data. A file is only ever attached when the department
+        # itself supplies one -- SANGAM never generates a document.
+        "verificationMethod": "DEPARTMENT_API_RECORD",
+        "recordKind": "DOCUMENT" if isinstance(raw.get("document"), dict) else "STRUCTURED_RECORD",
+        # "Fallback" means an explicitly authorized fallback answered -- not
+        # merely that a second provider was asked.
+        "fallbackUsed": requirement.get("servedByRole") == "AUTHORIZED_FALLBACK" if requirement.get("servedByRole") else bool(requirement.get("isFallback")),
+        "authorizationRole": requirement.get("servedByRole"),
+        "departmentMatchMethod": department_match.get("method"),
+        "matchCategory": (match or {}).get("matchCategory") or ("EXACT" if identified else None),
+        "confidence": (match or {}).get("score"),
+        "confidenceLevel": (match or {}).get("confidenceLevel"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Interoperability trace: what SANGAM did between the requesting department's
+# application and the department that answered. Sanitized by construction --
+# department/provider names, requirement codes, outcomes and timestamps only;
+# never identities, record contents, credentials or database details.
+# ---------------------------------------------------------------------------
+
+_OUTAGE = {"UPSTREAM_UNAVAILABLE", "NETWORK_ERROR", "TIMEOUT", "UPSTREAM_ERROR", "RATE_LIMITED"}
+
+
+def _consumer_department(application: dict) -> Optional[str]:
+    """The department whose service the citizen applied for -- the consumer
+    of the verified data in this exchange."""
+    from sqlalchemy.orm import Session
+    from app.core.persistence import SchemeCatalogRow, engine
+    try:
+        with Session(engine) as session:
+            row = session.get(SchemeCatalogRow, application.get("serviceId"))
+            return row.department if row else None
+    except Exception:
+        return None
+
+
+def _department_name(provider_id: Optional[str], fallback: Optional[str] = None) -> str:
+    from app.engine.departments import department_label, provider_department
+    return department_label(provider_department(provider_id)) or fallback or "Department"
+
+
+def interoperability_trace(application_id: str, requirement: dict, consumer: Optional[str], attempt_log: list[dict],
+                           adapter_result: Optional[AdapterResult], requested_at: str) -> dict:
+    label = requirement.get("label") or str(requirement.get("code", "")).replace("_", " ").title()
+    steps = []
+
+    def step(stage, title, status="info", at=None, **detail):
+        steps.append({"at": at or requested_at, "stage": stage, "title": title, "status": status,
+                      **{key: value for key, value in detail.items() if value is not None}})
+
+    step("REQUEST", f"{consumer or 'Service'} application requested {label}", actor=consumer or "Citizen application", target="SANGAM")
+    step("REQUIREMENT", f"SANGAM identified requirement {requirement.get('code')}", actor="SANGAM")
+    authoritative = sum(1 for entry in attempt_log if entry.get("role") == "AUTHORITATIVE")
+    step("REGISTRY", "Provider registry lookup: authorized providers ranked (authoritative first, then authorized fallbacks)", actor="SANGAM",
+         providersConsidered=len(attempt_log), authoritativeConsidered=authoritative)
+    fallback_announced = False
+    for entry in attempt_log:
+        department = _department_name(entry.get("providerId"), entry.get("provider"))
+        at = entry.get("at")
+        if entry.get("skipped"):
+            step("PROVIDER_UNAVAILABLE", f"{department} unavailable — skipped (incident open)", "fail", at, provider=department)
+            continue
+        if entry.get("role") == "AUTHORIZED_FALLBACK" and not fallback_announced:
+            fallback_announced = True
+            step("FALLBACK_POLICY", f"Fallback policy evaluated — {department} is an authorized fallback for this requirement", "warn", at, provider=department)
+        else:
+            step("PROVIDER_SELECTED", f"{department} selected ({'authoritative source' if entry.get('role') == 'AUTHORITATIVE' else 'provider'})", "info", at, provider=department)
+        step("API_REQUEST", f"SANGAM → {department} API request", "info", at, actor="SANGAM", target=department)
+        if entry.get("success"):
+            step("API_RESPONSE", f"{department} returned a record", "ok", entry.get("completedAt"), actor=department, target="SANGAM")
+        elif entry.get("recordNotFound"):
+            outcome = "details matched more than one person" if entry.get("lookupResult") == "AMBIGUOUS" else "no record"
+            step("API_RESPONSE", f"{department}: {outcome} — continuing with the next authorized provider", "warn", entry.get("completedAt"), actor=department)
+        else:
+            step("API_RESPONSE", f"{department} request failed ({str(entry.get('errorCategory') or 'error').replace('_', ' ').lower()})", "fail", entry.get("completedAt"), actor=department)
+    now = _now()
+    status = requirement.get("status")
+    match = requirement.get("identityMatch") or {}
+    provenance = requirement.get("provenance") or {}
+    if adapter_result is not None and adapter_result.success:
+        category = (match.get("matchCategory") or "UNCHECKED").replace("_", " ").title()
+        step("ENTITY_RESOLUTION", f"Entity resolution → {category} match", "ok" if match.get("decision", "AUTO_ACCEPT") == "AUTO_ACCEPT" else "fail", now,
+             method=(match.get("departmentMatchMethod") or "").replace("_", " ").lower() or None, confidence=match.get("score"))
+        if status in SUCCESS_STATUSES or status == "REJECTED":
+            step("NORMALIZATION", f"Schema normalization → {len(requirement.get('canonical') or {})} canonical field(s)", "ok", now)
+            step("VERIFICATION", f"{label} {'verified' if status in SUCCESS_STATUSES else 'failed validation'}", "ok" if status in SUCCESS_STATUSES else "fail", now)
+    if status in SUCCESS_STATUSES:
+        via = provenance.get("fallbackUsed")
+        outcome, result_status = ("AUTO_FILLED_VIA_FALLBACK", "warn") if via else ("AUTO_FILLED", "ok")
+        step("RESULT", "Auto-Fill completed via authorized fallback" if via else "Auto-Fill completed", result_status, now)
+    elif requirement.get("errorCategory") == "IDENTITY_UNCONFIRMED":
+        outcome = "NOT_ATTACHED"
+        step("RESULT", "Record not attached — identity not confirmed with sufficient confidence", "fail", now)
+    elif requirement.get("errorCategory") in _OUTAGE:
+        outcome = "PENDING"
+        step("RESULT", "Requirement pending — verification temporarily unavailable; citizen offered Retry and Upload", "fail", now)
+    elif requirement.get("errorCategory") == "VALIDATION_ERROR":
+        outcome = "NO_RECORD"
+        step("RESULT", "No verified record in the connected departments — manual upload offered", "warn", now)
+    else:
+        outcome = "NOT_COMPLETED"
+        step("RESULT", "Automatic verification not completed — manual upload offered", "fail", now)
+    answered = next((entry for entry in attempt_log if entry.get("success")), None)
+    target = _department_name(answered.get("providerId"), answered.get("provider")) if answered else None
+    step("RETURN", f"SANGAM → {consumer or 'application'}: result returned to the application", "info", now, actor="SANGAM", target=consumer)
+    return {"applicationId": application_id, "requirementCode": requirement.get("code"), "requirementLabel": label,
+            "consumerDepartment": consumer, "targetDepartment": target, "startedAt": requested_at, "completedAt": now,
+            "outcome": outcome, "fallbackUsed": bool(provenance.get("fallbackUsed")), "steps": steps}
+
+
+def _after_exchange(application_id: str, requirement: dict, consumer: Optional[str]) -> None:
+    """Post-commit side effects of one exchange: the department-to-department
+    audit entry (source -> SANGAM -> target -> response -> verification ->
+    result) and operational notifications for administrators."""
+    trace = requirement.get("trace") or {}
+    code = requirement.get("code")
+    audit_bus.append(
+        "SYSTEM", code, "Interoperability exchange through SANGAM", "SANGAM", "INTEROP_EXCHANGE",
+        payload={"appId": application_id, "requirementCode": code, "sourceDepartment": consumer, "via": "SANGAM",
+                 "targetDepartment": trace.get("targetDepartment"), "response": "RECORD" if trace.get("targetDepartment") else "NONE",
+                 "verification": requirement.get("status"), "result": trace.get("outcome"), "fallbackUsed": trace.get("fallbackUsed")},
+        correlation_id=application_id,
+    )
+    from app.core.notification_manager import notification_manager
+    label = requirement.get("label") or code
+    provenance = requirement.get("provenance") or {}
+    if trace.get("outcome") == "AUTO_FILLED_VIA_FALLBACK":
+        notification_manager.operational(
+            "FALLBACK_ACTIVATED", "Authorized fallback used",
+            f"{label} for {application_id} was verified by {trace.get('targetDepartment')} (authorized fallback) because the authoritative source could not answer.",
+            dedupe_key=f"FALLBACK:{application_id}:{code}:{provenance.get('verifiedAt')}", severity="WARNING", app_id=application_id,
+            target={"kind": "application", "applicationId": application_id, "providerId": provenance.get("providerId")})
+    elif trace.get("outcome") == "PENDING":
+        notification_manager.operational(
+            "APPLICATION_BLOCKED", "Application waiting on an unavailable provider",
+            f"{application_id} is waiting: {label} cannot be verified while its authorized providers are unavailable.",
+            dedupe_key=f"BLOCKED:{application_id}:{code}", severity="WARNING", app_id=application_id,
+            target={"kind": "application", "applicationId": application_id})
+    elif trace.get("outcome") == "NOT_ATTACHED":
+        match = requirement.get("identityMatch") or {}
+        notification_manager.operational(
+            "VERIFICATION_ISSUE", "Record not attached — identity not confirmed",
+            f"{label} for {application_id}: a department record was found but did not match the applicant with enough confidence ({str(match.get('matchCategory') or 'low').lower()} match).",
+            dedupe_key=f"VERIFICATION:{application_id}:{code}:{requirement.get('attempts')}", severity="WARNING", app_id=application_id,
+            target={"kind": "application", "applicationId": application_id})
+    elif requirement.get("errorCategory") in {"UPSTREAM_ERROR", "MALFORMED_RESPONSE", "AUTHORIZATION_ERROR", "AUTHENTICATION_ERROR"}:
+        failed = next((entry for entry in reversed(requirement.get("fallbackAttempts") or []) if not entry.get("success") and not entry.get("skipped")), {})
+        notification_manager.operational(
+            "INTEGRATION_ERROR", "Integration error",
+            f"A department API returned an error ({str(requirement.get('errorCategory')).replace('_', ' ').lower()}) while verifying {label} for {application_id}.",
+            dedupe_key=f"INTEGRATION:{application_id}:{code}:{requirement.get('attempts')}", severity="CRITICAL", app_id=application_id,
+            target={"kind": "provider", "providerId": failed.get("providerId"), "applicationId": application_id})
 
 
 def _upsert_requirement_document(application_id: str, requirement_code: str, citizen_id: str, requirement: dict) -> Optional[dict]:
@@ -309,6 +559,7 @@ def fulfill_requirement(application: dict, requirement_code: str, citizen_id: st
 
     purpose = auto_fill_purpose(requirement_code)
     attempt_log: list[dict] = []
+    requested_at = _now()
 
     def _operation() -> AdapterResult:
         result, log = _discover_and_retrieve(requirement_code, citizen_id, application_id, correlation_id, consent_id)
@@ -321,12 +572,18 @@ def fulfill_requirement(application: dict, requirement_code: str, citizen_id: st
         operation=_operation,
     )
 
+    _attach_identity_match(adapter_result, citizen_id)
     applied = []
+    consumer = _consumer_department(application)
 
     def mutate(requirement: dict) -> None:
         applied.append(_apply_outcome(requirement, adapter_result, attempt_log))
+        if applied[-1]:
+            requirement["trace"] = interoperability_trace(application_id, requirement, consumer, attempt_log, adapter_result, requested_at)
 
     updated_application, updated_requirement = mutate_requirement_under_lock(application_id, requirement_code, mutate)
+    if applied and applied[0]:
+        _after_exchange(application_id, updated_requirement, consumer)
     if applied and applied[0]:
         # Only touch the document reference when this outcome was actually
         # applied. A stale/no-op outcome (the requirement was already
@@ -337,6 +594,35 @@ def fulfill_requirement(application: dict, requirement_code: str, citizen_id: st
         # test_requirement_resilience.py's stale-response tests.
         _upsert_requirement_document(application_id, requirement_code, citizen_id, updated_requirement)
     return updated_application
+
+
+def _attach_identity_match(adapter_result: Optional[AdapterResult], citizen_id: str) -> None:
+    """Entity resolution for a department record: compare the record's own
+    identity fields (name, date of birth, phone, address -- each department
+    keeps them its own way) with the citizen's identity in SANGAM. Done
+    before taking the application lock (it reads the citizen master only)."""
+    record = adapter_result.record if adapter_result is not None and adapter_result.success else None
+    if not isinstance(record, dict) or not isinstance(record.get("raw"), dict):
+        return
+    from app.engine.entity_resolution import citizen_identity, match_category, match_department_record
+    department_match = record.get("departmentMatch") or {}
+    method = department_match.get("method")
+    # The record's own identity fields win; the identity the department
+    # matched on fills in what the record itself does not carry.
+    compared = {**(department_match.get("identity") or {}), **record["raw"]}
+    match = match_department_record(citizen_identity(citizen_id), compared, record.get("sourceSystem"))
+    if match is None and method == "DEMOGRAPHIC":
+        # Found by demographics but nothing to verify it with: never attach.
+        match = {"status": "UNCERTAIN", "decision": "REVIEW", "confidenceLevel": "MEDIUM", "score": None, "matchedFields": [],
+                 "fieldComparisons": [], "demographicAnchors": 0,
+                 "explanation": "The department found a possible record, but it carries no identity details SANGAM could verify."}
+    elif match is not None and method == "DEMOGRAPHIC" and match.get("decision") == "AUTO_ACCEPT" and not match.get("demographicAnchors"):
+        # A demographic match must agree on date of birth or phone, not on a name alone.
+        match = {**match, "status": "UNCERTAIN", "decision": "REVIEW", "confidenceLevel": "MEDIUM"}
+    if match is not None:
+        match["matchCategory"] = match_category(match, method)
+        match["departmentMatchMethod"] = method
+        adapter_result.metadata["identityMatch"] = match
 
 
 def reject_auto_fill(application: dict, requirement_code: str, citizen_id: str) -> dict:
@@ -360,7 +646,7 @@ def reject_auto_fill(application: dict, requirement_code: str, citizen_id: str) 
     return updated_application
 
 
-def mutate_requirement_under_lock(application_id: str, requirement_code: str, mutator) -> tuple[dict, dict]:
+def mutate_requirement_under_lock(application_id: str, requirement_code: str, mutator, before_commit=None) -> tuple[dict, dict]:
     """Read the application's current requirements *inside* a PostgreSQL row
     lock, apply ``mutator`` to just the target requirement, and persist the
     full list back through the authoritative mutation gateway, all within
@@ -379,6 +665,10 @@ def mutate_requirement_under_lock(application_id: str, requirement_code: str, mu
     that protects the write closes that window: the second caller's read
     happens only after the first caller's write has committed and released
     the lock, so it always builds its patch from the latest state.
+
+    ``before_commit`` (optional) is called with the same session after the
+    requirement write and before the commit, for a dependent write that must
+    succeed or fail together with it; if it raises, nothing is committed.
     """
     from sqlalchemy.orm import Session
     from app.core.persistence import engine, get_application, mutate_application
@@ -404,6 +694,8 @@ def mutate_requirement_under_lock(application_id: str, requirement_code: str, mu
             raise KeyError(requirement_code)
         mutator(requirement)
         updated_application = mutate_application(application_id, {"requirements": requirements}, session=session)
+        if before_commit is not None:
+            before_commit(session)
         session.commit()
         updated_requirement = find_requirement(updated_application, requirement_code)
         return updated_application, updated_requirement

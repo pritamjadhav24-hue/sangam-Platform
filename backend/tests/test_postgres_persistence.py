@@ -276,6 +276,42 @@ class PostgreSQLPersistenceTests(unittest.TestCase):
             counter = session.get(CounterRow, "application")
             self.assertGreaterEqual(counter.next_value, 900000)
 
+    def test_persist_after_hydrating_a_gapped_audit_ledger_does_not_duplicate_a_sequence(self):
+        # Reproduces sangam_db's shape: 17 persisted audit rows with gaps up to 34.
+        persisted = [1, 2, 3, 4, 5, 6, 15, 18, 19, 20, 21, 22, 23, 24, 30, 32, 34]
+        with Session(engine) as session:
+            session.query(AuditEntryRow).delete(synchronize_session=False)
+            for sequence in persisted:
+                payload = {"sequence": sequence, "who": "SYSTEM", "what": "TEST", "why": "gapped ledger", "source": "TEST", "action": "TEST",
+                           "consentId": None, "correlationId": None, "payloadHash": "x", "previousHash": "x", "entryHash": f"hash-{sequence}"}
+                session.add(AuditEntryRow(sequence=sequence, correlation_id=None, consent_id=None, payload=payload))
+            session.commit()
+        hydrate_state()
+        entry = audit_bus.append("SYSTEM", "TEST", "request after hydrate", "TEST", "TEST")
+        self.assertEqual(entry["sequence"], 35)
+        persist_state()
+        persist_state()  # idempotent: a second snapshot of the same ledger succeeds too
+        with Session(engine) as session:
+            sequences = [row.sequence for row in session.query(AuditEntryRow).order_by(AuditEntryRow.sequence)]
+        self.assertEqual(sequences, persisted + [35])
+
+    def test_persist_state_resequences_an_entry_whose_sequence_another_writer_took(self):
+        app_id = "APP-AUDIT-SEQUENCE-PROTECTED"
+        with Session(engine) as session:
+            create_application({"appId": app_id, "citizenId": "CITIZEN-AUDIT", "status": "DRAFT"}, session=session)
+            session.commit()
+        local = audit_bus.append("SYSTEM", "TEST", "allocated from stale numbering", "TEST", "TEST")
+        with Session(engine) as session:
+            # Another process persisted a different, application-protected row with the same sequence.
+            session.add(AuditEntryRow(sequence=local["sequence"], correlation_id=app_id, consent_id=None, payload={"source": "other-writer"}))
+            session.commit()
+        persist_state()
+        with Session(engine) as session:
+            self.assertEqual(session.get(AuditEntryRow, local["resequencedFrom"]).payload["source"], "other-writer")
+            moved = session.get(AuditEntryRow, local["sequence"])
+            self.assertEqual(moved.payload["why"], "allocated from stale numbering")
+            self.assertGreater(local["sequence"], local["resequencedFrom"])
+
     def test_repository_write_waits_for_snapshot_style_application_row_lock(self):
         app_id = "APP-AUTHORITY-RACE-REPOSITORY-FIRST"
         create_application({"appId": app_id, "citizenId": "CITIZEN-AUTHORITY", "status": "DRAFT"})

@@ -24,9 +24,11 @@ Citizen portal (React)          Officer desk            Admin console
      │  Reusable adapter (REST / SOAP-wrapper / CSV / Dept. API)   │
      └─────────────────┼───────────────────────────────────────────┘
                        ▼  HTTP only
-      Independent department REST APIs (app.department_api)
+   Revenue :9101  Education :9102  Social Welfare :9103  Health :9104  Transport :9105
+   (+ :9106 for Agriculture, Labour, Civil Supplies, Housing, Skills)
+      each its own uvicorn service (app.department_api.services.<key>)
                        │
-      Independent department databases (one per department)
+   revenue_db  education_db  welfare_db  health_db  transport_db  (one DB each)
                        │
      response → adapter normalisation → schema mapping (PostgreSQL)
               → canonical record → validation / entity resolution
@@ -39,6 +41,7 @@ Key rules the implementation enforces:
 - **PostgreSQL is authoritative** for applications, requirements, consents, documents, provider jobs, incidents, notifications and the provider/capability registry. Redis is optional and non-authoritative (queue, cache, rate limits).
 - **Provider selection is data-driven**: requirement code → enabled capabilities → provider health → priority. No requirement → department mapping is hard-coded in the engine.
 - **Department systems stay independent**: SANGAM only reaches them over HTTP through the adapter layer; each department sandbox has its own database.
+- **A department outage is not a SANGAM outage**: the platform stays *Healthy*; only the affected department is shown *Unavailable* (Admin → Overview and Providers → *Department systems*), with its incidents, fallback use and affected applications/citizens.
 - **Citizens never see internals**: provider, department, adapter, API and fallback details are stripped from every citizen response.
 
 ## 2. Key features
@@ -46,13 +49,13 @@ Key rules the implementation enforces:
 **Citizen portal** (English/मराठी)
 - Dashboard, scheme catalogue (10 schemes), scheme detail, dynamic application form generated from the scheme's requirements.
 - Per-requirement **Auto-Fill** with a per-requirement consent dialog (Accept/Reject); requirements are fulfilled independently and concurrently — one failure never blocks another.
-- Per-requirement **manual upload** for document/certificate requirements.
+- Per-requirement **manual upload** for document/certificate requirements: upload from the device or take a picture with the camera (JPG/PNG/PDF, up to 5 MB, content-checked), then preview, replace/retake or remove before submission.
+- **Deterministic scheme eligibility**: each scheme's written criteria are rules evaluated against verified data — *Eligible*, *Not eligible* (with the failed criteria) or *Eligibility cannot be confirmed yet* when data is missing, unverified, expired or conflicting. No scores.
 - Review → submit (readiness enforced server-side; submitted applications are immutable), tracking, notifications, verified document view/download.
-- Demo citizen switcher (persona-diverse synthetic citizens), enabled only outside production.
 
 **Orchestration engine**
 - Dynamic provider discovery, in-request **fallback cascade** to the next eligible provider, retry classification, action-required hand-off to manual upload.
-- Provider **incidents** (one per provider outage, not per citizen), provider jobs with dead-letter handling and **automatic recovery replay** of eligible dead-letter jobs when a provider recovers (async job mode).
+- Provider **incidents** (one per provider outage, not per citizen) with traced impact — affected citizens, applications and schemes, blocked operations, pending retries, successful fallbacks and recovered applications, provider jobs with dead-letter handling and **automatic recovery replay** of eligible dead-letter jobs when a provider recovers (async job mode).
 - Canonical schema mapping (PostgreSQL `schema_mappings` for department APIs, deterministic canonical rules for the original providers), validation, entity resolution with officer review for ambiguous matches, local metadata-only mapping suggestions with human review.
 - Idempotency keys, optimistic concurrency (`applications.version`), row locking, hash-chained audit ledger.
 
@@ -109,8 +112,12 @@ Two example files exist:
 | `VITE_API_BASE_URL` | Frontend build-time API URL. Empty → production build calls same-origin `/api` |
 | `SANGAM_SEED_CATALOG`, `SANGAM_SEED_DEMO_USERS`, `SANGAM_SEED_SYNTHETIC_DATA`, `SANGAM_SEED_DEPARTMENT_PROVIDERS` | Idempotent demo seeding (schemes/vocabulary/in-process providers, accounts, synthetic citizens, department sandbox providers) |
 | `SANGAM_*_PASSWORD`, `SANGAM_DEMO_CITIZEN_PASSWORD` | Bootstrap passwords for demo accounts (hashed with scrypt on first start) |
-| `SANGAM_ALLOW_DEMO_CITIZEN_SWITCH` | Enables the demo citizen switcher (never in production) |
-| `DEPARTMENT_API_BASE_URL` | Base URL of the department API service used by the Department Sandbox API adapter |
+| `SANGAM_ALLOW_DEMO_CITIZEN_SWITCH` | Enables the backend demo citizen switch endpoints (never in production; the web app no longer uses them) |
+| `DEPARTMENT_API_BASE_URL` | Base URL of the combined department API (legacy single-service mode) |
+| `DEPARTMENT_API_URL_<KEY>` | Per-department service URL (`REVENUE`, `EDUCATION`, `SOCIAL_WELFARE`, `MUNICIPAL_HEALTH`, `TRANSPORT`, …). Read by SANGAM from `backend/.env.integrations` (see `.env.integrations.example`); when set, the department is probed and monitored as its own system |
+| `SANDBOX_DB_URL_<KEY>` | A department's own database (default: SQLite under `backend/data/sandboxes`). Read only by the department services, from `backend/.env.departments` |
+| `SANGAM_FEDERATED_DEPARTMENTS` | Retires the in-process department mocks so every department requirement goes through the department services (Revenue income primary, Social Welfare verified household income as fallback) |
+| `SANGAM_PUBLIC_DEMO` | Enables the demo-account selector on the sign-in page and server-side sign-in for the seven synthetic `DEMO-CIT-00x` accounts only. Refused in production |
 | `DEPARTMENT_SANDBOX_AUTO_SEED` | Department API creates + seeds its sandbox databases on first start |
 | `DEPARTMENT_API_KEY_TRANSPORT`, `PROVIDER_TRANSPORT_SANDBOX_*_API_KEY` | API key for the Transport sandbox providers (API-key auth demo). Must be set, otherwise those providers report `MISCONFIGURED` and are never selected |
 | `REDIS_ENABLED`, `REDIS_URL`, `ASYNC_PROVIDER_JOBS` | Redis + async provider jobs (worker). Off on a plain host setup |
@@ -132,8 +139,17 @@ cd backend
 pip install -r requirements.txt
 alembic upgrade head
 
-# 3. Department sandbox APIs (separate service; creates and seeds its own databases)
-python -m uvicorn app.department_api.main:app --port 9101
+# 3. Department systems — optional PostgreSQL databases (writes backend/.env.departments; never drops)
+python -m app.sandbox.provision_postgres
+cp .env.integrations.example .env.integrations
+#    then one terminal per department (each seeds its own database on start)
+python -m uvicorn app.department_api.services.revenue:app        --port 9101
+python -m uvicorn app.department_api.services.education:app      --port 9102
+python -m uvicorn app.department_api.services.social_welfare:app --port 9103
+python -m uvicorn app.department_api.services.health:app         --port 9104
+python -m uvicorn app.department_api.services.transport:app      --port 9105
+python -m uvicorn app.department_api.services.other:app          --port 9106
+#    (the original single service, app.department_api.main:app, still works for a quick start)
 
 # 4. SANGAM backend (new terminal, from backend/) — seeds demo data on first start
 python -m uvicorn main:app --port 8001
@@ -145,6 +161,47 @@ npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
 Open http://127.0.0.1:5173. `run_platform.bat` / `run_platform.sh` perform steps 2–5 in one go. Department sandboxes can also be managed by hand: `python -m app.sandbox.manage create-all | seed-all | reset-all | status`.
+
+### Running every service (Windows PowerShell)
+
+Each process runs in its own PowerShell window from the repository root (the folder that contains `backend` and `frontend`); `--app-dir backend` tells uvicorn where the code is. Configuration files are found relative to the code, so the working directory does not change which database is used. **Do not add `--reload`** for these databases: a reloading server re-runs its idempotent startup seeding on every code edit.
+
+| Process | Port | Command | Database | Configuration read |
+|---|---|---|---|---|
+| SANGAM backend | 8001 | `python -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8001` | `sangam_db` (`DATABASE_URL`) | `backend/.env`, `backend/.env.integrations` |
+| Revenue API | 9101 | `python -m uvicorn app.department_api.services.revenue:app --app-dir backend --host 127.0.0.1 --port 9101` | `revenue_db` | `backend/.env.departments` (`SANDBOX_DB_URL_REVENUE`) |
+| Education API | 9102 | `python -m uvicorn app.department_api.services.education:app --app-dir backend --host 127.0.0.1 --port 9102` | `education_db` | `SANDBOX_DB_URL_EDUCATION` |
+| Social Welfare API | 9103 | `python -m uvicorn app.department_api.services.social_welfare:app --app-dir backend --host 127.0.0.1 --port 9103` | `welfare_db` | `SANDBOX_DB_URL_SOCIAL_WELFARE` |
+| Health API | 9104 | `python -m uvicorn app.department_api.services.health:app --app-dir backend --host 127.0.0.1 --port 9104` | `health_db` | `SANDBOX_DB_URL_MUNICIPAL_HEALTH` |
+| Transport API | 9105 | `python -m uvicorn app.department_api.services.transport:app --app-dir backend --host 127.0.0.1 --port 9105` | `transport_db` | `SANDBOX_DB_URL_TRANSPORT`, `DEPARTMENT_API_KEY_TRANSPORT` |
+| Other departments | 9106 | `python -m uvicorn app.department_api.services.other:app --app-dir backend --host 127.0.0.1 --port 9106` | `agriculture_db`, `labour_db`, `civil_supplies_db`, `housing_db`, `skills_db` | `SANDBOX_DB_URL_<KEY>` for each |
+| Frontend | 5173 | `npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173` | — | `VITE_API_BASE_URL` (unset = `http://127.0.0.1:8001/api` in dev) |
+
+SANGAM reaches each department only at `DEPARTMENT_API_URL_<KEY>` from `backend/.env.integrations` (never its database). Start the department APIs first, then SANGAM, then the frontend.
+
+**What starting does to data.** A department service creates missing tables/columns and inserts its seed rows only when they are missing (`DEPARTMENT_SANDBOX_AUTO_SEED=true`); SANGAM inserts missing catalog/provider/demo rows (`SANGAM_SEED_*=true`). Both are insert-only and idempotent: on already-seeded databases they change nothing. For a start that writes nothing at all, set the flags in that window first — a real environment variable always wins over the file:
+
+```powershell
+$env:DEPARTMENT_SANDBOX_AUTO_SEED = "false"   # before starting a department API
+$env:SANGAM_SEED_CATALOG = "false"; $env:SANGAM_SEED_DEMO_USERS = "false"; $env:SANGAM_SEED_SYNTHETIC_DATA = "false"; $env:SANGAM_SEED_DEPARTMENT_PROVIDERS = "false"   # before SANGAM
+```
+
+**Health checks** (a department's `/health` also checks its own database and answers 503 when it cannot reach it):
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8001/health/live
+Invoke-RestMethod http://127.0.0.1:8001/health/ready
+9101..9106 | ForEach-Object { try { $r = Invoke-RestMethod "http://127.0.0.1:$_/health"; "$_ $($r.status) db=$($r.database)" } catch { "$_ DOWN" } }
+```
+
+A department that is down appears as *Unavailable* in Admin → Overview / Providers while *SANGAM platform* stays *Healthy*.
+
+**Stopping / restarting one department.** Press `Ctrl+C` in its window, or stop whatever listens on its port, then run its command again:
+
+```powershell
+Get-NetTCPConnection -LocalPort 9101 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess }   # stop Revenue only
+python -m uvicorn app.department_api.services.revenue:app --app-dir backend --host 127.0.0.1 --port 9101   # start it again
+```
 
 ### Migrations
 
@@ -209,9 +266,10 @@ PostgreSQL is the only state that must be backed up (`pg_dump --format=custom`).
 |---|---|---|
 | `CITIZEN_001` (Rahul Kumar) | Citizen | Original demo citizen |
 | `CITIZEN_002` | Citizen | |
-| `SYN-CIT-00001` … (10 personas) | Citizen | Password-less **Continue as a demo citizen** on the login page, and the switcher in the navbar (only when demo switching is enabled) |
+| `SYN-CIT-00001` … (10 personas) | Citizen | Sign in with the shared `SANGAM_DEMO_CITIZEN_PASSWORD` |
 | `OFFICER_MH_01` | Officer | Review queue |
 | `ADMIN_MH_01` | Admin | Admin console |
+| `DEMO-CIT-001` … `DEMO-CIT-007` | Citizen | Public demo accounts (`SANGAM_PUBLIC_DEMO=true`): chosen from the sign-in page selector, no password shown. Scenarios: eligible (Rahul Kumar), missing information, several documents, fallback provider (Amit Shinde), affected by a Revenue outage (Neha Pawar), unconfirmed identity (Sachin More), not eligible (Kiran Kale) |
 
 Passwords are whatever you set in `.env` (`SANGAM_*_PASSWORD`, `SANGAM_DEMO_CITIZEN_PASSWORD`); the UI never displays or pre-fills them. Sessions are JWTs kept in memory only, so a browser refresh requires signing in again (Admin returns to the page it was on, per tab).
 
@@ -224,6 +282,21 @@ Passwords are whatever you set in `.env` (`SANGAM_*_PASSWORD`, `SANGAM_DEMO_CITI
 5. Officer: sign in as `OFFICER_MH_01` to see the review queue. Admin: open the application in **Applications** to see the full lineage.
 
 ## 10. Failure / fallback scenario
+
+### Federated departments (`SANGAM_FEDERATED_DEPARTMENTS=true`)
+
+| Priority | Provider | Department service |
+|---|---|---|
+| 10 · **Authoritative source** | Revenue Sandbox API – Income Certificates | Revenue :9101 → `revenue_db` |
+| 30 · **Authorized fallback** | Social Welfare Department API – Verified Household Income | Social Welfare :9103 → `welfare_db` |
+
+Priority, capability and authorization are separate. A provider is selected only if the registry *authorizes* it for the requirement — as the authoritative source, or as an explicitly authorized fallback; priority only orders providers within the same role. A department that merely *can* answer (a capability without authorization) is never used, even when the authoritative source is down. Authorization is read from the capability row (`payload.authorization`), else from the registered provider definition; anything undeclared is not selected. "No record" from one department moves on to the next authorized provider; only when every authorized provider has answered is it reported as *no record* — if one could not be asked, the citizen sees *temporarily unavailable* instead.
+
+1. Stop the Revenue service (or Admin → Providers → *Department systems* → Revenue → **Simulate outage**).
+2. Sign in as **Amit Shinde (DEMO-CIT-004)** and Auto-Fill: income is verified from Social Welfare; domicile (Revenue only) waits with a generic "temporarily unavailable" notice; Education records are unaffected.
+3. Admin sees *SANGAM platform: Healthy*, *Revenue Department: Unavailable*, the open incidents and the affected applications, and **Activity** shows the exchange step by step: requesting department → SANGAM → registry → Revenue skipped → fallback policy → Social Welfare API → entity resolution → normalization → verification → result. Admin notifications link to the incident, provider or application. Restart Revenue (or **Restore department**) and the incidents resolve.
+
+### Legacy in-process providers
 
 `INCOME_PROOF` has two registered providers for the same capability:
 

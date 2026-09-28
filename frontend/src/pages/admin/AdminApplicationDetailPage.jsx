@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { applicationStateClass, applicationStateLabel } from '../../applicationState';
 import { requirementStateClass, requirementStateLabel } from '../../requirementState';
+import { ActivityTimeline, StatusPill, Skeleton } from '../../components/ui';
+
+const DEPARTMENT_NAMES = { REVENUE: 'Revenue Department', EDUCATION: 'Education Department', SOCIAL_WELFARE: 'Social Welfare Department', MUNICIPAL_HEALTH: 'Health Department', TRANSPORT: 'Transport Department', IDENTITY: 'State Resident Registry' };
 
 export default function AdminApplicationDetailPage({ applicationId, onBack, api }) {
   const [detail, setDetail] = useState(null);
@@ -24,7 +27,7 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
     return (
       <main className="container">
         <button className="outline small back-link" onClick={onBack}>← Back to Applications</button>
-        <p className="loading-state">Loading application orchestration state…</p>
+        <Skeleton lines={4} label="Loading application orchestration state" />
       </main>
     );
   }
@@ -53,7 +56,7 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
       <div className="card" style={{ marginBottom: '24px', borderLeft: '4px solid #127475' }}>
         <div className="page-title" style={{ marginBottom: '12px' }}>
           <div>
-            <p className="eyebrow">Orchestration & Verification Trace</p>
+            <p className="eyebrow">Application</p>
             <h1 style={{ fontSize: '26px' }}>{detail.schemeName}</h1>
             <p>Application ID: <code>{detail.appId}</code> · Citizen ID: <code>{detail.citizenId}</code></p>
           </div>
@@ -83,12 +86,14 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
         )}
       </div>
 
+      <EligibilityAssessment eligibility={detail.eligibility} />
+
       {/* Requirements Orchestration Matrix */}
       <div className="card" style={{ marginBottom: '24px' }}>
         <div className="section-heading">
           <div>
             <h2>Requirement Orchestration & Source Selection</h2>
-            <p>Automated provider selection, source-decision transparency, and verification outcome per requirement.</p>
+            <p>Data source and verification result for each requirement.</p>
           </div>
           <span className="count-badge">
             {detail.requirements.filter(r => ['VALIDATED', 'RETRIEVED', 'USER_OVERRIDDEN'].includes(r.status)).length} / {detail.requirements.length} Satisfied
@@ -129,7 +134,7 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
                         </span>
                       )}
                       {req.mandatory && (
-                        <small style={{ color: '#F2542D', fontWeight: 600 }}>Mandatory</small>
+                        <small style={{ color: '#C8401C', fontWeight: 600 }}>Mandatory</small>
                       )}
                     </div>
                   </div>
@@ -160,6 +165,41 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
                   </div>
                 )}
 
+                {(req.sourceDepartment || req.identityMatch) && (
+                  <div className="identity-match">
+                    {req.sourceDepartment && <span><b>Verified by:</b> {DEPARTMENT_NAMES[req.sourceDepartment] || req.sourceDepartment}{req.verifiedAt ? ` · ${new Date(req.verifiedAt).toLocaleString()}` : ''}</span>}
+                    {req.identityMatch && (
+                      <span>
+                        <b>Record match:</b> {req.identityMatch.confidenceLevel} ({Math.round((req.identityMatch.score || 0) * 100)}%) —
+                        {' '}{req.identityMatch.decision === 'AUTO_ACCEPT' ? 'same person' : 'not confirmed, record not attached'}
+                        {' '}· matched {(req.identityMatch.matchedFields || []).join(', ') || 'no fields'}
+                        {(req.identityMatch.fieldComparisons || []).filter(item => item.field === 'address' && item.candidateNormalized).map(item => (
+                          <small key="address" className="muted" style={{ display: 'block' }}>Address normalised: "{item.sourceNormalized}" vs "{item.candidateNormalized}" ({Math.round(item.score * 100)}%)</small>
+                        ))}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Full provenance, for administrators (citizens see only the department). */}
+                {req.provenance && (
+                  <dl className="provenance-grid">
+                    <div><dt>Provider</dt><dd><code>{req.provenance.providerId}</code></dd></div>
+                    <div><dt>Source record</dt><dd><code>{req.provenance.sourceRecordId || '—'}</code></dd></div>
+                    <div><dt>Verified</dt><dd>{req.provenance.verifiedAt ? new Date(req.provenance.verifiedAt).toLocaleString() : '—'}</dd></div>
+                    <div><dt>Method</dt><dd>{String(req.provenance.verificationMethod || '').replace(/_/g, ' ').toLowerCase()} · {req.provenance.recordKind === 'DOCUMENT' ? 'department document' : 'structured record'}</dd></div>
+                    <div><dt>Found by department</dt><dd>{String(req.provenance.departmentMatchMethod || 'n/a').replace(/_/g, ' ').toLowerCase()}</dd></div>
+                    <div><dt>Match</dt><dd><StatusPill status={req.provenance.matchCategory === 'EXACT' || req.provenance.matchCategory === 'STRONG' ? 'VERIFIED' : 'WARNING'} label={`${req.provenance.matchCategory || 'Unchecked'}${typeof req.provenance.confidence === 'number' ? ` · ${Math.round(req.provenance.confidence * 100)}%` : ''}`} /></dd></div>
+                    <div><dt>Role</dt><dd><StatusPill status={req.provenance.authorizationRole || 'AUTHORITATIVE'} label={req.provenance.fallbackUsed ? 'Authorized fallback' : 'Authoritative source'} /></dd></div>
+                  </dl>
+                )}
+                {req.trace?.steps?.length > 0 && (
+                  <details className="trace-details">
+                    <summary>SANGAM exchange: {req.trace.consumerDepartment || 'application'} → SANGAM → {req.trace.targetDepartment || 'no department answered'} ({req.trace.steps.length} steps)</summary>
+                    <ActivityTimeline steps={req.trace.steps} />
+                  </details>
+                )}
+
                 {/* Primary provider's open incident, when the fallback that
                     fulfilled this requirement was triggered by one. */}
                 {req.primaryProviderIncident && (
@@ -174,7 +214,7 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
                 <div style={{ marginTop: '12px', padding: '10px 12px', background: '#FBF3F1', borderRadius: '4px', fontSize: '13px' }}>
                   <b>Source Selection Decision:</b>
                   <p style={{ margin: '4px 0 6px', color: '#562C2C' }}>
-                    {req.decisionReason || 'Provider discovery evaluated against registered capabilities.'}
+                    {req.decisionReason || 'Selected from the providers registered for this requirement.'}
                   </p>
 
                   {/* Candidates tier hierarchy */}
@@ -191,7 +231,7 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
                               fontSize: '11px',
                               background: c.isChosen ? '#daf1e7' : '#fff',
                               border: `1px solid ${c.isChosen ? '#0E9594' : '#E8D5D0'}`,
-                              color: c.isChosen ? '#0E9594' : '#7A6360',
+                              color: c.isChosen ? '#0B6E6D' : '#7A6360',
                               fontWeight: c.isChosen ? 700 : 400,
                             }}
                           >
@@ -239,7 +279,7 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
         </div>
 
         {detail.jobs.length === 0 ? (
-          <p className="muted">No asynchronous background provider jobs were dispatched for this application (synchronous execution or direct retrieval).</p>
+          <p className="muted">No background jobs for this application.</p>
         ) : (
           <div style={{ overflowX: 'auto' }}>
             <table>
@@ -270,7 +310,7 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
                       {j.error ? (
                         <span style={{ color: '#a25a12' }}>[{j.error.category}] {j.error.message}</span>
                       ) : (
-                        <span style={{ color: '#0E9594' }}>✓ None</span>
+                        <span style={{ color: '#0B6E6D' }}>✓ None</span>
                       )}
                     </td>
                     <td><small>{j.completedAt ? new Date(j.completedAt).toLocaleString() : 'In Progress'}</small></td>
@@ -331,5 +371,56 @@ export default function AdminApplicationDetailPage({ applicationId, onBack, api 
         )}
       </div>
     </main>
+  );
+}
+
+const ELIGIBILITY_RESULT = {
+  ELIGIBLE: ['Eligible', 'found'],
+  NOT_ELIGIBLE: ['Not eligible', 'exception'],
+  CANNOT_CONFIRM: ['Cannot be confirmed yet', 'pending'],
+  NOT_ASSESSED: ['No eligibility rules configured', 'pending'],
+};
+
+// Deterministic rule outcome plus data completeness; the confidence level
+// describes data quality only and never overrides the rule result.
+function EligibilityAssessment({ eligibility }) {
+  if (!eligibility) return null;
+  const [label, className] = ELIGIBILITY_RESULT[eligibility.result] || [eligibility.result, 'pending'];
+  const completeness = eligibility.completeness || {};
+  return (
+    <div className="card" style={{ marginBottom: '24px' }}>
+      <div className="section-heading">
+        <div>
+          <h2>Eligibility Assessment</h2>
+          <p>Scheme rules checked against verified information.</p>
+        </div>
+        <span className={`status ${className}`}>{label}</span>
+      </div>
+      <div className="summary-grid" style={{ margin: '12px 0' }}>
+        <div className="summary-card"><span className="eyebrow">Failed rules</span><b>{eligibility.failedCriteria?.length || 0}</b><small>{(eligibility.failedCriteria || []).join(', ') || 'None'}</small></div>
+        <div className="summary-card"><span className="eyebrow">Undetermined rules</span><b>{eligibility.unknownCriteria?.length || 0}</b><small>{eligibility.conflict ? 'Open conflict/review on this application' : 'Missing, unverified or expired data'}</small></div>
+        <div className="summary-card"><span className="eyebrow">Data completeness</span><b>{(completeness.verifiedByProvider || 0) + (completeness.providedByCitizen || 0)}/{completeness.total || 0}</b>
+          <small>{completeness.verifiedByProvider || 0} provider-verified · {completeness.providedByCitizen || 0} citizen-uploaded · {completeness.pending || 0} pending · {completeness.notProvided || 0} not provided · {completeness.failed || 0} failed</small></div>
+        <div className="summary-card"><span className="eyebrow">Confidence (data quality)</span><b>{eligibility.confidence || '—'}</b><small>{eligibility.confidenceReason}</small></div>
+      </div>
+      {eligibility.criteria?.length > 0 && (
+        <div style={{ overflowX: 'auto' }}>
+          <table>
+            <thead><tr><th>Rule</th><th>Result</th><th>Observed</th><th>Data source</th><th>Reason</th></tr></thead>
+            <tbody>
+              {eligibility.criteria.map(item => (
+                <tr key={item.id}>
+                  <td><b>{item.label}</b><small style={{ display: 'block' }} className="muted">{item.type}{item.requirementCode ? ` · ${item.requirementCode}` : ''}</small></td>
+                  <td><span className={`status ${item.status === 'PASS' ? 'found' : item.status === 'FAIL' ? 'exception' : 'pending'}`}>{item.status}</span></td>
+                  <td>{item.observed ?? '—'}</td>
+                  <td>{{ VERIFIED: 'Provider-verified', MANUAL: 'Citizen upload', PROFILE: 'Identity record' }[item.source] || '—'}</td>
+                  <td>{item.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
+import DepartmentHealthPanel from './DepartmentHealthPanel';
+import { Skeleton } from '../../components/ui';
 
 export default function AdminProvidersPage({ api, onOpenProvider }) {
   const [providers, setProviders] = useState([]);
@@ -10,6 +12,7 @@ export default function AdminProvidersPage({ api, onOpenProvider }) {
   const [simError, setSimError] = useState('Upstream sandbox simulated timeout');
   const [simLoading, setSimLoading] = useState(false);
   const [simSuccess, setSimSuccess] = useState('');
+  const [departmentRefresh, setDepartmentRefresh] = useState(0);
 
   const loadProviders = () => {
     setLoading(true);
@@ -64,20 +67,22 @@ export default function AdminProvidersPage({ api, onOpenProvider }) {
     <main className="container">
       <div className="page-title">
         <div>
-          <p className="eyebrow">Federated Middleware Integrations · Admin</p>
+          <p className="eyebrow">Operations</p>
           <h1>Department Providers & System Health</h1>
           <p>
-            SANGAM serves as interoperability middleware. Department databases remain the authoritative source of truth.
+            Department systems, providers and their current health.
           </p>
         </div>
         <div className="actions">
-          <button className="outline" onClick={loadProviders} disabled={loading}>
+          <button className="outline" onClick={() => { loadProviders(); setDepartmentRefresh(count => count + 1); }} disabled={loading}>
             {loading ? 'Refreshing…' : '↻ Refresh Status'}
           </button>
         </div>
       </div>
 
       {error && <div className="alert danger" role="alert">{error}</div>}
+
+      <DepartmentHealthPanel api={api} onChanged={loadProviders} refreshToken={departmentRefresh} />
       {simSuccess && <div className="alert success" role="alert">{simSuccess}</div>}
 
       {/* Integration Providers Table */}
@@ -85,13 +90,13 @@ export default function AdminProvidersPage({ api, onOpenProvider }) {
         <div className="section-heading">
           <div>
             <h2>Provider / Integration Registry</h2>
-            <p>Every registered department provider: department, capabilities, adapter, health and active incidents.</p>
+            <p>Registered providers with their capabilities, health and incidents.</p>
           </div>
           <span className="count-badge">Total Providers: {providers.length}</span>
         </div>
 
         {loading ? (
-          <p className="loading-state">Loading provider registry…</p>
+          <Skeleton lines={4} label="Loading provider registry" />
         ) : providers.length === 0 ? (
           <div className="empty-state">
             <span>○</span>
@@ -148,9 +153,9 @@ export default function AdminProvidersPage({ api, onOpenProvider }) {
                         )}
                       </td>
                       <td>
-                        <small style={{ color: '#0E9594' }}>✓ {p.successCount || 0}</small>
+                        <small style={{ color: '#0B6E6D' }}>✓ {p.successCount || 0}</small>
                         {p.failureCount > 0 && (
-                          <small style={{ color: '#F2542D', display: 'block' }}>⚠ {p.failureCount}</small>
+                          <small style={{ color: '#C8401C', display: 'block' }}>⚠ {p.failureCount}</small>
                         )}
                       </td>
                       <td>
@@ -173,7 +178,7 @@ export default function AdminProvidersPage({ api, onOpenProvider }) {
           <div className="section-heading">
             <div>
               <h2>Provider ↔ Requirement Capability Matrix</h2>
-              <p>Which providers are capable of fulfilling each requirement, and their fallback priority tier.</p>
+              <p>Which providers can answer each requirement, and in what order.</p>
             </div>
           </div>
           <div style={{ overflowX: 'auto' }}>
@@ -201,7 +206,7 @@ export default function AdminProvidersPage({ api, onOpenProvider }) {
                               <span
                                 key={p.providerId}
                                 className="tag"
-                                style={{ fontSize: '11px', background: healthy ? '#F5DFDB' : '#fff0df', color: healthy ? '#127475' : '#a25a12' }}
+                                style={{ fontSize: '11px', background: healthy ? '#F5DFDB' : '#fff0df', color: healthy ? '#10696A' : '#a25a12' }}
                               >
                                 {idx === 0 ? '★ ' : ''}{p.name} (P{cap.priority})
                               </span>
@@ -218,16 +223,14 @@ export default function AdminProvidersPage({ api, onOpenProvider }) {
         </div>
       )}
 
-      {/* Protected Resilience Demonstration Controls */}
+      {/* Fault injection: admin-only resilience testing controls */}
       <div className="card" style={{ borderLeft: '4px solid #F2542D' }}>
         <div className="section-heading">
           <div>
-            <p className="eyebrow" style={{ color: '#F2542D' }}>Protected Demonstration Capability · SIH 2026</p>
+            <p className="eyebrow" style={{ color: '#C8401C' }}>Administrator tool · Fault injection</p>
             <h2>Fault-Tolerance & Resilience Testing</h2>
             <p>
-              Simulate an upstream department outage or latency spike to demonstrate how SANGAM gracefully
-              falls back to alternate provider candidates without crashing the citizen experience.
-            </p>
+              Mark a provider unavailable to test fallback and incident handling. For test environments only.</p>
           </div>
         </div>
 
@@ -257,7 +260,7 @@ export default function AdminProvidersPage({ api, onOpenProvider }) {
                 checked={!simAvailable}
                 onChange={() => setSimAvailable(false)}
               />
-              <span style={{ color: '#F2542D', fontWeight: 600 }}>Simulate Outage (UNAVAILABLE)</span>
+              <span style={{ color: '#C8401C', fontWeight: 600 }}>Simulate Outage (UNAVAILABLE)</span>
             </label>
             <label style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
               <input
@@ -266,7 +269,7 @@ export default function AdminProvidersPage({ api, onOpenProvider }) {
                 checked={simAvailable}
                 onChange={() => setSimAvailable(true)}
               />
-              <span style={{ color: '#0E9594', fontWeight: 600 }}>Restore Normal (AVAILABLE)</span>
+              <span style={{ color: '#0B6E6D', fontWeight: 600 }}>Restore Normal (AVAILABLE)</span>
             </label>
           </div>
 

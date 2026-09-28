@@ -18,8 +18,8 @@ SCHEMES = [{
     "descriptionMr": "वर्ग १० नंतर उच्च शिक्षण घेणाऱ्या पात्र विद्यार्थ्यांसाठी आर्थिक सहाय्य, उत्पन्न, जात, अधिवास व शैक्षणिक नोंदींची आपोआप पडताळणी करून दिले जाते.",
     "benefits": "Tuition and maintenance allowance for the academic year, disbursed directly to the student's linked bank account.",
     "benefitsMr": "शैक्षणिक वर्षासाठी शिकवणी व निर्वाह भत्ता, विद्यार्थ्याच्या संलग्न बँक खात्यात थेट जमा केला जातो.",
-    "eligibility": "Maharashtra domicile students enrolled in a recognised post-matric course, subject to family income and category criteria.",
-    "eligibilityMr": "महाराष्ट्राचे अधिवास असलेले व मान्यताप्राप्त पदव्युत्तर अभ्यासक्रमात प्रवेशित विद्यार्थी, कौटुंबिक उत्पन्न व प्रवर्ग निकषांच्या अधीन.",
+    "eligibility": "Maharashtra domicile students enrolled in a recognised post-matric course, with an annual family income of up to ₹6,00,000, at least 60% in the qualifying examination and a DBT-linked bank account.",
+    "eligibilityMr": "महाराष्ट्राचे अधिवास असलेले व मान्यताप्राप्त पदव्युत्तर अभ्यासक्रमात प्रवेशित विद्यार्थी, ज्यांचे वार्षिक कौटुंबिक उत्पन्न ₹६,००,००० पर्यंत आहे, पात्रता परीक्षेत किमान ६०% गुण आहेत व डीबीटी-संलग्न बँक खाते आहे.",
     "applicationWindow": "Applications open for the current academic year.",
     "applicationWindowMr": "चालू शैक्षणिक वर्षासाठी अर्ज सुरू आहेत.",
     "requirements": [
@@ -197,6 +197,41 @@ for _scheme in SCHEMES:
         _requirement.setdefault("labelMr", _REQUIREMENT_LABELS_MR.get(_requirement["code"], _requirement["label"]))
 
 
+
+def _record(code: str, label: str, label_mr: str) -> dict:
+    return {"id": f"{code.lower()}_verified", "type": "record", "requirement": code, "label": label, "labelMr": label_mr}
+
+
+_IDENTITY_RULE = _record("IDENTITY", "Identity is verified", "ओळख पडताळलेली आहे")
+
+# Deterministic eligibility criteria per scheme (see app.engine.eligibility),
+# taken only from each scheme's published eligibility text above. They are
+# stored in the scheme's catalog payload, so they are DB-owned like the rest.
+ELIGIBILITY_RULES = {
+    "SCH-MH-2026": [
+        _IDENTITY_RULE,
+        {"id": "maharashtra_domicile", "type": "equals", "requirement": "DOMICILE_PROOF", "field": "state", "value": "Maharashtra",
+         "label": "Domicile of Maharashtra", "labelMr": "महाराष्ट्राचे अधिवास"},
+        {"id": "family_income_limit", "type": "maxValue", "requirement": "INCOME_PROOF", "field": "incomeAmount", "value": 600000,
+         "label": "Annual family income up to ₹6,00,000", "labelMr": "वार्षिक कौटुंबिक उत्पन्न ₹६,००,००० पर्यंत"},
+        {"id": "qualifying_marks", "type": "minValue", "requirement": "ACADEMIC_RECORD", "field": "percentage", "value": 60,
+         "label": "At least 60% in the qualifying examination", "labelMr": "पात्रता परीक्षेत किमान ६०% गुण"},
+        {"id": "dbt_bank_linked", "type": "equals", "requirement": "BANK_DETAILS", "field": "bankStatus", "value": "VERIFIED",
+         "label": "Bank account linked for direct benefit transfer", "labelMr": "थेट लाभ हस्तांतरणासाठी बँक खाते संलग्न"},
+    ],
+    "EDU-ACADEMIC-2026": [_IDENTITY_RULE, _record("ACADEMIC_RECORD", "Academic history recorded with the Education Department", "शिक्षण विभागाकडे शैक्षणिक इतिहास नोंदवलेला")],
+    "AGR-INPUT-SUBSIDY-2026": [_IDENTITY_RULE, _record("FARMER_REGISTRATION", "Registered farmer", "नोंदणीकृत शेतकरी")],
+    "TRN-VEHICLE-VERIFY-2026": [_IDENTITY_RULE, _record("VEHICLE_REGISTRATION", "Vehicle registered with the Transport Department", "परिवहन विभागाकडे वाहन नोंदणीकृत")],
+    "FCS-RATION-CARD-2026": [_IDENTITY_RULE, _record("RATION_CARD", "Holds a ration card record", "शिधापत्रिका नोंद आहे")],
+    "HSG-ALLOTMENT-2026": [_IDENTITY_RULE, _record("HOUSING_ALLOTMENT", "Has applied for public housing allotment", "सार्वजनिक गृहनिर्माण वाटपासाठी अर्ज केला आहे")],
+    "SKE-CERTIFICATION-2026": [_IDENTITY_RULE, _record("SKILL_CERTIFICATION", "Registered skill certification", "नोंदणीकृत कौशल्य प्रमाणपत्र")],
+    "MUN-BIRTH-CERT-2026": [_IDENTITY_RULE, _record("BIRTH_CERTIFICATE", "Birth registered with a municipal authority", "नागरी संस्थेकडे जन्म नोंदणीकृत")],
+    "SW-ENROLLMENT-2026": [_IDENTITY_RULE, _record("SCHEME_ENROLLMENT_STATUS", "Enrolled or applying in a Social Welfare scheme", "समाज कल्याण योजनेत नोंदणीकृत किंवा अर्जदार")],
+    "REV-LAND-VERIFY-2026": [_IDENTITY_RULE, _record("LAND_HOLDING", "Holds a land record with the Revenue Department", "महसूल विभागाकडे जमीन नोंद आहे")],
+}
+for _scheme in SCHEMES:
+    _scheme.setdefault("eligibilityRules", ELIGIBILITY_RULES.get(_scheme["id"], []))
+
 # Development fallback catalog. Production selection reads the PostgreSQL catalog.
 DEPENDENCY_SERVICES = [
     {
@@ -262,7 +297,9 @@ def dependency_registry(health: list[dict]) -> list[dict]:
     if not definitions:
         if not _demo_fallback_enabled():
             return []
-        definitions = DEPENDENCY_SERVICES
+        from app.engine.provider_policy import capability_authorization
+        definitions = [{**definition, "authorization": capability_authorization(f"{definition['provider'].upper().replace(' ', '-')}:{definition['requirementCode']}", definition)}
+                       for definition in DEPENDENCY_SERVICES]
     health_by_provider = {}
     for item in health:
         for key in (item.get("system"), item.get("provider"), item.get("providerId")):
@@ -272,8 +309,11 @@ def dependency_registry(health: list[dict]) -> list[dict]:
 
 
 def select_dependency_provider(requirement_code: str, health: list[dict]) -> dict | None:
-    candidates = [item for item in dependency_registry(health) if item["requirementCode"] == requirement_code]
+    """The healthy, *authorized* provider to ask first. Capability alone never
+    qualifies a provider; priority only orders providers within a role."""
+    from app.engine.provider_policy import is_selectable, selection_key
+    candidates = [item for item in dependency_registry(health) if item["requirementCode"] == requirement_code and is_selectable(item)]
     eligible = [item for item in candidates if item.get("healthStatus") in {"AVAILABLE", "HEALTHY"}]
     if not eligible:
         return None
-    return sorted(eligible, key=lambda item: (item.get("priority", 100), item["provider"]))[0]
+    return sorted(eligible, key=selection_key)[0]

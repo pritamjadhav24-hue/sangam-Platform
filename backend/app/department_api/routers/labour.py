@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.department_api.common import correlation_id_header, envelope, not_found, session_dependency
+from app.department_api.common import correlation_id_header, envelope, not_found, session_dependency, department_health
+from app.department_api.resolution import PersonIndex, register_resolver
 from app.sandbox.labour import models
 
 router = APIRouter(prefix="/departments/labour", tags=["labour"])
@@ -13,7 +14,7 @@ get_session = session_dependency(models.ENGINE)
 
 @router.get("/health")
 def health():
-    return {"status": "AVAILABLE", "sourceSystem": SOURCE_SYSTEM, "synthetic": True}
+    return department_health(models.ENGINE, SOURCE_SYSTEM)
 
 
 @router.get("/workers/{citizen_ref}")
@@ -43,3 +44,11 @@ def get_welfare_board_membership(citizen_ref: str, correlation_id=Depends(correl
         return not_found(SOURCE_SYSTEM, correlation_id)
     data = {"worker_name": worker.worker_name, "board_name": membership.board_name, "membership_number": membership.membership_number}
     return envelope(data, source_system=SOURCE_SYSTEM, correlation_id=correlation_id, record_id=membership.membership_id, status=membership.status)
+
+
+# Canonical record lookup for SANGAM: this department finds the person in its
+# own records (see app.department_api.resolution) and serves the record
+# through the handlers above.
+register_resolver(router, get_session, PersonIndex(models.RegisteredWorker, id_field="worker_id", name_field="worker_name", dob_field="dateOfBirth",
+                                                   phone_field="mobile", identifier_names=('worker_id',)),
+                  SOURCE_SYSTEM, {"workers": get_worker_registration, "welfare-board-memberships": get_welfare_board_membership})

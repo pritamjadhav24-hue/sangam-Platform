@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import admin_routes, auth_routes, citizen_routes, officer_routes, catalog_routes
 from app.api import notification_routes
 import app.core.notification_manager
-from app.core.persistence import ensure_demo_citizen_accounts, ensure_user_accounts, initialize, hydrate_state, persist_state, seed_catalog, seed_department_sandbox_providers, seed_department_sandbox_schema_mappings, seed_platform_citizens, seed_requirement_catalog, seed_schema_mappings, validate_production_configuration, worker_operational_status
+from app.core.persistence import ensure_demo_citizen_accounts, ensure_public_demo_accounts, ensure_user_accounts, federate_department_providers, initialize, hydrate_state, persist_state, seed_catalog, seed_department_sandbox_providers, seed_department_sandbox_schema_mappings, seed_platform_citizens, seed_requirement_catalog, seed_schema_mappings, validate_production_configuration, worker_operational_status
 from app.core.redis_service import RedisService
 
 _production = os.getenv("SANGAM_ENV", "development").strip().lower() in {"production", "prod"}
@@ -21,8 +21,24 @@ _cors_credentials = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() in {"1",
 app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=_cors_credentials, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allow_headers=["Authorization", "Content-Type", "Accept", "X-Correlation-ID"])
 app.include_router(auth_routes.router); app.include_router(citizen_routes.router); app.include_router(officer_routes.router); app.include_router(admin_routes.router); app.include_router(notification_routes.router); app.include_router(catalog_routes.router)
 
+def load_integration_env() -> None:
+    """SANGAM's own endpoints for the department APIs (DEPARTMENT_API_URL_<DEPT>),
+    from backend/.env.integrations when present. Loaded at startup only, so
+    importing this module (e.g. in tests) never points code at live services."""
+    from pathlib import Path
+    path = Path(__file__).resolve().parent / ".env.integrations"
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
 @app.on_event("startup")
 def startup_persistence():
+    load_integration_env()
     initialize()
     validate_production_configuration()
     RedisService().health_check()
@@ -32,8 +48,10 @@ def startup_persistence():
     seed_schema_mappings()
     seed_platform_citizens()
     ensure_demo_citizen_accounts()
+    ensure_public_demo_accounts()
     seed_department_sandbox_providers()
     seed_department_sandbox_schema_mappings()
+    federate_department_providers()
     hydrate_state()
 
 @app.middleware("http")

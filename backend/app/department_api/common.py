@@ -84,3 +84,19 @@ def not_found(source_system: str, correlation_id: Optional[str]) -> JSONResponse
         "status": "NOT_FOUND",
         "data": None,
     })
+
+
+def department_health(engine, source_system: str):
+    """Health of one department system: the API is up *and* can reach its
+    own database. 503 when the database is unreachable, so callers (SANGAM's
+    provider health checks) see the department as unavailable."""
+    from sqlalchemy import text
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        database = "CONNECTED"
+    except Exception:
+        database = "UNAVAILABLE"
+    body = {"status": "AVAILABLE" if database == "CONNECTED" else "UNAVAILABLE", "database": database,
+            "sourceSystem": source_system, "synthetic": True}
+    return body if database == "CONNECTED" else JSONResponse(status_code=503, content=body)

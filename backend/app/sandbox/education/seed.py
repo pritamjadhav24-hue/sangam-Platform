@@ -67,3 +67,28 @@ def seed(session, citizens: list[dict]) -> dict:
             ))
             counts["scholarship_eligibility"] += 1
     return counts
+
+
+def seed_demo(session, _citizens=None) -> dict:
+    """Curated public-demo citizens (app.seeds.demo_citizens), idempotent."""
+    from app.seeds.demo_citizens import demo_records
+    added = 0
+    for index, (citizen, spec) in enumerate(demo_records("education"), start=1):
+        if session.query(Student).filter_by(citizen_ref=citizen["citizenId"]).first():
+            continue
+        student_id = f"EDU-DEMO-STU-{index:03d}"
+        session.add(Student(
+            student_id=student_id, citizen_ref=citizen["citizenId"], student_name=spec.get("name", citizen["name"]),
+            date_of_birth=spec.get("dob", citizen["dob"]), guardian_mobile=spec.get("phone", citizen["phone"]),
+            udise_school_code="27251042", standard=spec.get("standard", "UG-1"),
+        ))
+        session.flush()
+        if spec.get("academicStatus"):
+            verified = spec["academicStatus"] == "VERIFIED"
+            session.add(AcademicRecord(
+                record_id=f"EDU-DEMO-ACA-{index:03d}", student_id=student_id, academic_year="2025-2026",
+                percentage=spec.get("percentage") if verified else None, result="PASS" if verified else "PENDING",
+                status=spec["academicStatus"],
+            ))
+        added += 1
+    return {"demoCitizens": added}

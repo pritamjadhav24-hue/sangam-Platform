@@ -72,16 +72,16 @@ class DynamicApplicationFormTests(unittest.TestCase):
 
     # 1 + 2: authenticated citizen can create an application, associated with the scheme.
     def test_authenticated_citizen_can_create_an_application_for_a_scheme(self):
-        application = self._apply("CITIZEN_001", "SCH-MH-2026")
+        application = self._apply("CITIZEN_DAF_001", "SCH-MH-2026")
         self.assertTrue(application["appId"])
         self.assertEqual(application["serviceId"], "SCH-MH-2026")
         self.assertEqual(application["status"], "IN_PROGRESS")
 
     # 3 + 7: ownership.
     def test_application_belongs_to_the_authenticated_citizen_only(self):
-        application = self._apply("CITIZEN_001", "SCH-MH-2026")
+        application = self._apply("CITIZEN_DAF_001", "SCH-MH-2026")
         # The owner can read it back.
-        fetched = get_citizen_application(application["appId"], user=_user("CITIZEN_001"))
+        fetched = get_citizen_application(application["appId"], user=_user("CITIZEN_DAF_001"))
         self.assertEqual(fetched["appId"], application["appId"])
         # A different citizen cannot.
         with self.assertRaises(HTTPException) as ctx:
@@ -89,7 +89,7 @@ class DynamicApplicationFormTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_citizen_cannot_auto_fill_or_upload_for_another_citizens_application(self):
-        application = self._apply("CITIZEN_001", "SCH-MH-2026")
+        application = self._apply("CITIZEN_DAF_001", "SCH-MH-2026")
         requirement_code = application["requirements"][0]["requirementCode"]
         with self.assertRaises(HTTPException) as ctx:
             auto_fill_requirement(application["appId"], requirement_code, user=_user("CITIZEN_002"))
@@ -107,8 +107,8 @@ class DynamicApplicationFormTests(unittest.TestCase):
     # 4 + 5: requirements resolved dynamically from scheme metadata; different
     # schemes produce different requirement sets, through the same code path.
     def test_requirements_are_resolved_dynamically_from_scheme_metadata(self):
-        scholarship = self._apply("CITIZEN_001", "SCH-MH-2026")
-        academic = self._apply("CITIZEN_001", "EDU-ACADEMIC-2026")
+        scholarship = self._apply("CITIZEN_DAF_001", "SCH-MH-2026")
+        academic = self._apply("CITIZEN_DAF_001", "EDU-ACADEMIC-2026")
         scheme_a = citizen_service_snapshot("SCH-MH-2026")
         scheme_b = citizen_service_snapshot("EDU-ACADEMIC-2026")
 
@@ -132,11 +132,11 @@ class DynamicApplicationFormTests(unittest.TestCase):
             self.assertEqual(item["status"], "NOT_PROVIDED")
 
     def test_reapplying_to_the_same_open_scheme_resumes_instead_of_duplicating(self):
-        first = self._apply("CITIZEN_001", "SCH-MH-2026")
-        second = self._apply("CITIZEN_001", "SCH-MH-2026")
+        first = self._apply("CITIZEN_DAF_001", "SCH-MH-2026")
+        second = self._apply("CITIZEN_DAF_001", "SCH-MH-2026")
         self.assertEqual(first["appId"], second["appId"])
         with Session(engine) as session:
-            rows = session.execute(select(ApplicationRow).where(ApplicationRow.citizen_id == "CITIZEN_001")).scalars().all()
+            rows = session.execute(select(ApplicationRow).where(ApplicationRow.citizen_id == "CITIZEN_DAF_001")).scalars().all()
         matching = [row for row in rows if row.payload.get("serviceId") == "SCH-MH-2026"]
         self.assertEqual(len(matching), 1, "no duplicate application row should have been created")
 
@@ -159,11 +159,11 @@ class DynamicApplicationFormTests(unittest.TestCase):
 
     # 8: manual upload is associated with the correct requirement (and application/citizen).
     def test_manual_upload_is_associated_with_the_correct_application_and_requirement(self):
-        application = self._apply("CITIZEN_001", "SCH-MH-2026")
+        application = self._apply("CITIZEN_DAF_001", "SCH-MH-2026")
         document_requirement = next(item for item in application["requirements"] if item.get("dataType") in {"DOCUMENT", "CERTIFICATE"})
         code = document_requirement["requirementCode"]
 
-        result = upload_requirement_document(application["appId"], code, RequirementUpload(title="Demo Certificate", contentType="text/plain", content="SYNTHETIC/DEMO test content"), user=_user("CITIZEN_001"))
+        result = upload_requirement_document(application["appId"], code, RequirementUpload(title="Demo Certificate", contentType="text/plain", content="SYNTHETIC/DEMO test content"), user=_user("CITIZEN_DAF_001"))
 
         updated_requirement = next(item for item in result["requirements"] if item["requirementCode"] == code)
         self.assertEqual(updated_requirement["status"], "VALIDATED")
@@ -173,7 +173,7 @@ class DynamicApplicationFormTests(unittest.TestCase):
         document = get_document(updated_requirement["documentId"])
         self.assertEqual(document["appId"], application["appId"])
         self.assertEqual(document["requirementCode"], code)
-        self.assertEqual(document["citizenId"], "CITIZEN_001")
+        self.assertEqual(document["citizenId"], "CITIZEN_DAF_001")
         self.assertEqual(document["sourceType"], "CITIZEN_UPLOAD")
 
         # Other requirements on the same application are untouched.
@@ -181,12 +181,12 @@ class DynamicApplicationFormTests(unittest.TestCase):
         self.assertTrue(all(item["status"] == "NOT_PROVIDED" for item in other))
 
     def test_manual_upload_is_rejected_for_a_non_document_requirement_type(self):
-        application = self._apply("CITIZEN_001", "SCH-MH-2026")
+        application = self._apply("CITIZEN_DAF_001", "SCH-MH-2026")
         non_document = next((item for item in application["requirements"] if item.get("dataType") not in {"DOCUMENT", "CERTIFICATE"}), None)
         if non_document is None:
             self.skipTest("no non-document requirement on this scheme to exercise the rejection path")
         with self.assertRaises(HTTPException) as ctx:
-            upload_requirement_document(application["appId"], non_document["requirementCode"], RequirementUpload(title="x", content="y"), user=_user("CITIZEN_001"))
+            upload_requirement_document(application["appId"], non_document["requirementCode"], RequirementUpload(title="x", content="y"), user=_user("CITIZEN_DAF_001"))
         self.assertEqual(ctx.exception.status_code, 400)
 
 

@@ -153,7 +153,8 @@ class AutoFillConsentRetrievalTests(unittest.TestCase):
         # switched to something the upload endpoint would refuse.
         self.assertIn(requirement["dataType"], {"DOCUMENT", "CERTIFICATE"})
         self.assertNotIn(requirement["status"], requirement_fulfillment.SUCCESS_STATUSES)
-        self.assertIn("manually", requirement["userAction"].lower())
+        self.assertIn("upload the document yourself", requirement["userAction"].lower())
+        self.assertTrue(requirement["canUpload"])
 
     def test_reject_does_not_undo_an_already_completed_requirement(self):
         application = self._apply("CITIZEN_C6C_005")

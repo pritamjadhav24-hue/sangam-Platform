@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { applicationStateClass, applicationStateLabel } from '../../applicationState';
+import { Skeleton } from '../../components/ui';
 
 const STATUS_FILTERS = [
   { key: 'ALL', label: 'All Statuses' },
@@ -43,9 +44,9 @@ export default function AdminApplicationsPage({ onSelectApplication, api }) {
     <main className="container">
       <div className="page-title">
         <div>
-          <p className="eyebrow">Registry & Tracking · Admin</p>
+          <p className="eyebrow">Operations</p>
           <h1>Platform Applications</h1>
-          <p>Complete operational registry of all citizen applications and their current orchestration states.</p>
+          <p>All citizen applications and their current status.</p>
         </div>
         <div className="actions">
           <button className="outline" onClick={fetchApplications} disabled={loading}>
@@ -102,7 +103,7 @@ export default function AdminApplicationsPage({ onSelectApplication, api }) {
         </div>
 
         {loading ? (
-          <p className="loading-state">Loading applications from PostgreSQL authority…</p>
+          <Skeleton lines={4} label="Loading applications from PostgreSQL authority" />
         ) : applications.length === 0 ? (
           <div className="empty-state">
             <span>○</span>
@@ -143,7 +144,7 @@ export default function AdminApplicationsPage({ onSelectApplication, api }) {
                       </span>
                     </td>
                     <td>
-                      <span style={{ fontWeight: 600, color: app.fulfilledCount === app.requirementsCount ? '#0E9594' : '#127475' }}>
+                      <span style={{ fontWeight: 600, color: app.fulfilledCount === app.requirementsCount ? '#0B6E6D' : '#127475' }}>
                         {app.fulfilledCount} / {app.requirementsCount}
                       </span>
                       <small>fulfilled</small>

@@ -4,20 +4,130 @@
     {
       "name": "sangam-frontend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5173"],
+      "runtimeArgs": [
+        "--prefix",
+        "frontend",
+        "run",
+        "dev",
+        "--",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5173"
+      ],
       "port": 5173
     },
     {
       "name": "sangam-backend",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "uvicorn", "main:app", "--app-dir", "backend", "--host", "127.0.0.1", "--port", "8001"],
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "main:app",
+        "--app-dir",
+        "backend",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8001"
+      ],
       "port": 8001
     },
     {
-      "name": "sangam-department-api",
+      "name": "dept-revenue",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "uvicorn", "app.department_api.main:app", "--app-dir", "backend", "--host", "127.0.0.1", "--port", "9101"],
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.department_api.services.revenue:app",
+        "--app-dir",
+        "backend",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9101"
+      ],
       "port": 9101
+    },
+    {
+      "name": "dept-education",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.department_api.services.education:app",
+        "--app-dir",
+        "backend",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9102"
+      ],
+      "port": 9102
+    },
+    {
+      "name": "dept-social-welfare",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.department_api.services.social_welfare:app",
+        "--app-dir",
+        "backend",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9103"
+      ],
+      "port": 9103
+    },
+    {
+      "name": "dept-health",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.department_api.services.health:app",
+        "--app-dir",
+        "backend",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9104"
+      ],
+      "port": 9104
+    },
+    {
+      "name": "dept-transport",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.department_api.services.transport:app",
+        "--app-dir",
+        "backend",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9105"
+      ],
+      "port": 9105
+    },
+    {
+      "name": "dept-other",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.department_api.services.other:app",
+        "--app-dir",
+        "backend",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9106"
+      ],
+      "port": 9106
     }
   ]
 }

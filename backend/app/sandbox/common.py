@@ -116,3 +116,27 @@ def case_bucket(rng: random.Random, weights: dict | None = None) -> str:
 
 def record_id(department_key: str, sequence: int, prefix: str = "REC") -> str:
     return f"{department_key.upper()}-{prefix}-{sequence:05d}"
+
+
+def add_missing_columns(engine, base) -> list[str]:
+    """Add any nullable column a department model gained since its database
+    was created (``create_all`` only creates missing *tables*). Additive
+    only: never drops, renames or rewrites existing data. Returns the
+    ``table.column`` names it added."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    added = []
+    with engine.begin() as connection:
+        for table in base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in present or not column.nullable:
+                    continue
+                column_type = column.type.compile(dialect=engine.dialect)
+                connection.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column_type}'))
+                added.append(f"{table.name}.{column.name}")
+    return added

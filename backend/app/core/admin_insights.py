@@ -412,3 +412,331 @@ def effective_access_model(routes) -> dict:
         result.append({"area": area, "endpoints": bucket["endpoints"], "public": bucket["public"],
                        "byRole": dict(bucket["byRole"])})
     return {"roles": ["CITIZEN", "OFFICER", "ADMIN"], "areas": result, "mutablePermissions": False}
+
+
+# ---------------------------------------------------------------------------
+# Provider incident impact
+# ---------------------------------------------------------------------------
+# Incident -> unavailable provider -> the requirement codes it serves ->
+# requirement operations inside the incident window (or, while it is open,
+# unfulfilled requirements with no other healthy provider) -> application ->
+# citizen. A citizen is affected only through such a concrete requirement,
+# never merely because a provider they might use is down.
+
+INACTIVE_APPLICATION_STATUSES = {"COMPLETED", "REJECTED", "CANCELLED"}
+_PENDING_JOB_STATUSES = {"QUEUED", "RUNNING", "RETRYING"}
+BLOCKED_STATES = {"RETRY_PENDING", "ACTION_REQUIRED", "AWAITING_PROVIDER"}
+_STATE_LABELS = {
+    "RETRY_PENDING": "Waiting for retry", "ACTION_REQUIRED": "Needs citizen action (manual upload)",
+    "AWAITING_PROVIDER": "Blocked: no available provider", "FALLBACK_SUCCEEDED": "Served by a fallback provider",
+    "RECOVERED": "Recovered after the outage",
+}
+
+
+def _in_window(moment, start, end) -> bool:
+    return moment is not None and (start is None or moment >= start) and (end is None or moment <= end)
+
+
+def _operation_hit(operation: dict, provider_keys: set) -> bool:
+    """The incident's provider was tried (or skipped as unavailable) and did
+    not succeed in this operation."""
+    return any((attempt.get("providerId") in provider_keys or attempt.get("provider") in provider_keys) and not attempt.get("success")
+               for attempt in operation.get("attempts") or [])
+
+
+def _requirement_impact_state(requirement: dict, provider_keys: set, window: tuple, open_now: bool,
+                              editable: bool, has_alternative: bool) -> Optional[dict]:
+    status = requirement.get("status")
+    satisfied = status in SUCCESS_STATUSES
+    hits = [op for op in requirement.get("providerHistory") or []
+            if _in_window(_parse_ts(op.get("at")), *window) and _operation_hit(op, provider_keys)]
+    if hits:
+        last = hits[-1]
+        if last.get("outcome") in SUCCESS_STATUSES:
+            final = next((a for a in reversed(last.get("attempts") or []) if a.get("success")), {})
+            return {"state": "FALLBACK_SUCCEEDED", "resolvedBy": final.get("provider") or final.get("providerId")}
+        if satisfied:
+            if _is_manual(requirement):
+                resolved_by = "Citizen upload"
+            elif requirement.get("providerId") in provider_keys:
+                resolved_by = "Same provider after recovery"
+            else:
+                resolved_by = "Alternate provider"
+            return {"state": "RECOVERED", "resolvedBy": resolved_by}
+        return {"state": "RETRY_PENDING" if status == "WAITING" else "ACTION_REQUIRED", "resolvedBy": None}
+    if open_now and editable and not satisfied and not has_alternative:
+        return {"state": "AWAITING_PROVIDER", "resolvedBy": None}
+    return None
+
+
+def _incident_provider(session, provider_system: str) -> tuple:
+    from sqlalchemy import or_
+    from app.core.persistence import ProviderCapabilityRow
+    provider = session.query(ProviderRow).filter(or_(ProviderRow.provider_id == provider_system, ProviderRow.name == provider_system)).first()
+    keys = {provider_system}
+    codes = set()
+    if provider:
+        keys |= {provider.provider_id, provider.name}
+        codes = {row.capability_code for row in session.query(ProviderCapabilityRow).filter(
+            ProviderCapabilityRow.provider_id == provider.provider_id, ProviderCapabilityRow.enabled.is_(True))}
+    return keys, codes
+
+
+def incident_impacts(incident_ids: Optional[list] = None, include_applications: bool = False) -> dict:
+    """Impact for each incident (all, or ``incident_ids``), keyed by incident id."""
+    with Session(engine) as session:
+        query = session.query(ProviderIncidentRow)
+        if incident_ids is not None:
+            query = query.filter(ProviderIncidentRow.incident_id.in_(incident_ids))
+        incidents = query.all()
+        if not incidents:
+            return {}
+        applications = [(row.app_id, row.citizen_id, row.status, dict(row.payload or {})) for row in session.query(ApplicationRow).all()]
+        schemes = {row.scheme_id: row.name for row in session.query(SchemeCatalogRow).all()}
+        jobs = session.query(ProviderJobRow).all()
+        providers = {incident.incident_id: _incident_provider(session, incident.provider_system) for incident in incidents}
+        incidents = [(incident.incident_id, incident.status, incident.detected_at, incident.resolved_at) for incident in incidents]
+
+    healthy_by_code = defaultdict(set)
+    if any(status == "OPEN" for _, status, _, _ in incidents):
+        from app.engine.adapters import integration_health
+        from app.engine.registry import dependency_registry
+        for entry in dependency_registry(integration_health()):
+            if entry.get("healthStatus") in {"AVAILABLE", "HEALTHY"}:
+                healthy_by_code[entry["requirementCode"]] |= {entry.get("providerId"), entry.get("provider")}
+
+    by_app = {app_id: (citizen_id, app_status, payload) for app_id, citizen_id, app_status, payload in applications}
+    result = {}
+    for incident_id, incident_status, detected_at, resolved_at in incidents:
+        provider_keys, codes = providers[incident_id]
+        window = (_parse_ts(detected_at), _parse_ts(resolved_at))
+        open_now = incident_status == "OPEN"
+        affected = {}
+
+        def _application_entry(app_id, citizen_id, app_status, payload):
+            return {"appId": app_id, "citizenId": citizen_id, "schemeId": payload.get("serviceId"),
+                    "schemeName": payload.get("schemeName") or schemes.get(payload.get("serviceId")) or payload.get("serviceId"),
+                    "applicationStatus": app_status, "requirements": [], "jobs": []}
+
+        for app_id, citizen_id, app_status, payload in applications:
+            editable = app_status not in INACTIVE_APPLICATION_STATUSES and app_status != "SUBMITTED"
+            for requirement in payload.get("requirements") or []:
+                code = requirement.get("code")
+                if code not in codes:
+                    continue
+                has_alternative = bool(healthy_by_code.get(code, set()) - provider_keys - {None})
+                impact = _requirement_impact_state(requirement, provider_keys, window, open_now, editable, has_alternative)
+                if impact:
+                    entry = affected.setdefault(app_id, _application_entry(app_id, citizen_id, app_status, payload))
+                    entry["requirements"].append({"requirementCode": code, "label": requirement.get("label") or code,
+                                                  "requirementStatus": requirement.get("status"),
+                                                  "stateLabel": _STATE_LABELS[impact["state"]], **impact})
+
+        # Asynchronous provider jobs dispatched to this provider during the
+        # incident window (the legacy dependency pipeline).
+        incident_jobs = [job for job in jobs if job.provider_id in provider_keys and _in_window(_parse_ts(job.created_at), *window)]
+        for job in incident_jobs:
+            if not job.application_id:
+                continue
+            citizen_id, app_status, payload = by_app.get(job.application_id, (None, None, {}))
+            entry = affected.setdefault(job.application_id, _application_entry(job.application_id, citizen_id, app_status, payload))
+            entry["jobs"].append({"jobId": job.job_id, "status": job.status, "attempt": job.attempt, "maxAttempts": job.max_attempts})
+
+        requirement_rows = [row for app in affected.values() for row in app["requirements"]]
+        for app in affected.values():
+            blocked = [row for row in app["requirements"] if row["state"] in BLOCKED_STATES]
+            dead = [job for job in app["jobs"] if job["status"] == "DEAD_LETTER"]
+            app["blocked"] = bool(blocked or dead)
+            app["recovered"] = not app["blocked"] and any(row["state"] == "RECOVERED" for row in app["requirements"])
+            if blocked:
+                app["blockedStage"] = f"Requirement verification: {blocked[0]['label']} ({blocked[0]['stateLabel'].lower()})"
+            elif dead:
+                app["blockedStage"] = "Provider job moved to dead-letter"
+            else:
+                app["blockedStage"] = None
+        summary = {
+            "affectedCitizens": len({app["citizenId"] for app in affected.values() if app["citizenId"]}),
+            "affectedApplicationsTotal": len(affected),
+            "affectedSchemes": sorted({app["schemeName"] for app in affected.values() if app["schemeName"]}),
+            "blockedOperations": sum(row["state"] in BLOCKED_STATES for row in requirement_rows)
+                                 + sum(job.status == "DEAD_LETTER" for job in incident_jobs),
+            "pendingRetries": sum(row["state"] == "RETRY_PENDING" for row in requirement_rows)
+                              + sum(job.status in _PENDING_JOB_STATUSES for job in incident_jobs),
+            "successfulFallbacks": sum(row["state"] == "FALLBACK_SUCCEEDED" for row in requirement_rows),
+            "recoveredApplications": sum(app["recovered"] for app in affected.values()),
+            "blockedApplications": sum(app["blocked"] for app in affected.values()),
+        }
+        if include_applications:
+            summary["applications"] = sorted(affected.values(), key=lambda app: (not app["blocked"], app["appId"]))
+        result[incident_id] = summary
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Department health (one entry per government department)
+# ---------------------------------------------------------------------------
+# A department is healthy or not independently of every other department and
+# of the SANGAM platform itself: Revenue being unreachable never makes
+# Education, Welfare, Health or Transport -- or SANGAM -- "degraded".
+
+_HEALTHY = {"AVAILABLE", "HEALTHY"}
+
+
+def _department_status(statuses: list[str]) -> str:
+    if not statuses:
+        return "NOT_CONFIGURED"
+    if all(status in _HEALTHY for status in statuses):
+        return "AVAILABLE"
+    if all(status == "UNAVAILABLE" for status in statuses):
+        return "UNAVAILABLE"
+    return "DEGRADED"
+
+
+def department_health_summary() -> dict:
+    from app.engine.adapters import integration_health
+    from app.engine.departments import DEPARTMENTS, department_label, provider_department
+    from app.engine.registry import dependency_registry
+
+    health = integration_health()
+    registry = dependency_registry(health)
+    health_by_name = {item["system"]: item for item in health}
+    with Session(engine) as session:
+        providers = [(row.provider_id, row.name) for row in session.query(ProviderRow).filter(ProviderRow.active.is_(True)).all()]
+        open_incidents = [(row.incident_id, row.provider_system, row.detected_at) for row in
+                          session.query(ProviderIncidentRow).filter(ProviderIncidentRow.status == "OPEN").all()]
+        payloads = [(row.citizen_id, dict(row.payload or {})) for row in session.query(ApplicationRow).all()]
+
+    by_department: dict[str, dict] = {}
+    for provider_id, name in providers:
+        key = provider_department(provider_id)
+        if not key:
+            continue
+        entry = by_department.setdefault(key, {"providers": [], "providerIds": set(), "names": set()})
+        item = health_by_name.get(name, {})
+        capabilities = [cap for cap in registry if cap.get("providerId") == provider_id]
+        entry["providerIds"].add(provider_id)
+        entry["names"].add(name)
+        entry["providers"].append({
+            "providerId": provider_id, "name": name, "status": item.get("status", "UNKNOWN"),
+            "simulated": bool(item.get("simulated")), "lastSuccessAt": item.get("lastSuccessAt"),
+            "latencyMs": item.get("lastResponseMs"), "errorCategory": item.get("errorCategory"),
+            "requirements": [{"requirementCode": cap["requirementCode"], "priority": cap.get("priority", 100)} for cap in capabilities],
+        })
+
+    # Primary vs fallback per requirement, across departments.
+    ranked: dict[str, list] = defaultdict(list)
+    for cap in registry:
+        ranked[cap["requirementCode"]].append((cap.get("priority", 100), cap.get("provider") or "", cap.get("providerId")))
+    primary_for = {code: sorted(items)[0][2] for code, items in ranked.items() if items}
+
+    # Fallback usage from the persisted per-operation provider history.
+    fallback_served: Counter = Counter()
+    fallback_triggered: Counter = Counter()
+    for _, payload in payloads:
+        for requirement in payload.get("requirements") or []:
+            for operation in requirement.get("providerHistory") or []:
+                attempts = operation.get("attempts") or []
+                winner = next((a for a in attempts if a.get("success")), None)
+                if not winner or len(attempts) < 2:
+                    continue
+                served = provider_department(winner.get("providerId"))
+                if served:
+                    fallback_served[served] += 1
+                for attempt in attempts:
+                    if attempt is winner or attempt.get("success"):
+                        continue
+                    failed = provider_department(attempt.get("providerId"))
+                    if failed and failed != served:
+                        fallback_triggered[failed] += 1
+
+    impacts = incident_impacts([incident_id for incident_id, _, _ in open_incidents], include_applications=True) if open_incidents else {}
+    departments = []
+    order = list(DEPARTMENTS)
+    for key in sorted(by_department, key=lambda item: (not DEPARTMENTS.get(item, ("", "", False))[2], order.index(item) if item in order else 99)):
+        entry = by_department[key]
+        statuses = [provider["status"] for provider in entry["providers"]]
+        incidents = [(incident_id, detected) for incident_id, system, detected in open_incidents if system in entry["names"]]
+        affected_apps, affected_citizens = set(), set()
+        for incident_id, _ in incidents:
+            for application in (impacts.get(incident_id) or {}).get("applications") or []:
+                affected_apps.add(application["appId"])
+                if application.get("citizenId"):
+                    affected_citizens.add(application["citizenId"])
+        for provider in entry["providers"]:
+            for requirement in provider["requirements"]:
+                requirement["role"] = "PRIMARY" if primary_for.get(requirement["requirementCode"]) == provider["providerId"] else "FALLBACK"
+        successes = [provider["lastSuccessAt"] for provider in entry["providers"] if provider["lastSuccessAt"]]
+        latencies = [provider["latencyMs"] for provider in entry["providers"] if isinstance(provider["latencyMs"], (int, float))]
+        departments.append({
+            "key": key, "name": department_label(key), "nameMr": department_label(key, "mr"),
+            "headline": DEPARTMENTS.get(key, ("", "", False))[2],
+            "status": _department_status(statuses),
+            "simulatedOutage": any(provider["simulated"] for provider in entry["providers"]),
+            "latencyMs": round(sum(latencies) / len(latencies), 1) if latencies else None,
+            "lastSuccessfulVerification": max(successes) if successes else None,
+            "supportedRequirements": sorted({req["requirementCode"] for provider in entry["providers"] for req in provider["requirements"]}),
+            "providers": entry["providers"],
+            "activeIncidents": len(incidents),
+            "incidentSince": min((detected for _, detected in incidents), default=None),
+            "fallbackUsage": {"servedAsFallback": fallback_served.get(key, 0), "fallbacksTriggered": fallback_triggered.get(key, 0)},
+            "affectedApplications": len(affected_apps),
+            "affectedCitizens": len(affected_citizens),
+        })
+    unhealthy = [department["name"] for department in departments if department["status"] != "AVAILABLE"]
+    return {"platform": {"name": "SANGAM", "status": "HEALTHY"}, "departments": departments, "departmentsNotHealthy": unhealthy}
+
+
+# ---------------------------------------------------------------------------
+# Interoperability activity: what SANGAM did behind each Auto-Fill, for the
+# Admin console. Read from the authoritative application rows (the trace is
+# written in the same transaction as the requirement outcome). Traces are
+# sanitized when written -- department, requirement, outcome and timing only.
+# ---------------------------------------------------------------------------
+
+def interoperability_activity(limit: int = 30, application_id: Optional[str] = None) -> dict:
+    with Session(engine) as session:
+        query = session.query(ApplicationRow)
+        if application_id:
+            query = query.filter(ApplicationRow.app_id == application_id)
+        traces = []
+        for row in query.all():
+            for requirement in (row.payload or {}).get("requirements", []):
+                trace = requirement.get("trace")
+                if isinstance(trace, dict) and trace.get("steps"):
+                    traces.append({**trace, "applicationStatus": row.status})
+    traces.sort(key=lambda item: item.get("completedAt") or "", reverse=True)
+    counts = Counter(item.get("outcome") for item in traces)
+    return {"exchanges": traces[: max(1, min(int(limit), 200))], "total": len(traces),
+            "summary": {"autoFilled": counts.get("AUTO_FILLED", 0), "viaFallback": counts.get("AUTO_FILLED_VIA_FALLBACK", 0),
+                        "pending": counts.get("PENDING", 0), "noRecord": counts.get("NO_RECORD", 0),
+                        "notAttached": counts.get("NOT_ATTACHED", 0) + counts.get("NOT_COMPLETED", 0)}}
+
+
+def provider_exchange_stats(provider_id: str, provider_name: Optional[str] = None) -> dict:
+    """Per-provider figures from real exchanges: last successful verification,
+    recent failures, fallback use, and the applications / citizens affected."""
+    keys = {key for key in (provider_id, provider_name) if key}
+    last_success, failures, served_as_fallback = None, [], 0
+    affected_apps, affected_citizens = set(), set()
+    with Session(engine) as session:
+        rows = [(row.app_id, row.citizen_id, dict(row.payload or {})) for row in session.query(ApplicationRow).all()]
+    for app_id, citizen_id, payload in rows:
+        for requirement in payload.get("requirements", []):
+            for operation in requirement.get("providerHistory") or []:
+                for attempt in operation.get("attempts") or []:
+                    if attempt.get("providerId") not in keys and attempt.get("provider") not in keys:
+                        continue
+                    if attempt.get("success"):
+                        if not last_success or (operation.get("at") or "") > last_success:
+                            last_success = operation.get("at")
+                    elif not attempt.get("recordNotFound"):
+                        failures.append({"at": operation.get("at"), "applicationId": app_id, "requirementCode": requirement.get("code"),
+                                         "errorCategory": attempt.get("errorCategory"), "skipped": bool(attempt.get("skipped"))})
+                        affected_apps.add(app_id)
+                        affected_citizens.add(citizen_id)
+            provenance = requirement.get("provenance") or {}
+            if provenance.get("providerId") in keys and provenance.get("fallbackUsed"):
+                served_as_fallback += 1
+    failures.sort(key=lambda item: item.get("at") or "", reverse=True)
+    return {"lastSuccessfulVerification": last_success, "recentFailures": failures[:10], "failureCount": len(failures),
+            "servedAsFallback": served_as_fallback, "affectedApplications": len(affected_apps), "affectedCitizens": len(affected_citizens)}

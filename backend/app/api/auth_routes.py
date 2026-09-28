@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.core.audit_bus import audit_bus
-from app.core.auth import authenticate, demo_citizen_switch_enabled, issue_token
+from app.core.auth import authenticate, demo_citizen_switch_enabled, issue_token, public_demo_enabled
 from app.core.persistence import UserAccountRow, engine
 from app.core.rate_limit import enforce
 
@@ -61,4 +61,37 @@ def demo_login(body: DemoLogin):
     audit_bus.append(body.citizenId, "IDENTITY", "Demo citizen switch", "GovOrchestrator", "DEMO_SWITCH", payload={"success": bool(user)})
     if not user:
         raise HTTPException(status_code=404, detail="This citizen is not available for demo switching.")
+    return {"verified": True, "token": issue_token(user), "user": user, "citizen": user}
+
+
+@router.get("/public-demo/accounts")
+def public_demo_accounts():
+    """Public demonstration accounts offered on the sign-in page: display
+    name and scenario only -- never a password or credential."""
+    if not public_demo_enabled():
+        raise HTTPException(status_code=404, detail="Public demonstration mode is not enabled.")
+    with Session(engine) as session:
+        rows = session.query(UserAccountRow).filter(UserAccountRow.role == "CITIZEN").all()
+    accounts = [
+        {"citizenId": row.user_id, "name": row.payload.get("name"), "scenario": row.payload.get("scenario"),
+         "scenarioLabel": row.payload.get("scenarioLabel")}
+        for row in rows if (row.payload or {}).get("isPublicDemo")
+    ]
+    accounts.sort(key=lambda item: item["citizenId"])
+    return {"accounts": accounts}
+
+
+@router.post("/public-demo/sign-in")
+def public_demo_sign_in(body: DemoLogin):
+    """Sign in as a public demonstration account (no password: the account
+    exists only for demonstration and holds only synthetic data)."""
+    if not public_demo_enabled():
+        raise HTTPException(status_code=404, detail="Public demonstration mode is not enabled.")
+    enforce("public_demo_sign_in", body.citizenId, limit=30, window_seconds=60)
+    with Session(engine) as session:
+        account = session.get(UserAccountRow, body.citizenId)
+        user = dict(account.payload) if account and account.role == "CITIZEN" and (account.payload or {}).get("isPublicDemo") else None
+    audit_bus.append(body.citizenId, "IDENTITY", "Public demonstration sign-in", "GovOrchestrator", "DEMO_SIGN_IN", payload={"success": bool(user)})
+    if not user:
+        raise HTTPException(status_code=404, detail="This demonstration account is not available.")
     return {"verified": True, "token": issue_token(user), "user": user, "citizen": user}

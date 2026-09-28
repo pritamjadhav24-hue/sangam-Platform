@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.department_api.common import correlation_id_header, envelope, not_found, require_api_key, session_dependency
+from app.department_api.common import correlation_id_header, envelope, not_found, require_api_key, session_dependency, department_health
+from app.department_api.resolution import PersonIndex, register_resolver
 from app.sandbox.transport import models
 
 router = APIRouter(prefix="/departments/transport", tags=["transport"], dependencies=[Depends(require_api_key("TRANSPORT"))])
@@ -15,7 +16,7 @@ get_session = session_dependency(models.ENGINE)
 
 @router.get("/health")
 def health():
-    return {"status": "AVAILABLE", "sourceSystem": SOURCE_SYSTEM, "synthetic": True}
+    return department_health(models.ENGINE, SOURCE_SYSTEM)
 
 
 @router.get("/vehicle-registrations/{citizen_ref}")
@@ -28,7 +29,7 @@ def get_vehicle_registration(citizen_ref: str, correlation_id=Depends(correlatio
     if not resident or not registration:
         return not_found(SOURCE_SYSTEM, correlation_id)
     data = {
-        "name": resident.name, "dob": resident.dob, "vehicle_number": registration.vehicle_number,
+        "name": resident.name, "dob": resident.dob, "phone": resident.phone, "vehicle_number": registration.vehicle_number,
         "vehicle_class": registration.vehicle_class, "registration_date": registration.registration_date,
         "rto_office": resident.rto_office,
     }
@@ -44,5 +45,13 @@ def get_driving_licence(citizen_ref: str, correlation_id=Depends(correlation_id_
                   .order_by(models.DrivingLicence.created_at.desc()).first())
     if not resident or not licence:
         return not_found(SOURCE_SYSTEM, correlation_id)
-    data = {"name": resident.name, "licence_class": licence.licence_class, "valid_until": licence.valid_until}
+    data = {"name": resident.name, "dob": resident.dob, "phone": resident.phone, "licence_class": licence.licence_class, "valid_until": licence.valid_until}
     return envelope(data, source_system=SOURCE_SYSTEM, correlation_id=correlation_id, record_id=licence.licence_id, status=licence.status)
+
+
+# Canonical record lookup for SANGAM: this department finds the person in its
+# own records (see app.department_api.resolution) and serves the record
+# through the handlers above.
+register_resolver(router, get_session, PersonIndex(models.ResidentIndex, id_field="resident_id", name_field="name", dob_field="dob",
+                                                   phone_field="phone", identifier_names=('resident_id',)),
+                  SOURCE_SYSTEM, {"vehicle-registrations": get_vehicle_registration, "driving-licences": get_driving_licence})

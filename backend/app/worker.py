@@ -109,6 +109,8 @@ def run_once(queue: JobQueue, handlers: dict, worker_id: str | None = None):
 
 def main():
     from app.core.persistence import initialize, hydrate_state
+    from main import load_integration_env  # same department endpoints as the API process
+    load_integration_env()
     initialize()
     hydrate_state()
     service = RedisService(enabled=True)

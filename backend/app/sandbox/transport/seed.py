@@ -58,3 +58,30 @@ def seed(session, citizens: list[dict]) -> dict:
             ))
             counts["driving_licences"] += 1
     return counts
+
+
+def seed_demo(session, _citizens=None) -> dict:
+    """Curated public-demo citizens (app.seeds.demo_citizens), idempotent."""
+    from app.seeds.demo_citizens import demo_records
+    added = 0
+    for index, (citizen, spec) in enumerate(demo_records("transport"), start=1):
+        if session.query(ResidentIndex).filter_by(citizen_ref=citizen["citizenId"]).first():
+            continue
+        resident_id = f"TRN-DEMO-RES-{index:03d}"
+        session.add(ResidentIndex(
+            resident_id=resident_id, citizen_ref=citizen["citizenId"], name=spec.get("name", citizen["name"]),
+            dob=spec.get("dob", citizen["dob"]), phone=spec.get("phone", citizen["phone"]), rto_office="Nashik RTO",
+        ))
+        session.flush()
+        if spec.get("vehicle"):
+            session.add(VehicleRegistration(
+                registration_id=f"TRN-DEMO-VEH-{index:03d}", resident_id=resident_id, vehicle_number="MH-15-DK-4821",
+                vehicle_class="Two Wheeler", registration_date="2023-02-14", status="ACTIVE",
+            ))
+        if spec.get("licence"):
+            session.add(DrivingLicence(
+                licence_id=f"TRN-DEMO-DL-{index:03d}", resident_id=resident_id, licence_number="MH1520190034512",
+                licence_class="LMV+MCWG", valid_until="2039-09-02", status="VALID",
+            ))
+        added += 1
+    return {"demoCitizens": added}

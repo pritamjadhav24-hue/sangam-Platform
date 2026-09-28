@@ -114,8 +114,8 @@ def setUpModule():
         session.add(ServiceCatalogRow(service_id=DOWN_SERVICE_ID, provider_id=DOWN_PROVIDER_ID, name="Down Lookup (test)", requirement_code=FALLBACK_REQUIREMENT_CODE, payload={}))
         session.add(ServiceCatalogRow(service_id=FALLBACK_SERVICE_ID, provider_id=FALLBACK_PROVIDER_ID, name="Fallback Lookup (test)", requirement_code=FALLBACK_REQUIREMENT_CODE, payload={}))
         session.flush()
-        session.add(ProviderCapabilityRow(capability_id=f"{DOWN_PROVIDER_ID}:{FALLBACK_REQUIREMENT_CODE}", provider_id=DOWN_PROVIDER_ID, capability_code=FALLBACK_REQUIREMENT_CODE, service_id=DOWN_SERVICE_ID, payload={"priority": 1}))
-        session.add(ProviderCapabilityRow(capability_id=f"{FALLBACK_PROVIDER_ID}:{FALLBACK_REQUIREMENT_CODE}", provider_id=FALLBACK_PROVIDER_ID, capability_code=FALLBACK_REQUIREMENT_CODE, service_id=FALLBACK_SERVICE_ID, payload={"priority": 50}))
+        session.add(ProviderCapabilityRow(capability_id=f"{DOWN_PROVIDER_ID}:{FALLBACK_REQUIREMENT_CODE}", provider_id=DOWN_PROVIDER_ID, capability_code=FALLBACK_REQUIREMENT_CODE, service_id=DOWN_SERVICE_ID, payload={"priority": 1, "authorization": {"authoritative": True}}))
+        session.add(ProviderCapabilityRow(capability_id=f"{FALLBACK_PROVIDER_ID}:{FALLBACK_REQUIREMENT_CODE}", provider_id=FALLBACK_PROVIDER_ID, capability_code=FALLBACK_REQUIREMENT_CODE, service_id=FALLBACK_SERVICE_ID, payload={"priority": 50, "authorization": {"fallbackAuthorized": True}}))
         session.add(RequirementCatalogRow(requirement_code=FALLBACK_REQUIREMENT_CODE, name="Phase5 fallback test requirement", category="TEST", data_type="CERTIFICATE", payload={}))
         session.flush()
         session.add(SchemaMappingRow(
@@ -372,9 +372,26 @@ class TerminalFailureObservabilityTest(unittest.TestCase):
         app = _app("PHASE5-TERMINAL", "SYN-CIT-DOES-NOT-EXIST", "DOMICILE_PROOF")
         receipt = create_consent("SYN-CIT-DOES-NOT-EXIST", True)
         app["consentId"] = receipt["consentId"]
-        with patch.dict(os.environ, {"DEPARTMENT_API_BASE_URL": "http://127.0.0.1:1"}):
-            for _ in range(3):  # exhaust the default maxAttempts=3
-                outcome = retrieve_artifact(app, "DOMICILE_PROOF", "SYN-CIT-DOES-NOT-EXIST")
+        # "Without a fallback": this module also registers the Revenue
+        # department API as a second authorized domicile source, which the
+        # retry path would (correctly) switch to -- take it out of the
+        # registry for this scenario only.
+        alternative = "REVENUE-SANDBOX-DOMICILE:DOMICILE_PROOF"
+        with Session(engine) as session:
+            row = session.get(ProviderCapabilityRow, alternative)
+            was_enabled = row.enabled if row else None
+            if row is not None:
+                row.enabled = False
+                session.commit()
+        try:
+            with patch.dict(os.environ, {"DEPARTMENT_API_BASE_URL": "http://127.0.0.1:1"}):
+                for _ in range(3):  # exhaust the default maxAttempts=3
+                    outcome = retrieve_artifact(app, "DOMICILE_PROOF", "SYN-CIT-DOES-NOT-EXIST")
+        finally:
+            if was_enabled is not None:
+                with Session(engine) as session:
+                    session.get(ProviderCapabilityRow, alternative).enabled = was_enabled
+                    session.commit()
         dependency = app["dependencies"][0]
         self.assertNotEqual(dependency["status"], "COMPLETED")  # never falsely completed
         self.assertGreaterEqual(dependency["attempts"], dependency["maxAttempts"])

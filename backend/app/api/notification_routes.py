@@ -25,6 +25,17 @@ def admin_notifications(user: dict = Depends(require_roles("ADMIN"))):
     return {"notifications": notification_manager.for_user(user)}
 
 
+@router.post("/notifications/read-all")
+def mark_all_notifications_read(user: dict = Depends(require_roles("CITIZEN", "OFFICER", "ADMIN"))):
+    """Mark every notification of the signed-in user as read."""
+    if user["role"] == "CITIZEN":
+        unread = [item for item in list_citizen_notifications(user["citizenId"]) if not item.get("read")]
+        for item in unread:
+            mark_citizen_notification_read(item["notificationId"], user["citizenId"])
+        return {"updated": len(unread)}
+    return {"updated": notification_manager.mark_all_read(user)}
+
+
 @router.post("/notifications/{notification_id}/read")
 def mark_notification_read(notification_id: str, user: dict = Depends(require_roles("CITIZEN", "OFFICER", "ADMIN"))):
     if notification_id.startswith("CN-"):

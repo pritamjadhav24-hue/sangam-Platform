@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import Float, ForeignKey, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.sandbox.common import SyntheticFlagMixin, TimestampMixin, build_document_table, make_engine
@@ -24,6 +24,12 @@ class Beneficiary(Base, TimestampMixin, SyntheticFlagMixin):
     date_of_birth: Mapped[str] = mapped_column(String(20))
     mobile: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     social_category: Mapped[str] = mapped_column(String(30))
+    address_line: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    # Household income verified by the department during beneficiary
+    # enrolment (field survey + documents). An authorised equivalent of an
+    # income certificate for income-linked schemes.
+    verified_annual_income: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    income_verified_on: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
 
 class CasteCertificate(Base, TimestampMixin, SyntheticFlagMixin):

@@ -4,6 +4,7 @@ import { requirementStateClass, requirementStateLabel } from '../requirementStat
 import { categoryLabel, translateNotification } from '../i18n';
 import ApplicationTimeline from '../components/ApplicationTimeline';
 import { useDismiss } from '../useDismiss';
+import EligibilityPanel from '../components/EligibilityPanel';
 
 export default function ReviewApplicationPage({ schemeId, citizen, navigate, language = 'en', notifications }) {
   const [application, setApplication] = useState(null);
@@ -174,6 +175,8 @@ export default function ReviewApplicationPage({ schemeId, citizen, navigate, lan
           ))}
         </ul>
       </section>
+
+      <EligibilityPanel assessment={application.eligibilityAssessment} language={language} />
 
       {submitError && <div className="alert danger" role="alert">{submitError}</div>}
 

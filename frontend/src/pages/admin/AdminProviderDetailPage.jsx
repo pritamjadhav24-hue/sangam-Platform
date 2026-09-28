@@ -1,4 +1,30 @@
 import { useEffect, useState } from 'react';
+import { ErrorState, SkeletonCards, StatusPill, Tooltip } from '../../components/ui';
+
+const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+
+function when(iso) {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+}
+
+// Four separate things, shown separately: what a provider CAN answer
+// (capability), whether it MAY (authorization), in which ROLE (source of
+// record or explicitly authorized fallback), and its ORDER among providers of
+// the same role (priority).
+function AuthorizationCell({ authorization }) {
+  const role = authorization?.role || 'NOT_AUTHORIZED';
+  const pill = <StatusPill status={role} label={authorization?.label || 'Not authorized'} />;
+  const source = authorization?.source === 'REGISTRY' ? 'Declared in the provider registry'
+    : authorization?.source === 'REGISTERED_DEFINITION' ? 'Declared by the registered provider definition' : 'No authorization declared (never selected)';
+  return (
+    <div className="authorization-cell">
+      {authorization?.basis ? <Tooltip text={authorization.basis}>{pill}</Tooltip> : pill}
+      <small className="muted">{source}</small>
+    </div>
+  );
+}
 
 export default function AdminProviderDetailPage({ providerId, onBack, onNavigateToApplication, api }) {
   const [detail, setDetail] = useState(null);
@@ -18,11 +44,11 @@ export default function AdminProviderDetailPage({ providerId, onBack, onNavigate
     if (providerId) loadDetail();
   }, [providerId]);
 
-  if (loading) {
+  if (loading && !detail) {
     return (
       <main className="container">
         <button className="outline small back-link" onClick={onBack}>← Back to Providers</button>
-        <p className="loading-state">Loading provider detail…</p>
+        <SkeletonCards count={3} label="Loading provider detail" />
       </main>
     );
   }
@@ -31,10 +57,11 @@ export default function AdminProviderDetailPage({ providerId, onBack, onNavigate
     return (
       <main className="container">
         <button className="outline small back-link" onClick={onBack}>← Back to Providers</button>
-        <div className="alert danger" role="alert">{error || 'Provider not found.'}</div>
+        <ErrorState title="Provider detail could not be loaded" message={error || 'Provider not found.'} onRetry={loadDetail} />
       </main>
     );
   }
+  const exchanges = detail.exchanges || {};
 
   const healthy = detail.health?.status === 'AVAILABLE' || detail.health?.status === 'HEALTHY';
   const openIncident = detail.incidents?.find(i => i.status === 'OPEN');
@@ -55,11 +82,9 @@ export default function AdminProviderDetailPage({ providerId, onBack, onNavigate
             <p>Provider ID: <code>{detail.providerId}</code> · Adapter: <code>{detail.adapterType}</code></p>
           </div>
           <div style={{ textAlign: 'right' }}>
-            <span className={`status ${healthy ? 'found' : 'exception'}`} style={{ fontSize: '14px', padding: '6px 12px' }}>
-              {detail.health?.status}
-            </span>
+            <StatusPill status={detail.health?.status} />
             {openIncident && (
-              <small style={{ display: 'block', marginTop: '6px', color: '#F2542D' }}>
+              <small style={{ display: 'block', marginTop: '6px', color: '#C8401C' }}>
                 Incident open since {new Date(openIncident.detectedAt).toLocaleString()}
               </small>
             )}
@@ -73,16 +98,20 @@ export default function AdminProviderDetailPage({ providerId, onBack, onNavigate
           <div><small className="muted">Timeout</small><div><b>{detail.timeoutSeconds}s</b></div></div>
           <div><small className="muted">Max Attempts</small><div><b>{detail.maxAttempts}</b></div></div>
           <div><small className="muted">Active</small><div><b>{detail.active ? 'Yes' : 'No'}</b></div></div>
-          <div><small className="muted">Last Success</small><div><b>{detail.health?.lastSuccessAt ? new Date(detail.health.lastSuccessAt).toLocaleString() : '—'}</b></div></div>
-          <div><small className="muted">Last Failure</small><div><b>{detail.health?.lastFailureAt ? new Date(detail.health.lastFailureAt).toLocaleString() : '—'}</b></div></div>
+          <div><small className="muted">API latency</small><div><b>{detail.latencyMs != null ? `${detail.latencyMs} ms` : '—'}</b></div></div>
+          <div><small className="muted">Last successful verification</small><div><b>{when(exchanges.lastSuccessfulVerification || detail.health?.lastSuccessAt)}</b></div></div>
+          <div><small className="muted">Last failure</small><div><b>{when(detail.health?.lastFailureAt)}</b></div></div>
+          <div><small className="muted">Recent failures</small><div><b>{exchanges.failureCount ?? 0}</b></div></div>
+          <div><small className="muted">Served as authorized fallback</small><div><b>{exchanges.servedAsFallback ?? 0}</b></div></div>
+          <div><small className="muted">Affected</small><div><b>{plural(exchanges.affectedApplications ?? 0, 'application')} · {plural(exchanges.affectedCitizens ?? 0, 'citizen')}</b></div></div>
         </div>
       </div>
 
       {/* Capabilities */}
       <div className="card" style={{ marginBottom: '24px' }}>
         <div className="section-heading">
-          <h2>Capabilities & Requirement Mappings</h2>
-          <span className="count-badge">{detail.capabilities.length} capabilities</span>
+          <h2>Capabilities, authorization & fallback role</h2>
+          <span className="count-badge">{detail.capabilities.length} {detail.capabilities.length === 1 ? 'capability' : 'capabilities'}</span>
         </div>
         {detail.capabilities.length === 0 ? (
           <p className="muted">No capabilities registered for this provider.</p>
@@ -90,15 +119,27 @@ export default function AdminProviderDetailPage({ providerId, onBack, onNavigate
           <div style={{ overflowX: 'auto' }}>
             <table>
               <thead>
-                <tr><th>Requirement Code</th><th>Service</th><th>Priority</th><th>Current Health</th></tr>
+                <tr><th>Capability (requirement)</th><th>Authorization</th><th>Priority</th><th>Other providers for this requirement</th><th>Health</th></tr>
               </thead>
               <tbody>
                 {detail.capabilities.map(c => (
                   <tr key={c.requirementCode}>
-                    <td><code>{c.requirementCode}</code></td>
-                    <td>{c.serviceName} <small className="muted">{c.serviceId}</small></td>
+                    <td><code>{c.requirementCode}</code><br /><small className="muted">{c.serviceName}</small></td>
+                    <td><AuthorizationCell authorization={c.authorization} /></td>
                     <td>{c.priority}</td>
-                    <td><span className={`status ${c.healthStatus === 'AVAILABLE' || c.healthStatus === 'HEALTHY' ? 'found' : 'exception'}`}>{c.healthStatus}</span></td>
+                    <td>
+                      {(c.otherProviders || []).length === 0 ? <small className="muted">None — no alternative source</small> : (
+                        <ul className="plain-list">
+                          {c.otherProviders.map(other => (
+                            <li key={other.providerId}>
+                              {other.provider} <StatusPill status={other.authorization?.role || 'NOT_AUTHORIZED'} label={other.authorization?.label || 'Not authorized'} />
+                              <small className="muted"> · priority {other.priority}</small>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </td>
+                    <td><StatusPill status={c.healthStatus} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -114,7 +155,7 @@ export default function AdminProviderDetailPage({ providerId, onBack, onNavigate
           <span className="count-badge">{detail.schemaMappings.length} mappings</span>
         </div>
         {detail.schemaMappings.length === 0 ? (
-          <p className="muted">No persisted department-field → canonical-field mappings for this provider.</p>
+          <p className="muted">No field mappings for this provider.</p>
         ) : (
           <div style={{ overflowX: 'auto' }}>
             <table>
@@ -171,6 +212,33 @@ export default function AdminProviderDetailPage({ providerId, onBack, onNavigate
                     </td>
                     <td><span className={`status ${j.status === 'COMPLETED' ? 'found' : j.status === 'DEAD_LETTER' ? 'exception' : 'pending'}`}>{j.status}</span></td>
                     <td><small>{new Date(j.createdAt).toLocaleString()}</small></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Recent failures from real exchanges */}
+      <div className="card" style={{ marginBottom: '24px' }}>
+        <div className="section-heading">
+          <h2>Recent failures</h2>
+          <span className="count-badge">{(exchanges.recentFailures || []).length}</span>
+        </div>
+        {(exchanges.recentFailures || []).length === 0 ? (
+          <p className="muted">No failed exchanges recorded for this provider.</p>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table>
+              <thead><tr><th>When</th><th>Application</th><th>Requirement</th><th>Failure</th></tr></thead>
+              <tbody>
+                {exchanges.recentFailures.map((failure, index) => (
+                  <tr key={`${failure.applicationId}-${failure.at}-${index}`}>
+                    <td><small>{when(failure.at)}</small></td>
+                    <td><button className="link" onClick={() => onNavigateToApplication?.(failure.applicationId)}>{failure.applicationId}</button></td>
+                    <td><code>{failure.requirementCode}</code></td>
+                    <td>{failure.skipped ? 'Skipped — provider unavailable' : String(failure.errorCategory || 'Error').replace(/_/g, ' ').toLowerCase()}</td>
                   </tr>
                 ))}
               </tbody>

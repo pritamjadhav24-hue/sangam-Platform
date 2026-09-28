@@ -96,15 +96,20 @@ def find_fallback_candidate(requirement_code: str, current_provider_id: Optional
     excluded = set(exclude_provider_ids or ())
     if current_provider_id:
         excluded.add(current_provider_id)
+    from app.engine.provider_policy import is_selectable, selection_key
+    # Only a provider explicitly authorized for this requirement -- as a
+    # source of record, or as a declared fallback -- may take over. Having
+    # the capability, or a lower priority, never makes a provider a fallback.
     candidates = [
         item for item in dependency_registry(integration_health())
         if item.get("requirementCode") == requirement_code
+        and is_selectable(item)
         and item.get("healthStatus") in {"AVAILABLE", "HEALTHY"}
         and item.get("providerId") not in excluded
     ]
     if not candidates:
         return None
-    return sorted(candidates, key=lambda item: (item.get("priority", 100), item["provider"]))[0]
+    return sorted(candidates, key=selection_key)[0]
 
 
 def attempt_provider_fallback(app: dict, requirement_code: str) -> bool:

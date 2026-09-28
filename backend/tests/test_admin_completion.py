@@ -151,7 +151,11 @@ class ProfileAccessTests(unittest.TestCase):
         token = issue_token(ADMIN)
         request = SimpleNamespace(app=main.app)
         profile = admin_profile(request, credentials=SimpleNamespace(credentials=token), user=ADMIN)
-        self.assertEqual(profile["user"], {"userId": "ADMIN_MH_01", "name": "Platform Administrator", "role": "ADMIN"})
+        self.assertEqual({key: profile["user"][key] for key in ("userId", "name", "role")}, {"userId": "ADMIN_MH_01", "name": "Platform Administrator", "role": "ADMIN"})
+        # Office details are non-sensitive placeholders; nothing credential-like is ever returned.
+        self.assertTrue(profile["user"]["officialEmail"].endswith(".example"))
+        self.assertIsNone(profile["security"]["lastPasswordChange"])
+        self.assertNotIn("password_hash", str(profile).lower())
         self.assertLess(profile["session"]["issuedAt"], profile["session"]["expiresAt"])
         self.assertFalse(profile["access"]["mutablePermissions"])
 

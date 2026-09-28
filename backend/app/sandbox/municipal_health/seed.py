@@ -59,3 +59,30 @@ def seed(session, citizens: list[dict]) -> dict:
                 ))
                 counts["immunization_records"] += 1
     return counts
+
+
+def seed_demo(session, _citizens=None) -> dict:
+    """Curated public-demo citizens (app.seeds.demo_citizens), idempotent."""
+    from app.seeds.demo_citizens import demo_records
+    added = 0
+    for index, (citizen, spec) in enumerate(demo_records("municipal_health"), start=1):
+        if session.query(ResidentIndex).filter_by(citizen_ref=citizen["citizenId"]).first():
+            continue
+        resident_id = f"MUN-DEMO-RES-{index:03d}"
+        session.add(ResidentIndex(
+            resident_id=resident_id, citizen_ref=citizen["citizenId"], name=spec.get("name", citizen["name"]),
+            dob=spec.get("dob", citizen["dob"]), phone=spec.get("phone", citizen["phone"]), ward=citizen["district"],
+        ))
+        session.flush()
+        if spec.get("birth"):
+            session.add(BirthCertificate(
+                certificate_id=f"MUN-DEMO-BC-{index:03d}", resident_id=resident_id, registration_number=f"BC-DEMO-{index:04d}",
+                place_of_birth="Municipal General Hospital", status="REGISTERED",
+            ))
+        if spec.get("immunization"):
+            session.add(ImmunizationRecord(
+                record_id=f"MUN-DEMO-IMM-{index:03d}", resident_id=resident_id, vaccine="Tetanus booster", dose_number=1,
+                date_administered="2025-01-12", status="ADMINISTERED",
+            ))
+        added += 1
+    return {"demoCitizens": added}

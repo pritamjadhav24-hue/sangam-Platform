@@ -29,6 +29,10 @@ class NotificationManager:
             "createdAt": self._now(),
             "read": False,
             "sourceEventId": payload.get("eventId"),
+            # Operational notifications say where to go (provider, incident,
+            # application) and how serious it is; citizen ones leave these out.
+            **({"target": payload["target"]} if isinstance(payload.get("target"), dict) else {}),
+            **({"severity": payload["severity"]} if payload.get("severity") else {}),
         }
         if item["sourceEventId"] and any(existing.get("recipientUserId") == recipient_user_id and existing.get("sourceEventId") == item["sourceEventId"] for existing in self.notifications):
             return next(existing for existing in self.notifications if existing.get("recipientUserId") == recipient_user_id and existing.get("sourceEventId") == item["sourceEventId"])
@@ -72,21 +76,49 @@ class NotificationManager:
             self._citizen(payload, "APPLICATION_REJECTED", "Application rejected", "Your application was rejected after review.")
         elif event_type in {"DEPENDENCY_SERVICE_FAILED", "DEPENDENCY_RETRY_SCHEDULED", "PROVIDER_JOB_DEAD_LETTER"}:
             self._citizen(payload, "INTEGRATION_FAILURE", "Department service unavailable", "A required department service is unavailable; your application remains waiting for retry.")
-            self._role("ADMIN", "INTEGRATION_FAILURE", "Integration failure", "A simulated department service reported a dependency failure.", payload)
+            self._role("ADMIN", "INTEGRATION_FAILURE", "Department request failed",
+                       f"A department request{' for ' + app_id if app_id else ''} failed and is waiting to be retried.",
+                       {**payload, "eventId": f"DEPENDENCY_FAILED:{app_id}:{payload.get('dependencyId')}", "severity": "WARNING",
+                        **({"target": {"kind": "application", "applicationId": app_id}} if app_id else {})})  # once per failing dependency, not per retry
         elif event_type == "DEPENDENCY_RECOVERED":
             self._citizen(payload, "INTEGRATION_RECOVERY", "Department service recovered", "The required department service recovered and processing resumed.")
-            self._role("ADMIN", "INTEGRATION_RECOVERY", "Integration recovered", "A simulated department service recovered.", payload)
+            self._role("ADMIN", "INTEGRATION_RECOVERY", "Department request recovered",
+                       f"A department request{' for ' + app_id if app_id else ''} completed after recovery.",
+                       {**payload, "eventId": f"DEPENDENCY_RECOVERED:{app_id}:{payload.get('dependencyId')}", "severity": "SUCCESS",
+                        **({"target": {"kind": "application", "applicationId": app_id}} if app_id else {})})
         elif event_type in {"ENTITY_MATCH_REVIEW_REQUIRED", "CONFLICT_DETECTED"}:
             self._role("OFFICER", "OFFICER_REVIEW_REQUIRED", "Officer review required", "A cross-system verification item requires your decision.", payload)
-        elif event_type == "INTEGRATION_HEALTH_CHANGED":
-            notification_type = "INTEGRATION_RECOVERY" if payload.get("status") == "AVAILABLE" else "INTEGRATION_FAILURE"
-            title = "Integration recovered" if payload.get("status") == "AVAILABLE" else "Integration unavailable"
-            self._role("ADMIN", notification_type, title, f"{payload.get('system', 'A department')} is {payload.get('status', '').lower()}.", payload)
+        # INTEGRATION_HEALTH_CHANGED no longer notifies administrators directly:
+        # the provider incident it opens or resolves does (PROVIDER_DOWN /
+        # PROVIDER_RECOVERED, with a link to the incident), so an outage is
+        # announced once, not twice.
         if event_id:
             self._processed_event_ids.add(event_id)
 
+    def operational(self, notification_type: str, title: str, message: str, *, dedupe_key: str,
+                    target: dict | None = None, severity: str = "INFO", app_id: str | None = None) -> None:
+        """An operations notification for every administrator: an outage,
+        recovery, fallback, blocked application or integration error. Each
+        carries a navigation target, and ``dedupe_key`` makes it one
+        notification per real occurrence (never one per poll or retry)."""
+        # The application goes in the target, not the top-level applicationId:
+        # the legacy state snapshot skips rows keyed to authoritative
+        # applications, which would drop these notices (and their read state)
+        # on restart.
+        target = {**(target or {}), **({"applicationId": app_id} if app_id and "applicationId" not in (target or {}) else {})}
+        payload = {"eventId": dedupe_key, "target": target, "severity": severity, "correlationId": app_id}
+        self._role("ADMIN", notification_type, title, message, payload)
+
     def for_user(self, user: dict) -> list[dict]:
         return [item for item in reversed(self.notifications) if item["recipientUserId"] == user["userId"] and item["role"] == user["role"]]
+
+    def mark_all_read(self, user: dict) -> int:
+        changed = 0
+        for item in self.notifications:
+            if item["recipientUserId"] == user["userId"] and item["role"] == user["role"] and not item.get("read"):
+                item["read"] = True
+                changed += 1
+        return changed
 
     def mark_read(self, notification_id: str, user: dict) -> dict | None:
         item = next((entry for entry in self.notifications if entry["notificationId"] == notification_id), None)

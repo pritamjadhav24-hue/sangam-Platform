@@ -36,7 +36,12 @@ from typing import Optional
 DOCUMENT_DATA_TYPES = frozenset({"DOCUMENT", "CERTIFICATE"})
 DEFAULT_SOURCE_CATEGORY = "DEPARTMENT_PROVIDER"
 MAX_UPLOAD_TEXT_BYTES = 200_000
-ALLOWED_UPLOAD_CONTENT_TYPES = frozenset({"text/plain", "application/json"})
+MAX_UPLOAD_FILE_BYTES = 5 * 1024 * 1024
+# Files (device upload or camera capture) arrive base64-encoded; the decoded
+# bytes must start with the declared type's signature, so a renamed
+# executable or script can never be stored as an "image" or "PDF".
+UPLOAD_FILE_SIGNATURES = {"image/jpeg": b"\xff\xd8\xff", "image/png": b"\x89PNG\r\n\x1a\n", "application/pdf": b"%PDF-"}
+ALLOWED_UPLOAD_CONTENT_TYPES = frozenset({"text/plain", "application/json", *UPLOAD_FILE_SIGNATURES})
 _GENERIC_DOCUMENT_SUFFIXES = ("certificate", "certification", "card", "licence", "license")
 _CANONICAL_FIELDS_HIDDEN_FROM_CITIZEN = frozenset({"sourceRecordId"})
 
@@ -222,14 +227,43 @@ def validate_upload_metadata(artifact: dict) -> dict:
     if not artifact.get("title"):
         reasons.append("Artifact title is required")
     content = artifact.get("content")
-    if not content:
-        reasons.append("Artifact content is required")
-    elif isinstance(content, str) and len(content.encode("utf-8")) > MAX_UPLOAD_TEXT_BYTES:
-        reasons.append("Artifact content exceeds the maximum allowed size")
     content_type = artifact.get("contentType", "text/plain")
     if content_type not in ALLOWED_UPLOAD_CONTENT_TYPES:
         reasons.append(f"Unsupported artifact content type: {content_type}")
+    if not content:
+        reasons.append("Artifact content is required")
+    elif content_type in UPLOAD_FILE_SIGNATURES:
+        file_bytes = decode_upload_file(content)
+        if file_bytes is None:
+            reasons.append("The file could not be read")
+        elif len(file_bytes) > MAX_UPLOAD_FILE_BYTES:
+            reasons.append("The file is larger than the 5 MB limit")
+        elif not file_bytes.startswith(UPLOAD_FILE_SIGNATURES[content_type]):
+            reasons.append("The file content does not match its type")
+    elif isinstance(content, str) and len(content.encode("utf-8")) > MAX_UPLOAD_TEXT_BYTES:
+        reasons.append("Artifact content exceeds the maximum allowed size")
     return {"valid": not reasons, "reasons": reasons}
+
+
+def decode_upload_file(content: str) -> Optional[bytes]:
+    """Strict base64 decode of an uploaded file (a ``data:...;base64,``
+    prefix is tolerated); None if it is not valid base64."""
+    import base64
+    import binascii
+    if "," in content[:100] and content.startswith("data:"):
+        content = content.split(",", 1)[1]
+    try:
+        return base64.b64decode(content, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def safe_upload_filename(name: Optional[str], content_type: str) -> str:
+    """A display-only filename: letters/digits/dot/dash/underscore, no path,
+    and an extension that always matches the validated content type."""
+    extension = {"image/jpeg": ".jpg", "image/png": ".png", "application/pdf": ".pdf"}.get(content_type, ".txt")
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "-", re.split(r"[\\/]", name or "document")[-1].rsplit(".", 1)[0]).strip("-")[:80]
+    return (stem or "document") + extension
 
 
 def submit_citizen_upload(app: dict, requirement_code: str, citizen_id: str, artifact: dict, *, correlation_id: Optional[str] = None) -> dict:

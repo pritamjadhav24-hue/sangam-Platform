@@ -27,7 +27,7 @@ class DynamicProviderDiscoveryTests(unittest.TestCase):
         known anywhere else in this codebase -- discovery must still resolve
         it purely from registered capability data."""
         candidates = [{
-            "requirementCode": "PHASE3_TEST_REQUIREMENT", "provider": "Zeta Sandbox API", "providerId": "ZETA-SANDBOX",
+            "authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE3_TEST_REQUIREMENT", "provider": "Zeta Sandbox API", "providerId": "ZETA-SANDBOX",
             "requiredService": "Zeta Lookup", "serviceName": "Zeta Lookup", "serviceId": "ZETA-SVC-001",
             "adapter": "Department Sandbox API", "priority": 5,
         }]
@@ -38,8 +38,8 @@ class DynamicProviderDiscoveryTests(unittest.TestCase):
 
     def test_multiple_providers_can_satisfy_the_same_requirement(self):
         candidates = [
-            {"requirementCode": "PHASE3_MULTI", "provider": "Low Priority Provider", "providerId": "LOW-PRI", "requiredService": "X", "serviceName": "X", "serviceId": "SVC-LOW", "adapter": "Department Sandbox API", "priority": 50},
-            {"requirementCode": "PHASE3_MULTI", "provider": "High Priority Provider", "providerId": "HIGH-PRI", "requiredService": "X", "serviceName": "X", "serviceId": "SVC-HIGH", "adapter": "Department Sandbox API", "priority": 5},
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE3_MULTI", "provider": "Low Priority Provider", "providerId": "LOW-PRI", "requiredService": "X", "serviceName": "X", "serviceId": "SVC-LOW", "adapter": "Department Sandbox API", "priority": 50},
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE3_MULTI", "provider": "High Priority Provider", "providerId": "HIGH-PRI", "requiredService": "X", "serviceName": "X", "serviceId": "SVC-HIGH", "adapter": "Department Sandbox API", "priority": 5},
         ]
         health = [{"system": "Low Priority Provider", "providerId": "LOW-PRI", "status": "AVAILABLE"}, {"system": "High Priority Provider", "providerId": "HIGH-PRI", "status": "AVAILABLE"}]
         with patch("app.core.persistence.provider_capability_snapshot", return_value=candidates):
@@ -50,7 +50,7 @@ class DynamicProviderDiscoveryTests(unittest.TestCase):
         self.assertEqual(selected["providerId"], "HIGH-PRI", "lower priority number wins")
 
     def test_unavailable_provider_is_excluded_from_selection(self):
-        candidates = [{"requirementCode": "PHASE3_UNAVAILABLE", "provider": "Down Provider", "providerId": "DOWN", "requiredService": "X", "serviceName": "X", "serviceId": "SVC-DOWN", "adapter": "Department Sandbox API", "priority": 1}]
+        candidates = [{"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE3_UNAVAILABLE", "provider": "Down Provider", "providerId": "DOWN", "requiredService": "X", "serviceName": "X", "serviceId": "SVC-DOWN", "adapter": "Department Sandbox API", "priority": 1}]
         with patch("app.core.persistence.provider_capability_snapshot", return_value=candidates):
             selected = select_dependency_provider("PHASE3_UNAVAILABLE", [{"system": "Down Provider", "providerId": "DOWN", "status": "UNAVAILABLE"}])
         self.assertIsNone(selected)

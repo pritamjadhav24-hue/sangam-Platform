@@ -46,9 +46,9 @@ def _failure(category="UPSTREAM_UNAVAILABLE", retryable=True):
     return AdapterResult(None, success=False, error_category=category, retryable=retryable)
 
 
-PROVIDER_A = {"serviceId": "SVC-A", "providerId": "PROV-A", "provider": "Provider A", "priority": 10}
-PROVIDER_B = {"serviceId": "SVC-B", "providerId": "PROV-B", "provider": "Provider B", "priority": 20}
-PROVIDER_C = {"serviceId": "SVC-C", "providerId": "PROV-C", "provider": "Provider C", "priority": 30}
+PROVIDER_A = {"serviceId": "SVC-A", "providerId": "PROV-A", "provider": "Provider A", "priority": 10, "authorization": {"role": "AUTHORITATIVE"}}
+PROVIDER_B = {"serviceId": "SVC-B", "providerId": "PROV-B", "provider": "Provider B", "priority": 20, "authorization": {"role": "AUTHORIZED_FALLBACK"}}
+PROVIDER_C = {"serviceId": "SVC-C", "providerId": "PROV-C", "provider": "Provider C", "priority": 30, "authorization": {"role": "AUTHORIZED_FALLBACK"}}
 
 
 _SEEDED_BY_THIS_MODULE: list[str] = []

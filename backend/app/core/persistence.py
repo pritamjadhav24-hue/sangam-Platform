@@ -378,8 +378,13 @@ class DocumentRow(Base):
     payload: Mapped[dict] = mapped_column(JSONB)
 
 
-def _document_payload(row: DocumentRow) -> dict:
+def _document_payload(row: DocumentRow, include_file: bool = False) -> dict:
+    """A citizen-uploaded file's bytes (base64 ``fileContent``) are only
+    returned when explicitly asked for (the download path) -- never in
+    ordinary document reads/listings."""
     payload = dict(row.payload or {})
+    if not include_file:
+        payload.pop("fileContent", None)
     payload.update({
         "documentId": row.document_id, "appId": row.app_id, "dependencyId": row.dependency_id,
         "requirementCode": row.requirement_code, "citizenId": row.citizen_id, "sourceType": row.source_type,
@@ -473,14 +478,27 @@ def upsert_document(document: Mapping) -> dict:
     return document
 
 
-def get_document(document_id: str, session: Session | None = None) -> dict | None:
+def get_document(document_id: str, session: Session | None = None, include_file: bool = False) -> dict | None:
     def read(db_session: Session) -> dict | None:
         row = db_session.get(DocumentRow, document_id)
-        return _document_payload(row) if row else None
+        return _document_payload(row, include_file) if row else None
     if session is not None:
         return read(session)
     with Session(engine) as owned_session:
         return read(owned_session)
+
+
+def delete_document(document_id: str, session: Session | None = None) -> bool:
+    """Remove one document reference (a citizen withdrawing their own upload
+    before submission). Returns whether a row existed. With ``session`` the
+    delete joins the caller's transaction and the caller commits."""
+    statement = delete(DocumentRow).where(DocumentRow.document_id == document_id)
+    if session is not None:
+        return bool(session.execute(statement).rowcount)
+    with Session(engine) as owned_session:
+        removed = owned_session.execute(statement).rowcount
+        owned_session.commit()
+    return bool(removed)
 
 
 def list_documents_for_application(app_id: str, session: Session | None = None) -> list[dict]:
@@ -1346,11 +1364,13 @@ def provider_operational_summary() -> list[dict]:
         jobs = session.query(ProviderJobRow).all()
         health = {row.system: row.payload for row in session.query(IntegrationStateRow).all()}
         providers = session.query(ProviderRow).all()
+        # One health check for all providers (it probes department services).
+        current_health = {item["system"]: item for item in __import__("app.engine.adapters", fromlist=["integration_health"]).integration_health()}
         result = []
         for provider in providers:
             related = [row for row in jobs if row.provider_id in {provider.provider_id, provider.name}]
             runtime = health.get(provider.name, {}).get("runtimeHealth", {})
-            provider_health = next((item for item in __import__("app.engine.adapters", fromlist=["integration_health"]).integration_health() if item["system"] == provider.name), {"status": "UNKNOWN"})
+            provider_health = current_health.get(provider.name, {"status": "UNKNOWN"})
             safe_health = {key: provider_health.get(key) for key in ("status", "lastCheckedAt", "lastSuccessAt", "lastFailureAt", "errorCategory")}
             result.append({"providerId": provider.provider_id, "name": provider.name, "enabled": provider.active,
                            "adapterType": provider.adapter_type, "contractVersion": provider.contract_version, "environment": provider.environment, "authType": provider.auth_type, "endpointRef": provider.endpoint_ref, "configured": bool(provider.payload),
@@ -1375,6 +1395,7 @@ def record_provider_health_transition(system: str, department: str | None, servi
     second detector.
     """
     now = datetime.now(timezone.utc)
+    notice = None
     with Session(engine) as session:
         open_incident = session.execute(
             select(ProviderIncidentRow).where(
@@ -1390,11 +1411,22 @@ def record_provider_health_transition(system: str, department: str | None, servi
                     payload={"department": department, "service": service, "fromStatus": from_status,
                              "toStatus": to_status, "errorCategory": error_category},
                 ))
+                notice = ("PROVIDER_DOWN", "Provider unavailable", f"{system} is {str(to_status).lower()}. SANGAM remains available; authorized fallbacks are used where policy allows.", incident_id, "CRITICAL")
         elif open_incident is not None:
             open_incident.status = "RESOLVED"
             open_incident.resolved_at = now
             open_incident.payload = {**(open_incident.payload or {}), "resolvedToStatus": to_status}
+            notice = ("PROVIDER_RECOVERED", "Provider recovered", f"{system} is available again. The incident has been resolved.", open_incident.incident_id, "SUCCESS")
         session.commit()
+    if notice:
+        # Side effect after the incident is committed.
+        from app.core.notification_manager import notification_manager
+        kind, title, message, incident_id, severity = notice
+        provider = None
+        with Session(engine) as session:
+            provider = session.query(ProviderRow.provider_id).filter(ProviderRow.name == system).first()
+        notification_manager.operational(kind, title, message, dedupe_key=f"{kind}:{incident_id}", severity=severity,
+                                         target={"kind": "incident", "incidentId": incident_id, "providerId": provider[0] if provider else None, "provider": system})
 
 
 def _parse_job_timestamp(value: str | None):
@@ -1488,6 +1520,45 @@ def _provider_job_counts(session, provider: "ProviderRow") -> tuple[int, int]:
     return success, failure
 
 
+# Identity attributes a department's canonical lookup accepts (see
+# app.department_api.resolution); the department adds its own identifier.
+CANONICAL_LOOKUP_IDENTIFIERS = ("citizenRef", "name", "dob", "phone", "address")
+
+
+def capability_contract(provider: "ProviderRow", capability: "ProviderCapabilityRow", mappings: list, alternates: list[str]) -> dict:
+    """What a provider declares it can do for one requirement -- derived from
+    the registry rows themselves (provider record path, capability, schema
+    mappings, priority), so registering a provider *is* declaring it. A
+    capability may also carry an explicit ``contract`` object; its keys win.
+    No Auto-Fill code knows any provider or department by name."""
+    from app.engine.adapters import department_key_from_path, resolve_path_for
+    from app.engine.artifact_retrieval import is_document_requirement
+    from app.engine.departments import department_label
+    from app.engine.provider_policy import capability_authorization
+
+    payload = provider.payload or {}
+    capability_payload = capability.payload or {}
+    http_path = payload.get("httpPath")
+    department_key = department_key_from_path(http_path)
+    lookup = resolve_path_for(payload) if provider.adapter_type == "Department Sandbox API" else None
+    derived = {
+        "providerId": provider.provider_id,
+        "department": department_label(department_key) or department_key,
+        "requirementCode": capability.capability_code,
+        "documentType": capability.capability_code,
+        "recordKind": "DOCUMENT" if is_document_requirement(capability.capability_code) else "STRUCTURED_RECORD",
+        "operation": "RESOLVE_RECORD" if lookup else "RETRIEVE",
+        "endpoint": lookup or http_path,
+        "supportedIdentifiers": list(CANONICAL_LOOKUP_IDENTIFIERS) if lookup else ["citizenRef"],
+        "responseSchema": sorted({mapping.canonical_field for mapping in mappings}),
+        "verificationMethod": "DEPARTMENT_API_RECORD" if lookup else "PROVIDER_RECORD",
+        "priority": capability_payload.get("priority", 100),
+        "authorization": capability_authorization(capability.capability_id, capability_payload),
+        "fallbackProviders": alternates,
+    }
+    return {**derived, **(capability_payload.get("contract") or {})}
+
+
 def provider_registry_snapshot() -> list[dict]:
     """Admin Provider Registry: every provider joined with its department,
     capabilities/requirement mappings, current health and active incident.
@@ -1506,9 +1577,17 @@ def provider_registry_snapshot() -> list[dict]:
         registry_list = dependency_registry(health_list)
         open_incidents = {i["providerSystem"]: i for i in provider_incidents_summary() if i["status"] == "OPEN"}
 
+        capability_rows = session.query(ProviderCapabilityRow).filter(ProviderCapabilityRow.enabled.is_(True)).all()
+        mapping_rows = session.query(SchemaMappingRow).filter(SchemaMappingRow.active.is_(True)).all()
+        active_providers = {row.provider_id for row in providers if row.active}
         result = []
         for provider in providers:
             caps = [c for c in registry_list if c.get("providerId") == provider.provider_id or c.get("provider") == provider.name]
+            contracts = []
+            for capability in (row for row in capability_rows if row.provider_id == provider.provider_id):
+                alternates = [row.provider_id for row in sorted(capability_rows, key=lambda row: (row.payload or {}).get("priority", 100))
+                              if row.capability_code == capability.capability_code and row.provider_id != provider.provider_id and row.provider_id in active_providers]
+                contracts.append(capability_contract(provider, capability, [m for m in mapping_rows if m.provider_id == provider.provider_id], alternates))
             health_item = next((h for h in health_list if h["system"] == provider.name), {})
             success_count, failure_count = _provider_job_counts(session, provider)
             result.append({
@@ -1531,15 +1610,21 @@ def provider_registry_snapshot() -> list[dict]:
                 },
                 "capabilities": [
                     {"requirementCode": c["requirementCode"], "priority": c.get("priority", 100),
-                     "serviceId": c["serviceId"], "serviceName": c["serviceName"]}
+                     "serviceId": c["serviceId"], "serviceName": c["serviceName"], "authorization": c.get("authorization")}
                     for c in caps
                 ],
                 "supportedRequirements": sorted({c["requirementCode"] for c in caps}),
+                "capabilityContracts": contracts,
                 "activeIncident": open_incidents.get(provider.name),
                 "successCount": success_count,
                 "failureCount": failure_count,
             })
         return result
+
+
+def _provider_exchange_stats(provider_id: str, provider_name: str) -> dict:
+    from app.core.admin_insights import provider_exchange_stats
+    return provider_exchange_stats(provider_id, provider_name)
 
 
 def provider_registry_detail(provider_id: str) -> dict | None:
@@ -1605,9 +1690,20 @@ def provider_registry_detail(provider_id: str) -> dict | None:
             },
             "capabilities": [
                 {"requirementCode": c["requirementCode"], "priority": c.get("priority", 100),
-                 "serviceId": c["serviceId"], "serviceName": c["serviceName"], "healthStatus": c.get("healthStatus")}
+                 "serviceId": c["serviceId"], "serviceName": c["serviceName"], "healthStatus": c.get("healthStatus"),
+                 "authorization": c.get("authorization"),
+                 # Every other provider registered for the same requirement,
+                 # with its own role -- so the fallback chain is visible.
+                 "otherProviders": [
+                     {"providerId": other.get("providerId"), "provider": other.get("provider"), "priority": other.get("priority", 100),
+                      "authorization": other.get("authorization"), "healthStatus": other.get("healthStatus")}
+                     for other in registry_list
+                     if other.get("requirementCode") == c["requirementCode"] and other.get("providerId") != provider.provider_id
+                 ]}
                 for c in caps
             ],
+            "latencyMs": health_item.get("probeLatencyMs"),
+            "exchanges": _provider_exchange_stats(provider.provider_id, provider.name),
             "schemaMappings": schema_mappings,
             "reliability": {
                 "successCount": success_count,
@@ -1779,7 +1875,7 @@ def seed_catalog() -> None:
                 existing_service.payload = {**(existing_service.payload or {}), **definition}
             capability_id = f"{provider_id}:{definition['requirementCode']}"
             if session.get(ProviderCapabilityRow, capability_id) is None:
-                session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=definition["requirementCode"], service_id=definition["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": definition["requirementCode"], "providerId": provider_id, "serviceId": definition["serviceId"]}))
+                session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=definition["requirementCode"], service_id=definition["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": definition["requirementCode"], "providerId": provider_id, "serviceId": definition["serviceId"], "authorization": _registered_authorization(capability_id)}))
         session.commit()
     from app.core.redis_service import RedisService
     RedisService().delete("sangam:cache:catalog:v1")
@@ -1956,6 +2052,17 @@ DEPARTMENT_SANDBOX_PROVIDERS = [
     {"departmentId": "SKILL-EMPLOYMENT-SANDBOX", "departmentName": "Skill Development & Employment Sandbox", "providerId": "SKILL-EMPLOYMENT-SANDBOX-SKILL", "providerName": "Skill Employment Sandbox API - Skill Certification", "requirementCode": "SKILL_CERTIFICATION", "serviceId": "SKE-SANDBOX-SKILL-001", "serviceName": "Skill Certification Lookup", "httpPath": "/departments/skill-employment/skill-certifications/{citizenRef}", "mapping": ("trade", "certifiedTrade")},
     {"departmentId": "SKILL-EMPLOYMENT-SANDBOX", "departmentName": "Skill Development & Employment Sandbox", "providerId": "SKILL-EMPLOYMENT-SANDBOX-EMPLOYMENT", "providerName": "Skill Employment Sandbox API - Employment Registration", "requirementCode": "EMPLOYMENT_REGISTRATION", "serviceId": "SKE-SANDBOX-EMPLOYMENT-001", "serviceName": "Employment Registration Lookup", "httpPath": "/departments/skill-employment/employment-registrations/{citizenRef}", "mapping": ("exchange_office", "employmentExchangeOffice")},
     {"departmentId": "MUNICIPAL-HEALTH-SANDBOX", "departmentName": "Municipal Health Sandbox", "providerId": "MUNICIPAL-HEALTH-SANDBOX-BIRTH", "providerName": "Municipal Health Sandbox API - Birth Certificate", "requirementCode": "BIRTH_CERTIFICATE", "serviceId": "MUN-SANDBOX-BIRTH-001", "serviceName": "Birth Certificate Lookup", "httpPath": "/departments/municipal-health/birth-certificates/{citizenRef}", "mapping": ("registration_number", "birthRegistrationNumber")},
+    # Department APIs for the requirements the in-process demo providers
+    # used to answer (see federate_department_providers). Each is served by
+    # that department's own service and database.
+    {"departmentId": "REVENUE-SANDBOX", "departmentName": "Revenue Sandbox", "providerId": "REVENUE-SANDBOX-DOMICILE", "providerName": "Revenue Department API - Domicile Certificates", "requirementCode": "DOMICILE_PROOF", "serviceId": "REV-SANDBOX-DOMICILE-001", "serviceName": "Domicile Certificate Verification", "httpPath": "/departments/revenue/domicile-certificates/{citizenRef}", "priority": 10, "mappings": [("domicile_state", "state"), ("valid_until", "validUntil")]},
+    {"departmentId": "EDUCATION-SANDBOX", "departmentName": "Education Sandbox", "providerId": "EDUCATION-SANDBOX-ACADEMIC", "providerName": "Education Department API - Academic Records", "requirementCode": "ACADEMIC_RECORD", "serviceId": "EDU-SANDBOX-ACADEMIC-001", "serviceName": "Marks Verification", "httpPath": "/departments/education/academic-records/{citizenRef}", "priority": 10, "mappings": [("marks_percentage", "percentage"), ("academic_year", "academicYear")]},
+    {"departmentId": "SOCIAL-WELFARE-SANDBOX", "departmentName": "Social Welfare Sandbox", "providerId": "SOCIAL-WELFARE-SANDBOX-CASTE", "providerName": "Social Welfare Department API - Caste Certificates", "requirementCode": "CASTE_PROOF", "serviceId": "SW-SANDBOX-CASTE-001", "serviceName": "Caste Certificate Verification", "httpPath": "/departments/social-welfare/caste-certificates/{citizenRef}", "priority": 10, "mappings": [("caste_category", "category")]},
+    {"departmentId": "SOCIAL-WELFARE-SANDBOX", "departmentName": "Social Welfare Sandbox", "providerId": "SOCIAL-WELFARE-SANDBOX-BANK", "providerName": "Social Welfare Department API - DBT Bank Linkage", "requirementCode": "BANK_DETAILS", "serviceId": "SW-SANDBOX-BANK-001", "serviceName": "DBT Bank Account Verification", "httpPath": "/departments/social-welfare/bank-linkages/{citizenRef}", "priority": 10, "mappings": [("dbt_status", "bankStatus"), ("bank_name", "bankName")]},
+    # Authorised equivalent for INCOME_PROOF: household income the Social
+    # Welfare Department verified at beneficiary enrolment. Fallback only
+    # (priority 30) -- selected when the Revenue income certificate cannot be.
+    {"departmentId": "SOCIAL-WELFARE-SANDBOX", "departmentName": "Social Welfare Sandbox", "providerId": "SOCIAL-WELFARE-SANDBOX-INCOME", "providerName": "Social Welfare Department API - Verified Household Income", "requirementCode": "INCOME_PROOF", "serviceId": "SW-SANDBOX-INCOME-001", "serviceName": "Verified Household Income", "httpPath": "/departments/social-welfare/beneficiary-income/{citizenRef}", "priority": 30, "authorization": {"authoritative": False, "fallbackAuthorized": True, "basis": "Verified household income held by Social Welfare; authorized to answer only when the Revenue income certificate cannot be obtained"}, "mappings": [("household_income", "incomeAmount"), ("income_verified_on", "verifiedOn")]},
     {"departmentId": "MUNICIPAL-HEALTH-SANDBOX", "departmentName": "Municipal Health Sandbox", "providerId": "MUNICIPAL-HEALTH-SANDBOX-IMMUNIZATION", "providerName": "Municipal Health Sandbox API - Immunization Record", "requirementCode": "IMMUNIZATION_RECORD", "serviceId": "MUN-SANDBOX-IMMUNIZATION-001", "serviceName": "Immunization Record Lookup", "httpPath": "/departments/municipal-health/immunization-records/{citizenRef}", "mapping": ("dob", "dateOfBirth")},
 ]
 
@@ -1963,6 +2070,12 @@ DEPARTMENT_SANDBOX_PROVIDERS = [
 def department_sandbox_providers_seeded() -> bool:
     with Session(engine) as session:
         return session.query(ProviderRow).filter(ProviderRow.provider_id.in_([item["providerId"] for item in DEPARTMENT_SANDBOX_PROVIDERS])).count() > 0
+
+
+def _registered_authorization(capability_id: str) -> dict:
+    """The declared policy for a capability, written onto new registry rows."""
+    from app.engine.provider_policy import AUTHORITATIVE_POLICY, _registered_policies
+    return dict(_registered_policies().get(capability_id) or AUTHORITATIVE_POLICY)
 
 
 def seed_department_sandbox_providers() -> None:
@@ -1997,10 +2110,63 @@ def seed_department_sandbox_providers() -> None:
                 session.add(ServiceCatalogRow(service_id=entry["serviceId"], provider_id=provider_id, name=entry["serviceName"], requirement_code=entry["requirementCode"], payload={"serviceId": entry["serviceId"], "requirementCode": entry["requirementCode"], "requiredService": entry["serviceName"]}))
             capability_id = f"{provider_id}:{entry['requirementCode']}"
             if session.get(ProviderCapabilityRow, capability_id) is None:
-                session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=entry["requirementCode"], service_id=entry["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": entry["requirementCode"], "providerId": provider_id, "serviceId": entry["serviceId"], **({"priority": entry["priority"]} if "priority" in entry else {})}))
+                session.add(ProviderCapabilityRow(capability_id=capability_id, provider_id=provider_id, capability_code=entry["requirementCode"], service_id=entry["serviceId"], payload={"capabilityId": capability_id, "capabilityCode": entry["requirementCode"], "providerId": provider_id, "serviceId": entry["serviceId"], **({"priority": entry["priority"]} if "priority" in entry else {}), "authorization": _registered_authorization(capability_id)}))
         session.commit()
     from app.core.redis_service import RedisService
     RedisService().delete("sangam:cache:catalog:v1")
+
+
+# In-process demo providers (app.mocks) that read SANGAM's own citizen table.
+# In federated mode each is retired once every requirement it served has an
+# active department-API provider.
+IN_PROCESS_DEPARTMENT_PROVIDERS = ("REVENUE-DEPARTMENT", "EDUCATION-DEPARTMENT", "SOCIAL-WELFARE-DEPARTMENT", "AUTHORIZED-DBT")
+# Requirement -> department provider that must be primary in federated mode.
+FEDERATED_PRIMARY_PROVIDERS = {"INCOME_PROOF": "REVENUE-SANDBOX-INCOME"}
+
+
+def federate_department_providers() -> dict:
+    """Make the department APIs the live source of department data.
+
+    Gated by SANGAM_FEDERATED_DEPARTMENTS=true. Idempotent and reversible:
+    it only (1) marks an in-process demo provider -- and its capabilities --
+    inactive once every requirement it served has an active department-API
+    provider, and (2) makes the Revenue income-certificate API the primary
+    INCOME_PROOF provider (priority 10; the Social Welfare verified-income
+    API stays the fallback). Nothing is deleted.
+    """
+    if os.getenv("SANGAM_FEDERATED_DEPARTMENTS", "false").lower() not in {"1", "true", "yes"}:
+        return {"federated": False}
+    changes = []
+    with Session(engine) as session:
+        department_codes = {
+            capability.capability_code
+            for capability, provider in session.query(ProviderCapabilityRow, ProviderRow)
+            .join(ProviderRow, ProviderRow.provider_id == ProviderCapabilityRow.provider_id)
+            .filter(ProviderCapabilityRow.enabled.is_(True), ProviderRow.active.is_(True),
+                    ProviderRow.adapter_type == "Department Sandbox API")
+        }
+        for provider_id in IN_PROCESS_DEPARTMENT_PROVIDERS:
+            provider = session.get(ProviderRow, provider_id)
+            if provider is None or not provider.active:
+                continue
+            capabilities = session.query(ProviderCapabilityRow).filter_by(provider_id=provider_id).all()
+            if not capabilities or any(capability.capability_code not in department_codes for capability in capabilities):
+                continue
+            provider.active = False
+            provider.payload = {**(provider.payload or {}), "retiredBy": "department-federation"}
+            for capability in capabilities:
+                capability.enabled = False
+            changes.append(f"retired {provider_id}")
+        for requirement_code, provider_id in FEDERATED_PRIMARY_PROVIDERS.items():
+            capability = session.get(ProviderCapabilityRow, f"{provider_id}:{requirement_code}")
+            if capability is not None and (capability.payload or {}).get("priority") != 10:
+                capability.payload = {**(capability.payload or {}), "priority": 10}
+                changes.append(f"{provider_id} primary for {requirement_code}")
+        session.commit()
+    if changes:
+        from app.core.redis_service import RedisService
+        RedisService().delete("sangam:cache:catalog:v1")
+    return {"federated": True, "changes": changes}
 
 
 def seed_department_sandbox_schema_mappings() -> None:
@@ -2065,11 +2231,13 @@ def provider_capability_snapshot(requirement_code: str | None = None) -> list[di
         )
         if requirement_code:
             query = query.filter(ProviderCapabilityRow.capability_code == requirement_code)
+        from app.engine.provider_policy import capability_authorization
         definitions = []
         for capability, provider, service in query.all():
             capability_metadata = capability.payload or {}
             service_metadata = service.payload or {}
             definitions.append({
+                "authorization": capability_authorization(capability.capability_id, capability_metadata),
                 "capabilityId": capability.capability_id,
                 "requirementCode": capability.capability_code,
                 "requirementType": capability_metadata.get("requirementType", capability.capability_code),
@@ -2131,6 +2299,9 @@ def citizen_service_snapshot(service_id: str | None = None) -> list[dict] | dict
                 "eligibilityMr": metadata.get("eligibilityMr"),
                 "applicationWindow": metadata.get("applicationWindow"),
                 "applicationWindowMr": metadata.get("applicationWindowMr"),
+                # Plain-language criteria only; rule internals stay server-side.
+                "eligibilityCriteria": [{"id": rule.get("id"), "label": rule.get("label"), "labelMr": rule.get("labelMr") or rule.get("label")}
+                                        for rule in metadata.get("eligibilityRules") or []],
                 "synthetic": metadata.get("synthetic", False),
                 "enabled": row.active,
                 "requirements": requirements,
@@ -2231,11 +2402,51 @@ def ensure_demo_citizen_accounts() -> None:
         session.commit()
 
 
+def ensure_public_demo_accounts() -> dict:
+    """Create the curated public-demonstration citizens (app.seeds.demo_citizens)
+    in SANGAM: their identity (CitizenRow) and a CITIZEN account marked
+    isPublicDemo. Gated by SANGAM_PUBLIC_DEMO=true; insert-only (existing rows
+    are never changed). Their department records live only in each
+    department's own database -- nothing departmental is copied here.
+    Password sign-in uses SANGAM_DEMO_CITIZEN_PASSWORD when set; otherwise
+    the accounts can only be used through the public demo sign-in."""
+    from app.core.auth import hash_password, public_demo_enabled
+    if not public_demo_enabled():
+        return {"publicDemo": False}
+    import secrets
+    from app.seeds.demo_citizens import DEMO_CITIZENS
+    password = os.getenv("SANGAM_DEMO_CITIZEN_PASSWORD") or secrets.token_urlsafe(32)
+    added = []
+    with Session(engine) as session:
+        password_hash = None
+        now = datetime.now(timezone.utc)
+        for citizen in DEMO_CITIZENS:
+            citizen_id = citizen["citizenId"]
+            profile = {key: citizen[key] for key in ("citizenId", "name", "dob", "gender", "phone", "district", "address", "persona", "scenario", "scenarioLabel")}
+            if session.get(CitizenRow, citizen_id) is None:
+                session.add(CitizenRow(citizen_id=citizen_id, full_name=citizen["name"], date_of_birth=citizen["dob"], gender=citizen["gender"],
+                                       phone=citizen["phone"], district=citizen["district"], persona=citizen["persona"], is_synthetic=True,
+                                       created_at=now, updated_at=now, payload={**profile, "synthetic": True}))
+            if session.get(UserAccountRow, citizen_id) is None:
+                password_hash = password_hash or hash_password(password)
+                session.add(UserAccountRow(user_id=citizen_id, role="CITIZEN", password_hash=password_hash, payload={
+                    "userId": citizen_id, "citizenId": citizen_id, "name": citizen["name"], "dob": citizen["dob"], "phone": citizen["phone"],
+                    "role": "CITIZEN", "district": citizen["district"], "address": citizen["address"], "persona": citizen["persona"],
+                    "scenario": citizen["scenario"], "scenarioLabel": citizen["scenarioLabel"], "isPublicDemo": True, "isDemoCitizen": True,
+                }))
+                added.append(citizen_id)
+        session.commit()
+    return {"publicDemo": True, "added": added}
+
+
 def _int_suffix(value: str, default: int) -> int:
     try:
         return int(value.rsplit("-", 1)[-1]) + 1
     except (ValueError, AttributeError):
         return default
+
+
+LEGACY_SNAPSHOT_LOCK_KEY = 2612901  # pg_advisory_xact_lock key for persist_state()
 
 
 def persist_state() -> None:
@@ -2247,6 +2458,12 @@ def persist_state() -> None:
     from app.mocks.identity_provider import SESSIONS
 
     with Session(engine) as session:
+        if session.get_bind().dialect.name == "postgresql":
+            # Serialize whole snapshots across processes (API, worker, reloads):
+            # the application row locks below only cover rows that exist, and
+            # two interleaved delete-then-insert snapshots would otherwise
+            # race on the same audit sequence keys.
+            session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": LEGACY_SNAPSHOT_LOCK_KEY})
         # The legacy snapshot is destructive, so serialize it against every
         # application row it can replace.  These are row locks, not a table
         # lock; repository writers either finish before this snapshot or wait
@@ -2350,9 +2567,19 @@ def persist_state() -> None:
             if payload.get("appId") in protected_app_ids:
                 continue
             session.add(EventRow(app_id=payload.get("appId"), event_type=event["type"], occurred_at=event["timestamp"], payload=event))
-        for entry in audit_bus.entries:
-            if entry.get("correlationId") in protected_app_ids:
-                continue
+        # Audit rows that survive the deletes above (application-protected
+        # entries, including any another writer persisted) are the ledger's
+        # authoritative state.  Reconcile against them instead of trusting
+        # in-memory numbering: identical records are written once, and a
+        # record whose sequence is already held by a different row is
+        # re-sequenced above the persisted maximum -- never dropped.
+        kept_audit = {sequence: (payload or {}).get("entryHash") for sequence, payload in session.execute(select(AuditEntryRow.sequence, AuditEntryRow.payload)).all()}
+        audit_to_write, resequenced = audit_bus.reconcile_for_persistence(kept_audit, skip=lambda entry: entry.get("correlationId") in protected_app_ids)
+        if resequenced:
+            from app.core.observability import structured_log
+            structured_log("audit_entries_resequenced", level="WARNING", outcome="RESEQUENCED",
+                           operation="audit sequence " + ", ".join(f"{entry['resequencedFrom']}->{entry['sequence']}" for entry in resequenced))
+        for entry in audit_to_write:
             session.add(AuditEntryRow(sequence=entry["sequence"], correlation_id=entry.get("correlationId"), consent_id=entry.get("consentId"), payload=entry))
         # JWT access tokens are deliberately not persisted.
         for system, state in adapters._availability.items():
@@ -2451,7 +2678,8 @@ def hydrate_state() -> None:
         notification_manager.notifications.extend(row.payload for row in session.query(NotificationRow).order_by(NotificationRow.notification_id).all())
         notification_manager._processed_event_ids.update(item.get("sourceEventId") for item in notification_manager.notifications if item.get("sourceEventId"))
         event_bus.hydrate([row.payload for row in session.query(EventRow).order_by(EventRow.id).all()])
-        audit_bus.entries.extend(row.payload for row in session.query(AuditEntryRow).order_by(AuditEntryRow.sequence).all())
+        audit_rows = session.query(AuditEntryRow).order_by(AuditEntryRow.sequence).all()
+        audit_bus.hydrate([row.payload for row in audit_rows], max((row.sequence for row in audit_rows), default=0))
         SESSIONS.update({row.session_id: row.payload for row in session.query(SessionRow).all()})
         for row in session.query(IntegrationStateRow).all():
             adapters._availability[row.system] = {key: value for key, value in row.payload.items() if key != "runtimeHealth"}

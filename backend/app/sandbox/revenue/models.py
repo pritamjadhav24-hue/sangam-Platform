@@ -27,6 +27,7 @@ class ResidentIndex(Base, TimestampMixin, SyntheticFlagMixin):
     mobile: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     taluka: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     village: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    address_line: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
 
 
 class LandRecord(Base, TimestampMixin, SyntheticFlagMixin):

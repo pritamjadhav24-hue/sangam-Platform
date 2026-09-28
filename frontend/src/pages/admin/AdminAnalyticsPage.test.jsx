@@ -48,7 +48,7 @@ describe('AdminAnalyticsPage', () => {
   it('labels sparse trends as limited instead of drawing fabricated history', async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Trends')).toBeInTheDocument());
-    expect(screen.getAllByText(/Limited demo data available for this trend/).length).toBe(4);
+    expect(screen.getAllByText(/Not enough data yet to show a trend/).length).toBe(4);
     expect(screen.getByText('2026-09-22')).toBeInTheDocument();
   });
 

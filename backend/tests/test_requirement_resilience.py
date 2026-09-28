@@ -270,8 +270,12 @@ class RequirementResilienceTests(unittest.TestCase):
             {"code": "INCOME_PROOF", "status": "ACTION_REQUIRED"},
         ]})
         by_code = {item["requirementCode"]: item for item in safe["requirements"]}
-        self.assertEqual(by_code["DOMICILE_PROOF"]["userAction"], "Automatic retrieval could not complete. You can provide this manually.")
-        self.assertEqual(by_code["INCOME_PROOF"]["userAction"], "Automatic retrieval was not allowed. You can provide this manually.")
+        # An outage is never worded as the citizen having declined, and each
+        # keeps manual upload available.
+        self.assertEqual(by_code["DOMICILE_PROOF"]["userAction"], "Government verification is temporarily unavailable. You can upload the document yourself.")
+        self.assertEqual(by_code["INCOME_PROOF"]["userAction"], "You chose not to allow automatic retrieval. You can upload the document yourself.")
+        self.assertEqual(by_code["DOMICILE_PROOF"]["verificationState"], "TEMPORARILY_UNAVAILABLE")
+        self.assertEqual(by_code["INCOME_PROOF"]["verificationState"], "CONSENT_DENIED")
         self.assertNotIn("errorCategory", by_code["DOMICILE_PROOF"])
 
     def test_rejected_requirement_guidance_survives_refresh_without_local_state(self):
@@ -282,7 +286,8 @@ class RequirementResilienceTests(unittest.TestCase):
         refreshed = get_citizen_application(application["appId"], user=_user("CITIZEN_6D_009"))
         requirement = next(item for item in refreshed["requirements"] if item["requirementCode"] == code)
         self.assertEqual(requirement["status"], "ACTION_REQUIRED")
-        self.assertEqual(requirement["userAction"], "Automatic retrieval was not allowed. You can provide this manually.")
+        self.assertEqual(requirement["verificationState"], "CONSENT_DENIED")
+        self.assertTrue(requirement["userAction"].startswith("You chose not to allow automatic retrieval."))
 
     # ------------------------------------------------------------------
     # Retry endpoint security -- same checks as first Auto-Fill (task item 3)
@@ -333,6 +338,73 @@ class AuditBusThreadSafetyTests(unittest.TestCase):
         sequences = [entry["sequence"] for entry in bus.entries]
         self.assertEqual(len(sequences), len(set(sequences)), "duplicate sequence numbers were allocated under concurrency")
         self.assertEqual(sorted(sequences), list(range(1, len(sequences) + 1)))
+
+
+class AuditSequenceAllocationTests(unittest.TestCase):
+    """The persisted ledger can have gaps (the legacy snapshot is last-writer-wins
+    across processes).  Sequences must continue above what is persisted, never
+    from len(entries) -- that re-issued sequence 18 after hydrating 17 gapped
+    rows and failed persistence with a duplicate audit_entries primary key."""
+
+    def _ledger(self, sequences):
+        source = AuditBus()
+        for sequence in sequences:
+            entry = source.append("SYSTEM", "TEST", "persisted", "TEST", "TEST", payload={"n": sequence})
+            entry["sequence"] = sequence
+            entry["entryHash"] = source._hash(entry)
+        return source.entries
+
+    def test_append_after_hydrating_a_gapped_ledger_never_reuses_a_sequence(self):
+        persisted = [1, 2, 3, 4, 5, 6, 15, 18, 19, 20, 21, 22, 23, 24, 30, 32, 34]
+        bus = AuditBus()
+        bus.hydrate(self._ledger(persisted), persisted_max_sequence=34)
+        entry = bus.append("SYSTEM", "TEST", "after hydrate", "TEST", "TEST", payload={})
+        self.assertEqual(entry["sequence"], 35)
+        sequences = [item["sequence"] for item in bus.entries]
+        self.assertEqual(len(sequences), len(set(sequences)))
+
+    def test_hydrate_respects_a_persisted_maximum_above_the_loaded_rows(self):
+        bus = AuditBus()
+        bus.hydrate(self._ledger([1, 2]), persisted_max_sequence=990001)
+        self.assertEqual(bus.append("SYSTEM", "TEST", "x", "TEST", "TEST")["sequence"], 990002)
+
+    def test_reset_restarts_numbering_for_an_empty_ledger(self):
+        bus = AuditBus()
+        bus.hydrate(self._ledger([7]), persisted_max_sequence=7)
+        bus.reset()
+        self.assertEqual(bus.append("SYSTEM", "TEST", "x", "TEST", "TEST")["sequence"], 1)
+
+    def test_reconcile_writes_identical_records_once(self):
+        bus = AuditBus()
+        first = bus.append("SYSTEM", "TEST", "x", "TEST", "TEST")
+        bus.entries.append(dict(first))  # the same record twice in memory
+        to_write, resequenced = bus.reconcile_for_persistence({})
+        self.assertEqual([entry["sequence"] for entry in to_write], [1])
+        self.assertEqual(resequenced, [])
+        self.assertEqual(len(bus.entries), 1)
+
+    def test_reconcile_resequences_a_stale_entry_instead_of_dropping_it(self):
+        bus = AuditBus()
+        bus.append("SYSTEM", "TEST", "one", "TEST", "TEST")
+        stale = bus.append("SYSTEM", "TEST", "stale numbering", "TEST", "TEST", payload={"keep": True})
+        # Another writer already persisted a different record as sequence 2, and more above it.
+        to_write, resequenced = bus.reconcile_for_persistence({2: "a-different-record", 40: "another"})
+        self.assertEqual(resequenced, [stale])
+        self.assertEqual(stale["resequencedFrom"], 2)
+        self.assertEqual(stale["sequence"], 41)
+        self.assertEqual(stale["what"], "TEST")
+        self.assertEqual(stale["why"], "stale numbering")
+        self.assertEqual(sorted(entry["sequence"] for entry in to_write), [1, 41])
+        self.assertEqual(bus.append("SYSTEM", "TEST", "next", "TEST", "TEST")["sequence"], 42)
+        self.assertTrue(bus.verify())
+
+    def test_reconcile_skips_rows_the_snapshot_keeps_but_still_avoids_their_sequences(self):
+        bus = AuditBus()
+        kept = bus.append("SYSTEM", "TEST", "protected", "TEST", "TEST", correlation_id="APP-PROTECTED")
+        mine = bus.append("SYSTEM", "TEST", "mine", "TEST", "TEST")
+        to_write, resequenced = bus.reconcile_for_persistence({kept["sequence"]: kept["entryHash"]}, skip=lambda entry: entry.get("correlationId") == "APP-PROTECTED")
+        self.assertEqual(to_write, [mine])
+        self.assertEqual(resequenced, [])
 
 
 # Remove every runtime row (applications, consents, documents, notifications,

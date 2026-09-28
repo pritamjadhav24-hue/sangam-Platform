@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Skeleton } from '../../components/ui';
 
 const OUTCOME_LABELS = {
   automaticallyVerified: 'Auto-verified',
@@ -49,7 +50,7 @@ function Trend({ label, trend }) {
       <b style={{ fontSize: '13px', color: '#562C2C' }}>{label}</b>
       {trend.limited ? (
         <p className="muted" style={{ margin: '8px 0 0', fontSize: '13px' }}>
-          Limited demo data available for this trend
+          Not enough data yet to show a trend
           {trend.series.length === 1 && ` (activity on a single day: ${trend.series[0].date}, ${trend.series[0].count})`}.
         </p>
       ) : (
@@ -98,9 +99,9 @@ export default function AdminAnalyticsPage({ api, onNavigate, onOpenProvider, on
     <main className="container">
       <div className="page-title">
         <div>
-          <p className="eyebrow">Operational Intelligence · Admin</p>
+          <p className="eyebrow">Operations</p>
           <h1>Analytics &amp; Reports</h1>
-          <p>Read-only figures computed live from SANGAM's persisted applications, requirements, provider jobs, incidents and audit ledger.</p>
+          <p>Live figures from applications, providers, incidents and the audit trail.</p>
         </div>
       </div>
 
@@ -147,7 +148,7 @@ export default function AdminAnalyticsPage({ api, onNavigate, onOpenProvider, on
       </form>
 
       {error && <div className="alert danger" role="alert">{error}</div>}
-      {loading && !report && <p className="loading-state">Computing analytics…</p>}
+      {loading && !report && <Skeleton lines={4} label="Computing analytics" />}
 
       {report && (
         <>
@@ -155,7 +156,7 @@ export default function AdminAnalyticsPage({ api, onNavigate, onOpenProvider, on
             <div className="section-heading">
               <div>
                 <h2>Application overview</h2>
-                <p>Outcome buckets are mutually exclusive and derived from requirement-level state.</p>
+                <p>Each application is counted in exactly one outcome.</p>
               </div>
               <span className="count-badge">Total: {report.applications.total}</span>
             </div>
@@ -252,7 +253,7 @@ export default function AdminAnalyticsPage({ api, onNavigate, onOpenProvider, on
             <div className="section-heading">
               <div>
                 <h2>Trends</h2>
-                <p>Daily counts from persisted timestamps. Sparse history is labelled rather than extrapolated.</p>
+                <p>Daily counts.</p>
               </div>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '12px' }}>

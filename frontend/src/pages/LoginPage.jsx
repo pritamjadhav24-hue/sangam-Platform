@@ -1,76 +1,151 @@
-import { useState } from 'react';
-import SangamMark from '../components/SangamMark';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowRight, LoaderCircle, UserRound, UsersRound } from 'lucide-react';
+import { HERO_IMAGES } from '../schemeImages';
 
-export default function LoginPage({ onLogin, language = 'en', demoCitizens = [], onDemoSwitch }) {
-  const [citizenId, setCitizenId] = useState('CITIZEN_001'); const [password, setPassword] = useState(''); const [error, setError] = useState(''); const [loading, setLoading] = useState(false);
-  // DEMO ONLY: the backend lists demo citizens only when demo switching is
-  // enabled (never in production), so this panel simply doesn't render otherwise.
-  async function demoSignIn(event) { const id = event.target.value; if (!id) return; setLoading(true); setError(''); try { await onDemoSwitch(id); } catch (err) { setError(err.message); setLoading(false); } }
-  async function submit(event) { event.preventDefault(); setLoading(true); setError(''); try { await onLogin(citizenId, password); } catch (err) { setError(err.message); } finally { setLoading(false); } }
+const ROTATE_MS = 8000;
+
+// Background photos crossfade slowly; they are decorative only (no captions,
+// place names or credits). Only the first is loaded up front.
+function useRotatingHero(count) {
+  const [index, setIndex] = useState(0);
+  const [loaded, setLoaded] = useState(() => new Set([0]));
+  useEffect(() => {
+    const reduceMotion = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (reduceMotion || count < 2) return undefined;
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return; // don't rotate in a background tab
+      setIndex(current => {
+        const next = (current + 1) % count;
+        setLoaded(previous => new Set([...previous, next, (next + 1) % count]));
+        return next;
+      });
+    }, ROTATE_MS);
+    const warmup = setTimeout(() => setLoaded(previous => new Set([...previous, 1])), 1500);
+    return () => { clearInterval(timer); clearTimeout(warmup); };
+  }, [count]);
+  return { index, loaded };
+}
+
+export default function LoginPage({ onLogin, onDemoLogin, loadDemoAccounts, language = 'en', notice = '' }) {
+  const [userId, setUserId] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [guestAccounts, setGuestAccounts] = useState([]);
+  const [guestOpen, setGuestOpen] = useState(false);
+  const [guestId, setGuestId] = useState('');
+  const userIdRef = useRef(null);
   const isMr = language === 'mr';
+  const { index, loaded } = useRotatingHero(HERO_IMAGES.length);
+  const guest = guestAccounts.find(item => item.citizenId === guestId);
+
+  useEffect(() => {
+    if (!loadDemoAccounts) return undefined;
+    let active = true;
+    // Offered only when the server explicitly enables guest (sample) accounts.
+    loadDemoAccounts().then(result => { if (active) setGuestAccounts(result?.accounts || []); }).catch(() => {});
+    return () => { active = false; };
+  }, [loadDemoAccounts]);
+
+  function useOwnAccount() {
+    setGuestOpen(false);
+    setGuestId('');
+    setError('');
+    setTimeout(() => userIdRef.current?.focus(), 0);
+  }
+
+  async function submit(event) {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      if (guest) await onDemoLogin(guest.citizenId);
+      else await onLogin(userId.trim(), password);
+    } catch (err) {
+      setError(err.status === 401
+        ? (isMr ? 'वापरकर्ता आयडी किंवा पासवर्ड चुकीचा आहे.' : 'The user ID or password is incorrect.')
+        : err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const canSubmit = guest ? true : Boolean(userId.trim() && password);
+
   return (
-    <main className="login">
-      <section className="login-story">
-        <div className="brand-lockup">
-          <SangamMark size={52} />
-          <div>
-            <strong>SANGAM</strong>
-            <small>{isMr ? 'फेडरेटेड शासकीय इंटरऑपरेबिलिटी प्लॅटफॉर्म' : 'Federated Government Interoperability Platform'}</small>
+    <main className="landing">
+      <div className="landing-backdrop" aria-hidden="true">
+        {HERO_IMAGES.map((image, position) => loaded.has(position) && (
+          <img key={image.key} className={`landing-photo${position === index ? ' visible' : ''}`} alt=""
+            src={image.src} srcSet={`${image.srcSmall} 960w, ${image.src} 1920w`} sizes="100vw"
+            decoding="async" fetchPriority={position === 0 ? 'high' : 'low'} />
+        ))}
+      </div>
+      <div className="landing-inner">
+        <section className="landing-story">
+          <div className="landing-brand">
+            <span className="logo-badge"><img src="/brand/sangam-logo-240.webp" alt="" width="104" height="58" /></span>
+            <div>
+              <h1>SANGAM</h1>
+              <p className="landing-tagline">{isMr ? 'फेडरेटेड शासकीय इंटरऑपरेबिलिटी प्लॅटफॉर्म' : 'Federated Government Interoperability Platform'}</p>
+            </div>
           </div>
-        </div>
-        <p className="eyebrow">{isMr ? 'SIH २०२६ · प्रोटोटाइप' : 'SIH 2026 · Prototype'}</p>
-        <h1>{isMr ? 'शासकीय सेवांचे अखंड, सुलभ एकत्रीकरण.' : 'Connecting government services, seamlessly.'}</h1>
-        <p>{isMr ? 'सेवांकरिता अर्ज करा, पडताळलेली माहिती पुन्हा वापरा आणि एकाच ठिकाणाहून अर्जाचा मागोवा घ्या.' : 'Apply for services, reuse verified information and track your applications from one place.'}</p>
-        <div className="network-visual" aria-hidden="true">
-          <span className="network-node central">S</span>
-          <span className="network-node n1">R</span>
-          <span className="network-node n2">E</span>
-          <span className="network-node n3">C</span>
-          <i className="line l1" />
-          <i className="line l2" />
-          <i className="line l3" />
-        </div>
-        <div className="security-note">
-          <b>{isMr ? 'प्रोटोटाइप वातावरण' : 'Prototype environment'}</b><br />
-          {isMr ? 'उद्देश-मर्यादित प्रवेश · सुरक्षित विभागीय जोडणी' : 'Purpose-bound access · Secure department connections'}
-        </div>
-      </section>
-      <form className="card login-card" onSubmit={submit}>
-        <div className="seal">
-          महाराष्ट्र शासन<br />
-          <b>{isMr ? 'सुरक्षित नमुना साइन-इन' : 'Secure demo sign-in'}</b>
-        </div>
-        <h2>{isMr ? 'SANGAM मध्ये साइन इन करा' : 'Sign in to SANGAM'}</h2>
-        <p className="muted">{isMr ? 'पुढे जाण्यासाठी आपली नमुना ओळख वापरा.' : 'Use your prototype identity to continue.'}</p>
-        <label>
-          {isMr ? 'वापरकर्ता आयडी' : 'User ID'}
-          <input value={citizenId} onChange={event => setCitizenId(event.target.value)} />
-        </label>
-        <label>
-          {isMr ? 'पासवर्ड' : 'Password'}
-          <input type="password" value={password} onChange={event => setPassword(event.target.value)} />
-        </label>
-        {error && <p className="alert danger">{error}</p>}
-        <button className="primary" disabled={loading}>
-          {loading ? (isMr ? 'ओळख पडताळत आहे…' : 'Verifying identity…') : (isMr ? 'पडताळणी करा व पुढे जा' : 'Verify & continue')}
-        </button>
-        {demoCitizens.length > 0 && onDemoSwitch && (
-          <label className="demo-switcher login-demo-switcher">
-            <span className="demo-switcher-badge">DEMO</span>
-            <select aria-label={isMr ? 'डेमो नागरिक म्हणून पुढे जा' : 'Continue as a demo citizen'} defaultValue="" disabled={loading} onChange={demoSignIn}>
-              <option value="" disabled>{isMr ? 'डेमो नागरिक म्हणून पुढे जा' : 'Continue as a demo citizen'}</option>
-              {demoCitizens.map(item => <option key={item.citizenId} value={item.citizenId}>{item.name}{item.persona ? ` · ${item.persona.replace(/_/g, ' ')}` : ''}</option>)}
-            </select>
-          </label>
-        )}
-        <div className="demo-credentials">
-          <b>{isMr ? 'नमुना ओळख (डेमो)' : 'Demo identities'}</b>
-          {/* Account IDs only: passwords are set per deployment (.env) and are never shipped in the UI. */}
-          <span>{isMr ? 'नागरिक' : 'Citizen'} · <code>CITIZEN_001</code> · <code>CITIZEN_002</code></span>
-          <span>{isMr ? 'अधिकारी' : 'Officer'} · <code>OFFICER_MH_01</code></span>
-          <span>{isMr ? 'प्रशासक' : 'Admin'} · <code>ADMIN_MH_01</code></span>
-        </div>
-      </form>
+          <p className="landing-headline">{isMr ? 'एकाच जोडलेल्या व्यासपीठावरून शासकीय सेवा मिळवा.' : 'Access public services through one connected platform.'}</p>
+          <p className="landing-lead">{isMr
+            ? 'सेवांसाठी अर्ज करा, आपल्या संमतीने पडताळलेली माहिती पुन्हा वापरा आणि सर्व अर्जांचा एकाच ठिकाणी मागोवा घ्या.'
+            : 'Apply for services, reuse verified information with your consent, and track applications in one place.'}</p>
+        </section>
+
+        <form className="card login-card" onSubmit={submit} aria-labelledby="login-title">
+          <h2 id="login-title">{isMr ? 'साइन इन करा' : 'Sign in'}</h2>
+          {notice && <p className="alert notice" role="status">{notice}</p>}
+
+          {guest ? (
+            <div className="guest-selected">
+              <UsersRound size={20} aria-hidden="true" />
+              <div>
+                <span className="muted small-text">{isMr ? 'अतिथी खाते' : 'Guest account'}</span>
+                <b>{guest.name}</b>
+              </div>
+              <button type="button" className="link" onClick={useOwnAccount}>{isMr ? 'बदला' : 'Change'}</button>
+            </div>
+          ) : (
+            <>
+              <label htmlFor="login-user-id">{isMr ? 'वापरकर्ता आयडी' : 'User ID'}</label>
+              <div className="input-with-icon">
+                <UserRound size={18} aria-hidden="true" />
+                <input id="login-user-id" ref={userIdRef} name="username" autoComplete="username" required value={userId}
+                  onChange={event => setUserId(event.target.value)} aria-invalid={Boolean(error)} aria-describedby={error ? 'login-error' : undefined} />
+              </div>
+              <label htmlFor="login-password">{isMr ? 'पासवर्ड' : 'Password'}</label>
+              <input id="login-password" name="password" type="password" autoComplete="current-password" required
+                value={password} onChange={event => setPassword(event.target.value)}
+                aria-invalid={Boolean(error)} aria-describedby={error ? 'login-error' : undefined} />
+            </>
+          )}
+          {error && <p className="alert danger" id="login-error" role="alert">{error}</p>}
+          <button className="primary wide button-with-icon" disabled={loading || !canSubmit}>
+            {loading ? <LoaderCircle className="spin" size={18} aria-hidden="true" /> : <ArrowRight size={18} aria-hidden="true" />}
+            {loading ? (isMr ? 'साइन इन होत आहे…' : 'Signing in…') : (isMr ? 'साइन इन करा' : 'Sign in')}
+          </button>
+
+          {guestAccounts.length > 0 && !guest && (
+            <div className="guest-access">
+              {!guestOpen ? (
+                <button type="button" className="link" onClick={() => setGuestOpen(true)}>{isMr ? 'अतिथी खात्याने सुरू ठेवा' : 'Continue with a guest account'}</button>
+              ) : (
+                <>
+                  <label htmlFor="guest-account">{isMr ? 'अतिथी खाते' : 'Guest account'}</label>
+                  <select id="guest-account" value={guestId} onChange={event => { setGuestId(event.target.value); setError(''); }}>
+                    <option value="">{isMr ? 'खाते निवडा' : 'Select an account'}</option>
+                    {guestAccounts.map(item => <option key={item.citizenId} value={item.citizenId}>{item.name}</option>)}
+                  </select>
+                </>
+              )}
+            </div>
+          )}
+        </form>
+      </div>
     </main>
   );
 }

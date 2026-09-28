@@ -1,90 +1,120 @@
+import { ArrowLeft, ArrowRight, Building2, CalendarDays, CircleCheck, FileText, ListChecks, ShieldCheck } from 'lucide-react';
 import { categoryLabel } from '../i18n';
+import { applicationStateLabel } from '../applicationState';
+import { schemeImage } from '../schemeImages';
+
+const STEPS = {
+  en: ['Start your application', 'Allow Auto-Fill to fetch verified records from the departments', 'Upload anything that could not be verified', 'Review and submit', 'Track the status and notifications'],
+  mr: ['अर्ज सुरू करा', 'विभागांकडील पडताळलेल्या नोंदी मिळवण्यासाठी ऑटो-फिलला परवानगी द्या', 'पडताळता न आलेल्या बाबी अपलोड करा', 'पुनरावलोकन करून सादर करा', 'स्थिती व सूचनांचा मागोवा घ्या'],
+};
 
 // The scheme catalogue (fetched once in App.jsx) already carries every field
 // a scheme's detail view needs, so this page looks the scheme up there
 // instead of making its own per-scheme request on every visit.
-export default function SchemeDetailPage({ schemeId, schemes, navigate, onApply, language = 'en' }) {
+export default function SchemeDetailPage({ schemeId, schemes, applications, navigate, onApply, language = 'en' }) {
   const scheme = (schemes || []).find(item => item.serviceId === schemeId || item.schemeId === schemeId);
+  const isMr = language === 'mr';
 
   if (!schemes || schemes.length === 0) {
-    return <main className="container narrow"><p className="loading-state" role="status">{language === 'en' ? 'Loading scheme…' : 'योजना लोड होत आहे…'}</p></main>;
+    return <main className="container narrow"><p className="loading-state" role="status">{isMr ? 'योजना लोड होत आहे…' : 'Loading scheme…'}</p></main>;
   }
   if (!schemeId || !scheme) {
     return (
       <main className="container narrow">
-        <div className="alert danger" role="alert">{language === 'en' ? 'Scheme not found.' : 'योजना सापडली नाही.'}</div>
-        <button className="outline" onClick={() => navigate('schemes')}>{language === 'en' ? 'Back to schemes' : 'योजनांकडे परत जा'}</button>
+        <div className="alert danger" role="alert">{isMr ? 'योजना सापडली नाही.' : 'Scheme not found.'}</div>
+        <button className="outline" onClick={() => navigate('schemes')}>{isMr ? 'योजनांकडे परत जा' : 'Back to schemes'}</button>
       </main>
     );
   }
 
-  const name = language === 'en' ? scheme.name : (scheme.nameMr || scheme.name);
-  const department = language === 'en' ? scheme.department : (scheme.departmentMr || scheme.department);
-  const description = language === 'en' ? scheme.description : (scheme.descriptionMr || scheme.description);
-  const benefits = language === 'en' ? scheme.benefits : (scheme.benefitsMr || scheme.benefits);
-  const eligibility = language === 'en' ? scheme.eligibility : (scheme.eligibilityMr || scheme.eligibility);
-  const applicationWindow = language === 'en' ? scheme.applicationWindow : (scheme.applicationWindowMr || scheme.applicationWindow);
+  const pick = (en, mr) => (isMr ? (mr || en) : en);
+  const name = pick(scheme.name, scheme.nameMr);
+  const department = pick(scheme.department, scheme.departmentMr);
+  const description = pick(scheme.description, scheme.descriptionMr);
+  const benefits = pick(scheme.benefits, scheme.benefitsMr);
+  const eligibility = pick(scheme.eligibility, scheme.eligibilityMr);
+  const applicationWindow = pick(scheme.applicationWindow, scheme.applicationWindowMr);
   const available = scheme.enabled !== false;
+  const image = schemeImage(scheme, language);
+  const id = scheme.serviceId || scheme.schemeId;
+  const existing = (applications || []).find(item => item.serviceId === id);
+  const criteria = Array.isArray(scheme.eligibilityCriteria) ? scheme.eligibilityCriteria : [];
+  const requirements = Array.isArray(scheme.requirements) ? scheme.requirements : [];
 
   return (
-    <main className="container narrow scheme-detail">
-      <button className="outline back-link" onClick={() => navigate('schemes')}>&larr; {language === 'en' ? 'All schemes' : 'सर्व योजना'}</button>
+    <main className="container scheme-detail">
+      <button className="link back-link button-with-icon" onClick={() => navigate('schemes')}><ArrowLeft size={16} aria-hidden="true" />{isMr ? 'सर्व योजना' : 'All schemes'}</button>
 
-      <div className="page-title">
-        <div>
-          <p className="eyebrow">{categoryLabel(scheme.category, language)}{scheme.synthetic ? ` · ${language === 'en' ? 'Demo scheme' : 'नमुना योजना'}` : ''}</p>
+      <header className="scheme-hero">
+        <img src={image.src} alt={image.alt} width="720" height="405" />
+        <div className="scheme-hero-text">
+          <span className="tag">{categoryLabel(scheme.category, language)}</span>
           <h1>{name}</h1>
-          <p className="muted">{department}</p>
+          <p className="scheme-hero-department"><Building2 size={16} aria-hidden="true" />{isMr ? `${department} द्वारे उपलब्ध` : `Offered by ${department}`}</p>
         </div>
-      </div>
+      </header>
 
-      <section className="card scheme-detail-section">
-        <h2>{language === 'en' ? 'About this scheme' : 'योजनेबद्दल'}</h2>
-        <p>{description}</p>
-      </section>
+      <div className="scheme-layout">
+        <div className="scheme-main">
+          <section className="card scheme-detail-section">
+            <h2>{isMr ? 'योजनेबद्दल' : 'About this scheme'}</h2>
+            <p>{description}</p>
+            {benefits && (<><h3>{isMr ? 'लाभ' : 'Benefits'}</h3><p>{benefits}</p></>)}
+          </section>
 
-      {benefits && (
-        <section className="card scheme-detail-section">
-          <h2>{language === 'en' ? 'Benefits' : 'लाभ'}</h2>
-          <p>{benefits}</p>
-        </section>
-      )}
+          {(eligibility || criteria.length > 0) && (
+            <section className="card scheme-detail-section">
+              <h2>{isMr ? 'पात्रता' : 'Eligibility'}</h2>
+              {eligibility && <p>{eligibility}</p>}
+              {criteria.length > 0 && (
+                <>
+                  <p className="muted">{isMr ? 'आपली माहिती पडताळली जात असताना या निकषांनुसार आपली पात्रता तपासली जाते:' : 'Your eligibility is checked against these criteria as your information is verified:'}</p>
+                  <ul className="check-list eligibility-criteria-list">
+                    {criteria.map(item => <li key={item.id}><CircleCheck size={18} aria-hidden="true" />{pick(item.label, item.labelMr)}</li>)}
+                  </ul>
+                </>
+              )}
+            </section>
+          )}
 
-      {eligibility && (
-        <section className="card scheme-detail-section">
-          <h2>{language === 'en' ? 'Eligibility' : 'पात्रता'}</h2>
-          <p>{eligibility}</p>
-        </section>
-      )}
+          {requirements.length > 0 && (
+            <section className="card scheme-detail-section">
+              <h2>{isMr ? 'आवश्यक माहिती व दस्तऐवज' : 'Required information and documents'}</h2>
+              <ul className="document-list">
+                {requirements.map(requirement => (
+                  <li key={requirement.code}>
+                    <FileText size={18} aria-hidden="true" />
+                    <span>{pick(requirement.label, requirement.labelMr)}</span>
+                    <span className={`status ${requirement.mandatory ? 'required' : 'optional'}`}>{requirement.mandatory ? (isMr ? 'आवश्यक' : 'Required') : (isMr ? 'ऐच्छिक' : 'Optional')}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
-      {Array.isArray(scheme.requirements) && scheme.requirements.length > 0 && (
-        <section className="card scheme-detail-section">
-          <h2>{language === 'en' ? 'What you will need' : 'आवश्यक बाबी'}</h2>
-          <ul className="compact">
-            {scheme.requirements.map(requirement => (
-              <li key={requirement.code}>
-                <span>{language === 'en' ? requirement.label : (requirement.labelMr || requirement.label)}</span>
-                <span>{requirement.mandatory ? (language === 'en' ? 'Required' : 'आवश्यक') : (language === 'en' ? 'Optional' : 'ऐच्छिक')}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+          <section className="card scheme-detail-section">
+            <h2>{isMr ? 'अर्ज कसा करावा' : 'How to apply'}</h2>
+            <ol className="step-list">
+              {STEPS[isMr ? 'mr' : 'en'].map(step => <li key={step}>{step}</li>)}
+            </ol>
+          </section>
+        </div>
 
-      {applicationWindow && (
-        <section className="card scheme-detail-section">
-          <h2>{language === 'en' ? 'Important information' : 'महत्त्वाची माहिती'}</h2>
-          <p>{applicationWindow}</p>
-        </section>
-      )}
-
-      <div className="scheme-detail-actions">
-        <span className={available ? 'available-label' : 'future-label'}>
-          {available ? (language === 'en' ? 'Available in prototype' : 'प्रोटोटाइपमध्ये उपलब्ध') : (language === 'en' ? 'Coming soon' : 'लवकरच उपलब्ध')}
-        </span>
-        <button className="primary" disabled={!available} onClick={() => onApply(scheme)}>
-          {language === 'en' ? 'Apply' : 'अर्ज करा'}
-        </button>
+        <aside className="scheme-aside">
+          <div className="card apply-panel">
+            <p className={`availability ${available ? 'on' : 'off'}`}>{available ? <CircleCheck size={18} aria-hidden="true" /> : <CalendarDays size={18} aria-hidden="true" />}
+              {available ? (isMr ? 'ऑनलाइन उपलब्ध' : 'Available online') : (isMr ? 'लवकरच उपलब्ध' : 'Coming soon')}</p>
+            {existing && <p className="muted">{isMr ? 'आपल्या अर्जाची स्थिती' : 'Your application'}: <b>{applicationStateLabel(existing.status, language)}</b></p>}
+            <button className="primary button-with-icon wide" disabled={!available} onClick={() => onApply(scheme)}>
+              {existing ? (isMr ? 'अर्ज उघडा' : 'Open application') : (isMr ? 'अर्ज करा' : 'Apply')}<ArrowRight size={18} aria-hidden="true" />
+            </button>
+            <ul className="aside-points">
+              <li><ShieldCheck size={16} aria-hidden="true" />{isMr ? 'आपल्या संमतीनेच विभागांकडून पडताळणी' : 'Verified with departments only with your consent'}</li>
+              <li><ListChecks size={16} aria-hidden="true" />{isMr ? `${requirements.length} आवश्यक बाबी` : `${requirements.length} items to provide`}</li>
+            </ul>
+            {applicationWindow && <p className="muted small-text"><CalendarDays size={14} aria-hidden="true" /> {applicationWindow}</p>}
+          </div>
+        </aside>
       </div>
     </main>
   );

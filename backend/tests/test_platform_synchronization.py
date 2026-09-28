@@ -37,8 +37,13 @@ class SchemeRequirementProviderAlignmentTests(unittest.TestCase):
     def test_income_proof_has_a_lower_priority_alternate_provider(self):
         primary = next(item for item in DEPENDENCY_SERVICES if item["requirementCode"] == "INCOME_PROOF")
         alternates = [item for item in DEPARTMENT_SANDBOX_PROVIDERS if item["requirementCode"] == "INCOME_PROOF"]
-        self.assertEqual(len(alternates), 1)
-        self.assertGreater(alternates[0]["priority"], primary["priority"], "the alternate must only ever be a fallback")
+        # Revenue's income-certificate API and Social Welfare's verified
+        # household income (the authorised equivalent), in that order.
+        self.assertEqual({item["providerId"] for item in alternates}, {"REVENUE-SANDBOX-INCOME", "SOCIAL-WELFARE-SANDBOX-INCOME"})
+        for alternate in alternates:
+            self.assertGreater(alternate["priority"], primary["priority"], "the alternate must only ever be a fallback")
+        by_id = {item["providerId"]: item["priority"] for item in alternates}
+        self.assertLess(by_id["REVENUE-SANDBOX-INCOME"], by_id["SOCIAL-WELFARE-SANDBOX-INCOME"])
 
     def test_every_sandbox_provider_path_is_served_by_the_department_api(self):
         from app.department_api.main import app

@@ -88,7 +88,11 @@ describe('Phase 6B application form: no hardcoded fields/documents/departments, 
 
   it('requirement actions are sourced from api.autoFillRequirement/api.uploadRequirement, never a hardcoded provider/department call', () => {
     expect(source).toMatch(/api\.autoFillRequirement\(/);
-    expect(source).toMatch(/api\.uploadRequirement\(/);
+    // Manual upload lives in the shared DocumentUploader the form renders.
+    const uploader = readFileSync(join(HERE, '..', 'components', 'DocumentUploader.jsx'), 'utf-8');
+    expect(source).toMatch(/<DocumentUploader/);
+    expect(uploader).toMatch(/api\.uploadRequirement\(/);
+    expect(uploader).not.toMatch(/department|provider|sandbox/i);
   });
 });
 

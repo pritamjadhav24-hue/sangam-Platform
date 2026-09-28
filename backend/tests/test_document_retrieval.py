@@ -166,10 +166,10 @@ class ProviderSelectionAndTrustedFallbackTests(unittest.TestCase):
 
     def test_trusted_source_is_preferred_when_available(self):
         candidates = [
-            {"requirementCode": "PHASE4_ARTIFACT", "provider": "Department Provider", "providerId": "DEPT-PROV",
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE4_ARTIFACT", "provider": "Department Provider", "providerId": "DEPT-PROV",
              "requiredService": "X", "serviceName": "X", "serviceId": "SVC-DEPT", "adapter": "Department Sandbox API",
              "priority": 50, "sourceCategory": "DEPARTMENT_PROVIDER"},
-            {"requirementCode": "PHASE4_ARTIFACT", "provider": "Trusted Repository", "providerId": "TRUSTED-REPO",
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE4_ARTIFACT", "provider": "Trusted Repository", "providerId": "TRUSTED-REPO",
              "requiredService": "X", "serviceName": "X", "serviceId": "SVC-TRUSTED", "adapter": "Department Sandbox API",
              "priority": 1, "sourceCategory": "TRUSTED_DIGITAL_REPOSITORY"},
         ]
@@ -181,7 +181,7 @@ class ProviderSelectionAndTrustedFallbackTests(unittest.TestCase):
 
     def test_falls_back_to_department_provider_when_no_trusted_source_exists(self):
         candidates = [
-            {"requirementCode": "PHASE4_ARTIFACT_FALLBACK", "provider": "Department Provider", "providerId": "DEPT-PROV-2",
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE4_ARTIFACT_FALLBACK", "provider": "Department Provider", "providerId": "DEPT-PROV-2",
              "requiredService": "X", "serviceName": "X", "serviceId": "SVC-DEPT-2", "adapter": "Department Sandbox API",
              "priority": 50, "sourceCategory": "DEPARTMENT_PROVIDER"},
         ]

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.department_api.common import correlation_id_header, envelope, not_found, session_dependency
+from app.department_api.common import correlation_id_header, envelope, not_found, session_dependency, department_health
+from app.department_api.resolution import PersonIndex, register_resolver
 from app.sandbox.housing import models
 
 router = APIRouter(prefix="/departments/housing", tags=["housing"])
@@ -13,7 +14,7 @@ get_session = session_dependency(models.ENGINE)
 
 @router.get("/health")
 def health():
-    return {"status": "AVAILABLE", "sourceSystem": SOURCE_SYSTEM, "synthetic": True}
+    return department_health(models.ENGINE, SOURCE_SYSTEM)
 
 
 @router.get("/allotments/{citizen_ref}")
@@ -36,3 +37,11 @@ def get_allotment(citizen_ref: str, correlation_id=Depends(correlation_id_header
     status = allotment.status if allotment else application.status
     record_id = allotment.allotment_id if allotment else application.application_id
     return envelope(data, source_system=SOURCE_SYSTEM, correlation_id=correlation_id, record_id=record_id, status=status)
+
+
+# Canonical record lookup for SANGAM: this department finds the person in its
+# own records (see app.department_api.resolution) and serves the record
+# through the handlers above.
+register_resolver(router, get_session, PersonIndex(models.Applicant, id_field="applicant_id", name_field="applicant_name", dob_field="dob",
+                                                   phone_field="mobile", identifier_names=('applicant_id',)),
+                  SOURCE_SYSTEM, {"allotments": get_allotment})

@@ -17,7 +17,7 @@ import argparse
 import importlib
 import sys
 
-from app.sandbox.common import session_scope
+from app.sandbox.common import add_missing_columns, session_scope
 from app.sandbox.registry import SANDBOXES, SANDBOXES_BY_KEY
 from app.seeds.synthetic_identity_pool import generate_citizen_pool
 
@@ -48,9 +48,34 @@ def seed_all(keys: list[str] | None = None, citizen_count: int = 60) -> None:
     for spec in _selected(keys):
         models, seed = _load(spec)
         models.Base.metadata.create_all(models.ENGINE)
+        add_missing_columns(models.ENGINE, models.Base)
         with session_scope(models.ENGINE) as session:
             result = seed.seed(session, citizens)
+            flush_in_dependency_order(session, models.Base)
+        if hasattr(seed, "seed_demo"):
+            # Curated public-demo citizens; independent of the generated pool
+            # (idempotent, so already-seeded databases gain them too).
+            with session_scope(models.ENGINE) as session:
+                result = {**(result or {}), **seed.seed_demo(session, citizens)}
         print(f"[seed] {spec.key}: {result}")
+
+
+def flush_in_dependency_order(session, base) -> None:
+    """Flush newly added rows one table at a time, parents before children.
+
+    The seeds add parents and children together and rely on a single flush;
+    SQLite does not enforce foreign keys, but PostgreSQL does, and the unit of
+    work does not order inserts across mappers that have no relationship()."""
+    pending = list(session.new)
+    if not pending:
+        return
+    for obj in pending:
+        session.expunge(obj)
+    for table in base.metadata.sorted_tables:
+        batch = [obj for obj in pending if getattr(obj, "__table__", None) is table]
+        if batch:
+            session.add_all(batch)
+            session.flush()
 
 
 def status(keys: list[str] | None = None) -> None:

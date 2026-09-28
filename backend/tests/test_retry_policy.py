@@ -84,9 +84,9 @@ class FallbackCandidateDiscoveryTests(unittest.TestCase):
 
     def test_finds_a_different_healthy_provider_for_the_same_requirement(self):
         candidates = [
-            {"requirementCode": "PHASE5_FALLBACK", "provider": "Provider A", "providerId": "PROV-A", "requiredService": "X",
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE5_FALLBACK", "provider": "Provider A", "providerId": "PROV-A", "requiredService": "X",
              "serviceName": "X", "serviceId": "SVC-A", "adapter": "Department Sandbox API", "priority": 10},
-            {"requirementCode": "PHASE5_FALLBACK", "provider": "Provider B", "providerId": "PROV-B", "requiredService": "X",
+            {"authorization": {"role": "AUTHORIZED_FALLBACK"}, "requirementCode": "PHASE5_FALLBACK", "provider": "Provider B", "providerId": "PROV-B", "requiredService": "X",
              "serviceName": "X", "serviceId": "SVC-B", "adapter": "Department Sandbox API", "priority": 20},
         ]
         health = [{"system": "Provider A", "providerId": "PROV-A", "status": "AVAILABLE"},
@@ -98,9 +98,9 @@ class FallbackCandidateDiscoveryTests(unittest.TestCase):
 
     def test_unhealthy_alternate_provider_is_not_offered_as_a_fallback(self):
         candidates = [
-            {"requirementCode": "PHASE5_FALLBACK_UNHEALTHY", "provider": "Provider A", "providerId": "PROV-A", "requiredService": "X",
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE5_FALLBACK_UNHEALTHY", "provider": "Provider A", "providerId": "PROV-A", "requiredService": "X",
              "serviceName": "X", "serviceId": "SVC-A", "adapter": "Department Sandbox API", "priority": 10},
-            {"requirementCode": "PHASE5_FALLBACK_UNHEALTHY", "provider": "Provider B (down)", "providerId": "PROV-B-DOWN", "requiredService": "X",
+            {"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE5_FALLBACK_UNHEALTHY", "provider": "Provider B (down)", "providerId": "PROV-B-DOWN", "requiredService": "X",
              "serviceName": "X", "serviceId": "SVC-B", "adapter": "Department Sandbox API", "priority": 20},
         ]
         health = [{"system": "Provider A", "providerId": "PROV-A", "status": "AVAILABLE"},
@@ -111,7 +111,7 @@ class FallbackCandidateDiscoveryTests(unittest.TestCase):
         self.assertIsNone(candidate)
 
     def test_no_fallback_when_only_the_current_provider_exists(self):
-        candidates = [{"requirementCode": "PHASE5_NO_FALLBACK", "provider": "Only Provider", "providerId": "ONLY",
+        candidates = [{"authorization": {"role": "AUTHORITATIVE"}, "requirementCode": "PHASE5_NO_FALLBACK", "provider": "Only Provider", "providerId": "ONLY",
                        "requiredService": "X", "serviceName": "X", "serviceId": "SVC-ONLY", "adapter": "Department Sandbox API", "priority": 10}]
         health = [{"system": "Only Provider", "providerId": "ONLY", "status": "AVAILABLE"}]
         with patch("app.core.persistence.provider_capability_snapshot", return_value=candidates), \

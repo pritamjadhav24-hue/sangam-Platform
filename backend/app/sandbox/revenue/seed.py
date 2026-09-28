@@ -29,9 +29,12 @@ def seed(session, citizens: list[dict]) -> dict:
         name = citizen["name"]
         if rng.random() < 0.15:
             name = spelling_variant(rng, name)
+        taluka, village = rng.choice(TALUKAS), rng.choice(VILLAGES)
         resident = ResidentIndex(
             resident_id=resident_id, citizen_ref=citizen["citizenId"], full_name=name,
-            dob=citizen["dob"], mobile=citizen["phone"], taluka=rng.choice(TALUKAS), village=rng.choice(VILLAGES),
+            dob=citizen["dob"], mobile=citizen["phone"], taluka=taluka, village=village,
+            # Own RNG so the main seeded sequence (and every record after it) is unchanged.
+            address_line=f"House No. {random.Random('addr:' + citizen['citizenId']).randint(1, 250)}, {village}, Tal. {taluka}",
         )
         session.add(resident)
         counts["residents"] += 1
@@ -78,3 +81,32 @@ def seed(session, citizens: list[dict]) -> dict:
                 ))
                 counts["income_certificates"] += 1
     return counts
+
+
+def seed_demo(session, _citizens=None) -> dict:
+    """Curated public-demo citizens (app.seeds.demo_citizens), idempotent."""
+    from app.seeds.demo_citizens import demo_records
+    added = 0
+    for index, (citizen, spec) in enumerate(demo_records("revenue"), start=1):
+        if session.query(ResidentIndex).filter_by(citizen_ref=citizen["citizenId"]).first():
+            continue
+        resident_id = f"REV-DEMO-RES-{index:03d}"
+        session.add(ResidentIndex(
+            resident_id=resident_id, citizen_ref=citizen["citizenId"], full_name=spec.get("name", citizen["name"]),
+            dob=spec.get("dob", citizen["dob"]), mobile=spec.get("phone", citizen["phone"]),
+            taluka=citizen["district"], village=None, address_line=spec.get("address"),
+        ))
+        session.flush()
+        if spec.get("domicile"):
+            issued = spec["domicile"] == "ISSUED"
+            session.add(DomicileCertificate(
+                certificate_id=f"REV-DEMO-DOM-{index:03d}", resident_id=resident_id, state="Maharashtra",
+                issued_on="2024-06-10" if issued else None, valid_until="2034-06-09" if issued else None, status=spec["domicile"],
+            ))
+        if spec.get("incomeStatus"):
+            session.add(IncomeCertificate(
+                certificate_id=f"REV-DEMO-INC-{index:03d}", resident_id=resident_id,
+                annual_income=spec.get("income"), financial_year="2025-2026", status=spec["incomeStatus"],
+            ))
+        added += 1
+    return {"demoCitizens": added}

@@ -5,52 +5,25 @@ import Navbar from './Navbar';
 
 const CITIZEN = { role: 'CITIZEN', userId: 'SYN-CIT-00001', citizenId: 'SYN-CIT-00001', name: 'Amit Kale' };
 
-const DEMO_CITIZENS = [
-  { citizenId: 'SYN-CIT-00001', name: 'Amit Kale', persona: 'JOBSEEKER', district: 'Pune' },
-  { citizenId: 'SYN-CIT-00002', name: 'Neha Kale', persona: 'FARMER', district: 'Akola' },
-  { citizenId: 'SYN-CIT-00003', name: 'Manisha Gawde', persona: 'BUSINESS_OWNER', district: 'Satara' },
-];
-
-describe('Navbar demo citizen switcher', () => {
-  it('does not render the switcher when the backend returns no demo citizens', () => {
-    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
-    expect(screen.queryByLabelText('Switch demo citizen')).not.toBeInTheDocument();
-    expect(screen.queryByText('DEMO')).not.toBeInTheDocument();
+describe('Navbar production presentation', () => {
+  it('shows no demo/prototype controls or wording for any role', () => {
+    for (const citizen of [CITIZEN, { role: 'OFFICER', userId: 'OFFICER_MH_01', name: 'Officer' }, { role: 'ADMIN', userId: 'ADMIN_MH_01', name: 'Admin' }]) {
+      const { container, unmount } = render(<Navbar page="dashboard" setPage={() => {}} citizen={citizen} notifications={[]} />);
+      expect(container.textContent).not.toMatch(/demo|prototype|SIH|hackathon/i);
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+      unmount();
+    }
   });
 
-  it('renders a clearly labeled DEMO switcher populated from the backend-provided list, not a hardcoded one', () => {
-    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} demoCitizens={DEMO_CITIZENS} onDemoSwitch={vi.fn()} />);
-    expect(screen.getByText('DEMO')).toBeInTheDocument();
-    const select = screen.getByLabelText('Switch demo citizen');
-    const options = Array.from(select.querySelectorAll('option')).map(o => o.textContent);
-    expect(options.some(text => text.includes('Neha Kale'))).toBe(true);
-    expect(options.some(text => text.includes('Manisha Gawde'))).toBe(true);
-  });
-
-  it('the currently signed-in citizen cannot re-select themselves', () => {
-    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} demoCitizens={DEMO_CITIZENS} onDemoSwitch={vi.fn()} />);
-    const select = screen.getByLabelText('Switch demo citizen');
-    const ownOption = Array.from(select.querySelectorAll('option')).find(o => o.value === 'SYN-CIT-00001');
-    expect(ownOption.disabled).toBe(true);
-  });
-
-  it('selecting a different citizen calls onDemoSwitch with that real citizen id', async () => {
-    const onDemoSwitch = vi.fn().mockResolvedValue(undefined);
-    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} demoCitizens={DEMO_CITIZENS} onDemoSwitch={onDemoSwitch} />);
-    const user = userEvent.setup();
-    await user.selectOptions(screen.getByLabelText('Switch demo citizen'), 'SYN-CIT-00002');
-    expect(onDemoSwitch).toHaveBeenCalledWith('SYN-CIT-00002');
-  });
-
-  it('never renders the switcher for a non-citizen role', () => {
-    render(<Navbar page="officer" setPage={() => {}} citizen={{ role: 'OFFICER', userId: 'OFFICER_MH_01', name: 'Officer' }} demoCitizens={DEMO_CITIZENS} onDemoSwitch={vi.fn()} />);
-    expect(screen.queryByLabelText('Switch demo citizen')).not.toBeInTheDocument();
+  it('marks the current page for assistive technology', () => {
+    render(<Navbar page="schemes" setPage={() => {}} citizen={CITIZEN} notifications={[]} />);
+    expect(screen.getByRole('button', { name: 'Schemes' })).toHaveAttribute('aria-current', 'page');
   });
 });
 
 describe('Navbar notifications entry (Phase 6G3 Task 2)', () => {
   it('has exactly one Notifications entry, and no separate bell/popup', () => {
-    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={[]} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={[]} />);
     expect(screen.getAllByText('Notifications')).toHaveLength(1);
     expect(document.querySelector('.notification-panel')).not.toBeInTheDocument();
     expect(document.querySelector('.notification-wrap')).not.toBeInTheDocument();
@@ -61,20 +34,20 @@ describe('Navbar notifications entry (Phase 6G3 Task 2)', () => {
       { notificationId: 'CN-1', read: false, title: 'Action needed', message: 'x', createdAt: '2026-09-23T00:00:00Z' },
       { notificationId: 'CN-2', read: true, title: 'Document verified', message: 'y', createdAt: '2026-09-23T00:00:00Z' },
     ];
-    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={notifications} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={notifications} />);
     const navItem = screen.getByRole('button', { name: /Notifications/ });
     expect(navItem).toHaveTextContent('1');
   });
 
   it('shows no badge when every notification is read', () => {
     const notifications = [{ notificationId: 'CN-1', read: true, title: 'Document verified', message: 'y', createdAt: '2026-09-23T00:00:00Z' }];
-    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={notifications} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={notifications} />);
     expect(document.querySelector('.nav-notification-badge')).not.toBeInTheDocument();
   });
 
   it('clicking the Notifications nav item navigates to the notifications page', async () => {
     const setPage = vi.fn();
-    render(<Navbar page="dashboard" setPage={setPage} citizen={CITIZEN} notifications={[]} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    render(<Navbar page="dashboard" setPage={setPage} citizen={CITIZEN} notifications={[]} />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Notifications' }));
     expect(setPage).toHaveBeenCalledWith('notificationsPage');
@@ -87,7 +60,7 @@ describe('Navbar Admin navigation (final Admin portal structure)', () => {
   it('shows the complete Admin navigation in order', () => {
     render(<Navbar page="adminDashboard" setPage={() => {}} citizen={ADMIN} notifications={[]} onNotificationSelect={vi.fn()} />);
     const labels = Array.from(document.querySelectorAll('.navlinks button')).map(b => b.textContent);
-    expect(labels).toEqual(['Dashboard', 'Applications', 'Providers', 'Analytics', 'Schemes', 'Alerts', 'Audit', 'Profile']);
+    expect(labels).toEqual(['Overview', 'Applications', 'Providers', 'Activity', 'Analytics', 'Schemes', 'Incidents', 'Audit', 'Profile']);
   });
 
   it('highlights the parent section while viewing a detail page', () => {
@@ -110,8 +83,8 @@ describe('Navbar Admin navigation (final Admin portal structure)', () => {
   });
 
   it('never shows Admin sections to citizens', () => {
-    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={[]} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
-    for (const label of ['Analytics', 'Providers', 'Alerts', 'Audit']) {
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={[]} />);
+    for (const label of ['Analytics', 'Providers', 'Incidents', 'Audit']) {
       expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument();
     }
   });
@@ -160,7 +133,7 @@ describe('Navbar Officer/Admin notification bell (regression fix)', () => {
   });
 
   it('Citizens still never render the bell popup, only Officer/Admin do', () => {
-    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={NOTIFICATIONS} onNotificationSelect={vi.fn()} demoCitizens={[]} onDemoSwitch={vi.fn()} />);
+    render(<Navbar page="dashboard" setPage={() => {}} citizen={CITIZEN} notifications={NOTIFICATIONS} onNotificationSelect={vi.fn()} />);
     expect(document.querySelector('.notification-wrap')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Notifications/ })).toHaveTextContent('1');
   });
@@ -172,5 +145,38 @@ describe('Navbar language switch when signed out', () => {
     render(<Navbar page="dashboard" setPage={() => {}} language="mr" onLanguageChange={onLanguageChange} />);
     await userEvent.click(screen.getByLabelText('Change language'));
     expect(onLanguageChange).toHaveBeenCalledWith('en');
+  });
+});
+
+describe('Navbar -- administrator notification bell', () => {
+  const ADMIN_USER = { userId: 'ADMIN_MH_01', name: 'Platform Administrator', role: 'ADMIN' };
+  const NOTES = [
+    { notificationId: 'NTF-1', type: 'PROVIDER_DOWN', title: 'Provider unavailable', message: 'Revenue is unavailable.', read: false, createdAt: new Date().toISOString(), target: { kind: 'incident', incidentId: 'INC-1' } },
+    { notificationId: 'NTF-2', type: 'FALLBACK_ACTIVATED', title: 'Authorized fallback used', message: 'Income verified by Social Welfare.', read: true, createdAt: new Date().toISOString(), target: { kind: 'application', applicationId: 'APP-1' } },
+  ];
+
+  it('shows the unread count, typed items with readable times, mark-all and opens what a notice is about', async () => {
+    const onNotificationSelect = vi.fn();
+    const onMarkAllRead = vi.fn();
+    const setPage = vi.fn();
+    render(<Navbar page="adminDashboard" setPage={setPage} citizen={ADMIN_USER} notifications={NOTES} onNotificationSelect={onNotificationSelect} onMarkAllRead={onMarkAllRead} />);
+    const user = userEvent.setup();
+    const bell = screen.getByRole('button', { name: 'Notifications' });
+    expect(bell).toHaveTextContent('1');
+    await user.click(bell);
+    expect(screen.getAllByText(/^Today, /).length).toBe(2);
+    await user.click(screen.getByRole('button', { name: /Mark all as read/ }));
+    expect(onMarkAllRead).toHaveBeenCalled();
+    await user.click(screen.getByText('Provider unavailable'));
+    expect(onNotificationSelect).toHaveBeenCalledWith(NOTES[0]);
+    await user.click(bell);
+    await user.click(screen.getByRole('button', { name: 'View all notifications' }));
+    expect(setPage).toHaveBeenCalledWith('notificationsPage');
+  });
+
+  it('never shows a demo badge in the navigation', () => {
+    render(<Navbar page="dashboard" setPage={vi.fn()} citizen={{ citizenId: 'DEMO-CIT-001', name: 'Rahul Kumar', role: 'CITIZEN', isPublicDemo: true }} notifications={[]} />);
+    expect(screen.queryByText(/Demo account/i)).not.toBeInTheDocument();
+    expect(document.querySelector('.demo-badge')).toBeNull();
   });
 });
